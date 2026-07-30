@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: Create GitHub release
+        if: github.event_name == 'push'
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build release snapshot
+        if: github.event_name == 'workflow_dispatch'
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Build npm packages
+        run: node scripts/build-npm-packages.mjs dist
+
+      - name: Validate npm packages
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for package in \
+            dist/npm/knowbrew-darwin-x64 \
+            dist/npm/knowbrew-darwin-arm64 \
+            dist/npm/knowbrew-linux-x64 \
+            dist/npm/knowbrew-linux-arm64 \
+            dist/npm/knowbrew-win32-x64 \
+            dist/npm/knowbrew-win32-arm64 \
+            dist/npm/knowbrew
+          do
+            npm pack --dry-run "$package"
+          done
+
+      - name: Publish platform packages
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for package in \
+            dist/npm/knowbrew-darwin-x64 \
+            dist/npm/knowbrew-darwin-arm64 \
+            dist/npm/knowbrew-linux-x64 \
+            dist/npm/knowbrew-linux-arm64 \
+            dist/npm/knowbrew-win32-x64 \
+            dist/npm/knowbrew-win32-arm64
+          do
+            npm publish "$package" --access public --provenance
+          done
+
+      - name: Publish main npm package
+        if: github.event_name == 'push'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish dist/npm/knowbrew --access public --provenance
