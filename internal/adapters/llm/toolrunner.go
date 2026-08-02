@@ -113,6 +113,7 @@ func (runner *ToolRunner) Run(
 				return RunResult{Usage: usage}, err
 			}
 			command := exec.CommandContext(runContext, commandArgs[0], commandArgs[1:]...)
+			configureCommandTermination(command)
 			command.Dir = runner.WorkDir
 			command.Env = invocationEnvironment(
 				os.Environ(), runner.Config.Path, feedstockID, assertionFromContext(ctx), invocationID,

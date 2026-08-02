@@ -430,8 +430,8 @@ func validateKnowledgeDraft(subject string, draft KnowledgeDraft, vocabulary Voc
 	if strings.TrimSpace(draft.Statement) == "" {
 		return errors.New("knowledge statement is required")
 	}
-	if strings.ContainsAny(draft.Statement, "\r\n") {
-		return errors.New("knowledge statement must be one line")
+	if strings.Contains(draft.Statement, "\r") {
+		return errors.New("knowledge statement must use LF line endings")
 	}
 	if draft.Trigger != "" && draft.Trigger != "always" {
 		return fmt.Errorf("unsupported trigger %q", draft.Trigger)

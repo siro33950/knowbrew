@@ -151,6 +151,7 @@ func (runner *CommandRunner) Run(
 	default:
 		return RunResult{}, fmt.Errorf("unsupported command LLM backend %q", runner.Config.LLM.Backend)
 	}
+	configureCommandTermination(command)
 	command.Dir = runner.WorkDir
 	invocationID := newInvocationID()
 	defer invocation.Cleanup(runner.Config.Root, invocationID)

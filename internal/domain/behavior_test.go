@@ -147,6 +147,43 @@ func TestResolveKnowledgeUsesSourceTimeForConflicts(t *testing.T) {
 	}
 }
 
+func TestResolveKnowledgeAcceptsStructuredComplement(t *testing.T) {
+	vocabulary := NewVocabulary([]MasterEntry{{Name: "property"}}, []MasterEntry{{Name: "knowbrew"}})
+	base := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	originalSource := annotatedFeedstock("fs-original", base)
+	originalAssertion := assertionFor(t, originalSource.ID, "The API accepts effort.", vocabulary)
+	created, err := ResolveKnowledge(
+		originalSource, originalAssertion, Resolution{Kind: ResolutionNew}, nil, vocabulary, base,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := created.Changed[created.KnowledgeID]
+	additionalSource := annotatedFeedstock("fs-additional", base.Add(time.Hour))
+	additionalAssertion := assertionFor(t, additionalSource.ID, "Ollama ignores effort.", vocabulary)
+	statement := "Effort handling depends on the backend.\n\n- `api`: accepts effort\n- `ollama`: ignores effort"
+	merged, err := ResolveKnowledge(
+		additionalSource,
+		additionalAssertion,
+		Resolution{
+			Kind:         ResolutionComplements,
+			KnowledgeIDs: []string{original.Knowledge.ID},
+			Draft: &KnowledgeDraft{
+				Type: "property", Subject: "knowbrew", Statement: statement,
+			},
+		},
+		map[string]KnowledgeRecord{original.Knowledge.ID: original},
+		vocabulary,
+		base.Add(2*time.Hour),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := merged.Changed[merged.KnowledgeID].Statement; got != statement {
+		t.Fatalf("statement = %q, want %q", got, statement)
+	}
+}
+
 func TestReconcileKnowledgeLifecycleFollowsHumanStatusChanges(t *testing.T) {
 	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
 	predecessor := Knowledge{

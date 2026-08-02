@@ -10,8 +10,13 @@ func Encode(statement, rationale string) (string, error) {
 	if statement == "" {
 		return "", errors.New("statement is required")
 	}
-	if strings.ContainsAny(statement, "\r\n") {
-		return "", errors.New("statement must be one line")
+	if strings.Contains(statement, "\r") {
+		return "", errors.New("statement must use LF line endings")
+	}
+	for _, line := range strings.Split(statement, "\n") {
+		if strings.TrimSpace(line) == "## Rationale" {
+			return "", errors.New("statement must not contain the Rationale heading")
+		}
 	}
 	body := "## Claim\n\n" + statement
 	if rationale = strings.TrimSpace(rationale); rationale != "" {

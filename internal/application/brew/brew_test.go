@@ -482,6 +482,12 @@ func TestAssertionPromptIncludesSourceContextAndSemanticSubjectWithoutAliases(t 
 		"Verify statement and rationale independently",
 		"merely say the user requested, specified, confirmed, or explicitly stated",
 		"same type, subject, and statement with an empty rationale",
+		"A Knowledge unit answers one independently maintainable question",
+		"peer item on the same mapping axis",
+		"choose new even when it is closely related",
+		"short lead sentence followed by a Markdown bullet list",
+		"never serialize peer items into one sentence by chaining conjunctions",
+		"do not use it to repeat the statement, mapping, or source history",
 	} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("prompt missing %q:\n%s", required, prompt)
