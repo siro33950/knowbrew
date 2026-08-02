@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/siro33950/knowbrew/internal/cli"
+	"github.com/siro33950/knowbrew/internal/adapters/cli"
 )
 
 func main() {

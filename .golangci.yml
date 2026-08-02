@@ -1,0 +1,48 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - depguard
+  settings:
+    depguard:
+      rules:
+        domain:
+          files:
+            - "**/internal/domain/*.go"
+            - "**/internal/domain/**/*.go"
+            - "!$test"
+          deny:
+            - pkg: github.com/siro33950/knowbrew
+              desc: domain must not depend on other knowbrew packages
+        application:
+          list-mode: lax
+          files:
+            - "**/internal/application/*.go"
+            - "**/internal/application/**/*.go"
+            - "!$test"
+          allow:
+            - github.com/siro33950/knowbrew/internal/application
+            - github.com/siro33950/knowbrew/internal/domain
+          deny:
+            - pkg: github.com/siro33950/knowbrew
+              desc: application may depend only on application and domain packages
+        adapters:
+          files:
+            - "**/internal/adapters/*.go"
+            - "**/internal/adapters/**/*.go"
+            - "!$test"
+          deny:
+            - pkg: github.com/siro33950/knowbrew/cmd
+              desc: adapters must not depend on the composition root
+        command:
+          list-mode: lax
+          files:
+            - "**/cmd/*.go"
+            - "**/cmd/**/*.go"
+            - "!$test"
+          allow:
+            - github.com/siro33950/knowbrew/internal/adapters
+          deny:
+            - pkg: github.com/siro33950/knowbrew
+              desc: the composition root may depend only on adapters

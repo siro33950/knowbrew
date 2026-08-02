@@ -1,0 +1,87 @@
+package draw
+
+import (
+	"context"
+	"time"
+
+	"github.com/siro33950/knowbrew/internal/application/agent"
+	"github.com/siro33950/knowbrew/internal/application/diagnostic"
+	applicationsource "github.com/siro33950/knowbrew/internal/application/source"
+	"github.com/siro33950/knowbrew/internal/domain"
+)
+
+type Repository interface {
+	EnsureLayout() error
+	WithLock(context.Context, func() error) error
+	WriteFeedstock(domain.Feedstock) error
+	GetFeedstock(string) (domain.Feedstock, error)
+	ListFeedstocks() ([]domain.Feedstock, []diagnostic.Warning, error)
+	SummarizeFeedstock(string, string) error
+	AnnotateFeedstock(string, []domain.Assertion, time.Time) error
+	LoadMasters(string) ([]domain.MasterEntry, []diagnostic.Warning, error)
+	EnsureMaster(string, domain.MasterEntry) (bool, error)
+	KnowledgeTypes() ([]domain.MasterEntry, error)
+}
+
+type InvocationGuard interface {
+	ValidateFeedstock(string) error
+	Mutate(func() error) error
+}
+
+type ConfiguredSource = applicationsource.Configured
+type SourceFile = applicationsource.File
+type SourceGateway = applicationsource.Gateway
+type Options = applicationsource.Selection
+
+type Settings struct {
+	Concurrency     int
+	ContextTurns    int
+	MaxContextTurns int
+	Backend         string
+	Model           string
+	ConfigPath      string
+	Sources         []ConfiguredSource
+}
+
+type RunLock interface {
+	Lock(context.Context) (func() error, error)
+}
+
+type Progress interface {
+	Write([]byte) (int, error)
+	Start(string)
+	Update(string)
+	Complete(string)
+	Errorf(string, ...any)
+	Verbosef(string, ...any)
+}
+
+type Service struct {
+	Settings   Settings
+	Repository Repository
+	Sources    SourceGateway
+	Runner     agent.Runner
+	Progress   Progress
+	RunLock    RunLock
+}
+
+type unrestrictedInvocation struct{}
+
+func (unrestrictedInvocation) ValidateFeedstock(string) error   { return nil }
+func (unrestrictedInvocation) Mutate(change func() error) error { return change() }
+
+type silentProgress struct{}
+
+func (silentProgress) Write(data []byte) (int, error) { return len(data), nil }
+func (silentProgress) Start(string)                   {}
+func (silentProgress) Update(string)                  {}
+func (silentProgress) Complete(string)                {}
+func (silentProgress) Errorf(string, ...any)          {}
+func (silentProgress) Verbosef(string, ...any)        {}
+
+func (service Service) progress() Progress {
+	if service.Progress == nil {
+		return silentProgress{}
+	}
+	return service.Progress
+}
