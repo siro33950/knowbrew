@@ -27,7 +27,11 @@ func TestRealLLMEndToEndWhenConfigured(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), ".config"))
 	cfg := config.Config{
-		LLM: config.LLM{Backend: backend, Model: os.Getenv("KNOWBREW_E2E_MODEL")},
+		LLM: config.LLM{
+			Backend: backend, DrawModel: os.Getenv("KNOWBREW_E2E_MODEL"),
+			BrewModel: os.Getenv("KNOWBREW_E2E_MODEL"),
+		},
+		Draw: config.Draw{Concurrency: config.DefaultDrawConcurrency},
 	}
 	path, err := config.Save(root, cfg)
 	if err != nil {
@@ -48,8 +52,8 @@ func TestRealLLMEndToEndWhenConfigured(t *testing.T) {
 	if drawSummary.FeedstocksAnnotated == 0 {
 		t.Fatalf("draw summary = %#v", drawSummary)
 	}
-	if drawSummary.MasterAdded == 0 {
-		t.Fatalf("draw did not register the machine subject or proposed vocabulary: %#v", drawSummary)
+	if drawSummary.MastersAdded == 0 {
+		t.Fatalf("test source did not expose a repository subject: %#v", drawSummary)
 	}
 	brewSummary, err := brew.Run(ctx, cfg, runner, os.Stderr)
 	if err != nil {

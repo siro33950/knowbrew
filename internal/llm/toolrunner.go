@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/siro33950/knowbrew/internal/config"
@@ -22,7 +23,9 @@ type ToolRunner struct {
 	Executable string
 	WorkDir    string
 	Progress   io.Writer
+	Verbose    bool
 	Client     *http.Client
+	progressMu sync.Mutex
 }
 
 type chatMessage struct {
@@ -41,86 +44,112 @@ type toolCall struct {
 	} `json:"function"`
 }
 
-func NewToolRunner(cfg config.Config, executable, workDir string, progress io.Writer) *ToolRunner {
+func NewToolRunner(
+	cfg config.Config,
+	executable,
+	workDir string,
+	progress io.Writer,
+	verbose ...bool,
+) *ToolRunner {
 	return &ToolRunner{
 		Config: cfg, Executable: executable, WorkDir: workDir, Progress: progress,
-		Client: &http.Client{},
+		Verbose: len(verbose) > 0 && verbose[0], Client: &http.Client{},
 	}
 }
 
-func (runner *ToolRunner) Run(ctx context.Context, task Task, feedstockID, prompt string) error {
+func (runner *ToolRunner) Run(
+	ctx context.Context,
+	task Task,
+	feedstockID,
+	prompt string,
+) (RunResult, error) {
 	timeout, err := runner.Config.LLM.TimeoutDuration()
 	if err != nil {
-		return err
+		return RunResult{}, err
 	}
 	runContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	invocationID := newInvocationID()
 	defer invocation.Cleanup(runner.Config.Root, invocationID)
 	messages := []chatMessage{{Role: "system", Content: toolSystemPrompt(task)}, {Role: "user", Content: prompt}}
-	tools := toolSchemas(task)
+	typeNames, err := knowledgeTypeNames(runner.Config, task)
+	if err != nil {
+		return RunResult{}, err
+	}
+	tools := toolSchemas(task, typeNames)
+	schema := resultSchema(task, typeNames)
+	var usage Usage
 	for round := 0; round < 12; round++ {
-		message, err := runner.complete(runContext, messages, tools)
+		message, roundUsage, err := runner.complete(runContext, task, messages, tools, schema)
+		usage.Add(roundUsage)
 		if err != nil {
 			if errors.Is(runContext.Err(), context.DeadlineExceeded) {
-				return fmt.Errorf("%w after %s", ErrTimeout, timeout)
+				return RunResult{Usage: usage}, fmt.Errorf("%w after %s", ErrTimeout, timeout)
 			}
-			return err
+			return RunResult{Usage: usage}, err
 		}
 		messages = append(messages, message)
 		if len(message.ToolCalls) == 0 {
-			if task == TaskBrew {
-				return nil
+			output := json.RawMessage(strings.TrimSpace(message.Content))
+			if !json.Valid(output) {
+				return RunResult{Usage: usage}, errors.New("LLM returned invalid structured JSON")
 			}
-			return errors.New("LLM returned no annotation command")
-		}
-		mutations := 0
-		for _, call := range message.ToolCalls {
-			if isMutationTool(call.Function.Name) {
-				mutations++
+			reads, err := invocation.ReadStateForInvocation(runner.Config.Root, invocationID)
+			if err != nil {
+				return RunResult{Output: output, Usage: usage}, err
 			}
-		}
-		if task == TaskAnnotate && len(message.ToolCalls) != 1 {
-			return errors.New("LLM must issue exactly one feedstock annotation")
-		}
-		if mutations > 1 {
-			return errors.New("LLM must issue at most one knowledge mutation")
+			return RunResult{Output: output, Usage: usage, Reads: reads}, nil
 		}
 		for _, call := range message.ToolCalls {
 			if !toolAllowed(task, call.Function.Name) {
-				return fmt.Errorf("tool %q is not allowed for %s", call.Function.Name, task)
+				return RunResult{Usage: usage}, fmt.Errorf("tool %q is not allowed for %s", call.Function.Name, task)
 			}
 			var arguments map[string]any
 			if err := decodeToolArguments(call.Function.Arguments, &arguments); err != nil {
-				return fmt.Errorf("decode tool arguments: %w", err)
+				return RunResult{Usage: usage}, fmt.Errorf("decode tool arguments: %w", err)
 			}
 			commandArgs, err := commandForTool(runner.Executable, call.Function.Name, arguments)
 			if err != nil {
-				return err
+				return RunResult{Usage: usage}, err
 			}
 			command := exec.CommandContext(runContext, commandArgs[0], commandArgs[1:]...)
 			command.Dir = runner.WorkDir
-			command.Env = invocationEnvironment(os.Environ(), runner.Config.Path, feedstockID, invocationID)
+			command.Env = invocationEnvironment(
+				os.Environ(), runner.Config.Path, feedstockID, assertionFromContext(ctx), invocationID,
+			)
 			output, commandErr := command.CombinedOutput()
 			result := string(output)
 			if commandErr != nil {
 				result = fmt.Sprintf("error: %v\n%s", commandErr, result)
 			}
-			if runner.Progress != nil && strings.TrimSpace(result) != "" {
+			if runner.Verbose && runner.Progress != nil && strings.TrimSpace(result) != "" {
+				runner.progressMu.Lock()
 				fmt.Fprintln(runner.Progress, strings.TrimSpace(result))
-			}
-			if commandErr == nil && isMutationTool(call.Function.Name) {
-				return nil
+				runner.progressMu.Unlock()
 			}
 			if errors.Is(runContext.Err(), context.DeadlineExceeded) {
-				return fmt.Errorf("%w after %s: %s", ErrTimeout, timeout, strings.TrimSpace(result))
+				diagnostic := compactDiagnostic(result, "")
+				if diagnostic == "" {
+					return RunResult{Usage: usage}, fmt.Errorf("%w after %s", ErrTimeout, timeout)
+				}
+				return RunResult{Usage: usage}, fmt.Errorf("%w after %s: %s", ErrTimeout, timeout, diagnostic)
 			}
 			messages = append(messages, chatMessage{
 				Role: "tool", ToolCallID: call.ID, Content: result,
 			})
 		}
 	}
-	return errors.New("LLM exceeded the tool-call retry limit")
+	return RunResult{Usage: usage}, errors.New("LLM exceeded the tool-call retry limit")
+}
+
+func (runner *ToolRunner) RunWithUsage(
+	ctx context.Context,
+	task Task,
+	feedstockID,
+	prompt string,
+) (Usage, error) {
+	result, err := runner.Run(ctx, task, feedstockID, prompt)
+	return result.Usage, err
 }
 
 func decodeToolArguments(raw json.RawMessage, target *map[string]any) error {
@@ -131,15 +160,37 @@ func decodeToolArguments(raw json.RawMessage, target *map[string]any) error {
 	return json.Unmarshal(raw, target)
 }
 
-func (runner *ToolRunner) complete(ctx context.Context, messages []chatMessage, tools []map[string]any) (chatMessage, error) {
-	body := map[string]any{
-		"model":    runner.Config.LLM.Model,
-		"messages": messages,
-		"tools":    tools,
-		"stream":   false,
+func (runner *ToolRunner) complete(
+	ctx context.Context,
+	task Task,
+	messages []chatMessage,
+	tools []map[string]any,
+	schema map[string]any,
+) (chatMessage, Usage, error) {
+	model, err := modelForTask(runner.Config, task)
+	if err != nil {
+		return chatMessage{}, Usage{}, err
+	}
+	effort, err := effortForTask(runner.Config, task)
+	if err != nil {
+		return chatMessage{}, Usage{}, err
+	}
+	body := map[string]any{"model": model, "messages": messages, "stream": false}
+	if len(tools) > 0 {
+		body["tools"] = tools
+	}
+	if runner.Config.LLM.Backend == "api" && strings.TrimSpace(effort) != "" {
+		body["reasoning_effort"] = effort
 	}
 	if runner.Config.LLM.Backend == "ollama" {
+		body["format"] = schema
 		return runner.completeOllama(ctx, body)
+	}
+	body["response_format"] = map[string]any{
+		"type": "json_schema",
+		"json_schema": map[string]any{
+			"name": "knowbrew_result", "strict": false, "schema": schema,
+		},
 	}
 	endpoint := strings.TrimSpace(os.Getenv(config.APIURLEnvironment))
 	if endpoint == "" {
@@ -149,33 +200,51 @@ func (runner *ToolRunner) complete(ctx context.Context, messages []chatMessage, 
 		Choices []struct {
 			Message chatMessage `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
+			PromptDetails    struct {
+				CachedTokens int64 `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+		} `json:"usage"`
 		Error any `json:"error"`
 	}
 	if err := runner.post(ctx, endpoint, body, &response, os.Getenv(config.APITokenEnvironment)); err != nil {
-		return chatMessage{}, err
+		return chatMessage{}, Usage{}, err
 	}
+	usage := usageFromOpenAI(
+		response.Usage.PromptTokens,
+		response.Usage.CompletionTokens,
+		response.Usage.PromptDetails.CachedTokens,
+	)
 	if len(response.Choices) == 0 {
-		return chatMessage{}, errors.New("API returned no choices")
+		return chatMessage{}, usage, errors.New("API returned no choices")
 	}
-	return response.Choices[0].Message, nil
+	return response.Choices[0].Message, usage, nil
 }
 
-func (runner *ToolRunner) completeOllama(ctx context.Context, body map[string]any) (chatMessage, error) {
+func (runner *ToolRunner) completeOllama(
+	ctx context.Context,
+	body map[string]any,
+) (chatMessage, Usage, error) {
 	host := strings.TrimRight(strings.TrimSpace(os.Getenv("OLLAMA_HOST")), "/")
 	if host == "" {
 		host = "http://127.0.0.1:11434"
 	}
 	var response struct {
-		Message chatMessage `json:"message"`
-		Error   string      `json:"error"`
+		Message         chatMessage `json:"message"`
+		Error           string      `json:"error"`
+		PromptEvalCount int64       `json:"prompt_eval_count"`
+		EvalCount       int64       `json:"eval_count"`
 	}
 	if err := runner.post(ctx, host+"/api/chat", body, &response, ""); err != nil {
-		return chatMessage{}, err
+		return chatMessage{}, Usage{}, err
 	}
+	usage := Usage{InputTokens: response.PromptEvalCount, OutputTokens: response.EvalCount}
 	if response.Error != "" {
-		return chatMessage{}, errors.New(response.Error)
+		return chatMessage{}, usage, errors.New(response.Error)
 	}
-	return response.Message, nil
+	return response.Message, usage, nil
 }
 
 func (runner *ToolRunner) post(ctx context.Context, endpoint string, body any, target any, token string) error {
@@ -210,54 +279,53 @@ func (runner *ToolRunner) post(ctx context.Context, endpoint string, body any, t
 }
 
 func toolSystemPrompt(task Task) string {
-	if task == TaskAnnotate {
-		return "Classify the supplied user feedstock. Use feedstock_annotate. Do not return the classification as prose."
+	if task == TaskSummarize {
+		return "Summarize exactly the target user input and target agent response supplied in the user prompt. Return only the required structured result. Do not infer from surrounding turns."
 	}
-	return "Use the read tools to inspect context, then choose exactly one knowledge mutation or make no mutation for NOOP. Never edit files directly."
+	if task == TaskAnnotate {
+		return "Extract zero or more atomic assertions from the target user input and prior turns supplied in the user prompt. If an unresolved reference affects a possible assertion, feedstock_context may be called once for bounded earlier context. Return only the required structured result. Every assertion must contain an explicit subject string; use an empty string when none applies."
+	}
+	return "Verify exactly one assertion against its supplied source, load its subject catalog, inspect every plausible Knowledge record in full, then return exactly one semantic resolution. The parent process handles time, lifecycle, and writes. Never edit files directly."
 }
 
-func toolSchemas(task Task) []map[string]any {
+func toolSchemas(task Task, typeNames []string) []map[string]any {
+	if task == TaskSummarize {
+		return nil
+	}
 	if task == TaskAnnotate {
-		return []map[string]any{toolDefinition("feedstock_annotate", "Finalize one feedstock classification", map[string]any{
-			"type":     "object",
-			"required": []string{"feedstock_id", "summary", "speech_acts", "topics", "subjects"},
-			"properties": map[string]any{
-				"feedstock_id": map[string]any{"type": "string"},
-				"summary":      map[string]any{"type": "string"},
-				"speech_acts":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"topics":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"subjects":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"new_topics":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "name=one-line definition"},
-				"new_subjects": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "name=one-line definition"},
-			},
-		})}
+		return []map[string]any{
+			toolDefinition("feedstock_context", "Load the configured maximum source context for one unresolved target reference", map[string]any{
+				"type":     "object",
+				"required": []string{"feedstock_id"},
+				"properties": map[string]any{
+					"feedstock_id": map[string]any{"type": "string"},
+				},
+			}),
+		}
 	}
 	return []map[string]any{
-		toolDefinition("knowledge_search", "Search active or pending knowledge", knowledgeSearchSchema()),
-		toolDefinition("feedstock_search", "Search immutable feedstock summaries", feedstockSearchSchema()),
-		toolDefinition("show", "Read selected feedstock originals", showSchema()),
-		toolDefinition("knowledge_create", "Create one pending knowledge record", knowledgeCreateSchema()),
-		toolDefinition("knowledge_add_source", "Add evidence to an existing knowledge", sourceSchema()),
-		toolDefinition("knowledge_invalidate", "Invalidate a contradicted knowledge", sourceSchema()),
+		toolDefinition("knowledge_catalog", "List compact Knowledge semantics for the assertion subject", map[string]any{
+			"type": "object", "required": []string{"subject"},
+			"properties": map[string]any{"subject": map[string]any{"type": "string"}},
+		}),
+		toolDefinition("knowledge_show", "Read full semantic content for selected Knowledge IDs", map[string]any{
+			"type": "object", "required": []string{"knowledge_ids"},
+			"properties": map[string]any{"knowledge_ids": map[string]any{
+				"type": "array", "minItems": 1, "items": map[string]any{"type": "string"},
+			}},
+		}),
 	}
 }
 
 func toolAllowed(task Task, name string) bool {
-	if task == TaskAnnotate {
-		return name == "feedstock_annotate"
-	}
-	switch name {
-	case "knowledge_search", "feedstock_search", "show",
-		"knowledge_create", "knowledge_add_source", "knowledge_invalidate":
-		return true
-	default:
+	if task == TaskSummarize {
 		return false
 	}
-}
-
-func isMutationTool(name string) bool {
+	if task == TaskAnnotate {
+		return name == "feedstock_context"
+	}
 	switch name {
-	case "feedstock_annotate", "knowledge_create", "knowledge_add_source", "knowledge_invalidate":
+	case "knowledge_catalog", "knowledge_show":
 		return true
 	default:
 		return false
@@ -269,85 +337,6 @@ func toolDefinition(name, description string, parameters map[string]any) map[str
 		"type": "function",
 		"function": map[string]any{
 			"name": name, "description": description, "parameters": parameters,
-		},
-	}
-}
-
-func knowledgeCreateSchema() map[string]any {
-	return map[string]any{
-		"type":     "object",
-		"required": []string{"slug", "applies_when", "body", "sources", "topics"},
-		"properties": map[string]any{
-			"slug":         map[string]any{"type": "string"},
-			"applies_when": map[string]any{"type": "string"},
-			"body":         map[string]any{"type": "string"},
-			"sources":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-			"topics":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-			"project":      map[string]any{"type": "string"},
-			"trigger":      map[string]any{"type": "string"},
-			"new_topics": map[string]any{
-				"type": "array", "items": map[string]any{"type": "string"},
-				"description": "Unknown topics as name=one-line definition",
-			},
-			"new_subjects": map[string]any{
-				"type": "array", "maxItems": 1, "items": map[string]any{"type": "string"},
-				"description": "The unknown project subject as name=one-line definition",
-			},
-		},
-	}
-}
-
-func commonSearchProperties() map[string]any {
-	return map[string]any{
-		"keywords":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-		"subject":    map[string]any{"type": "string"},
-		"topic":      map[string]any{"type": "string"},
-		"since":      map[string]any{"type": "string"},
-		"until":      map[string]any{"type": "string"},
-		"limit":      map[string]any{"type": "integer", "minimum": 1},
-		"max_tokens": map[string]any{"type": "integer", "minimum": 1},
-	}
-}
-
-func knowledgeSearchSchema() map[string]any {
-	properties := commonSearchProperties()
-	properties["include_pending"] = map[string]any{"type": "boolean"}
-	return map[string]any{
-		"type":       "object",
-		"properties": properties,
-	}
-}
-
-func feedstockSearchSchema() map[string]any {
-	properties := commonSearchProperties()
-	properties["session"] = map[string]any{"type": "string"}
-	properties["agent"] = map[string]any{"type": "string"}
-	properties["last"] = map[string]any{"type": "integer", "minimum": 1}
-	return map[string]any{
-		"type":       "object",
-		"properties": properties,
-	}
-}
-
-func showSchema() map[string]any {
-	return map[string]any{
-		"type":     "object",
-		"required": []string{"feedstock_ids"},
-		"properties": map[string]any{
-			"feedstock_ids": map[string]any{
-				"type": "array", "minItems": 1, "items": map[string]any{"type": "string"},
-			},
-		},
-	}
-}
-
-func sourceSchema() map[string]any {
-	return map[string]any{
-		"type":     "object",
-		"required": []string{"slug", "sources"},
-		"properties": map[string]any{
-			"slug":    map[string]any{"type": "string"},
-			"sources": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 		},
 	}
 }

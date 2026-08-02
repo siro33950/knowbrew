@@ -2,6 +2,9 @@ package draw
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,47 +17,43 @@ import (
 
 type Annotation struct {
 	FeedstockID string
-	Summary     string
-	SpeechActs  []string
-	Topics      []string
-	Subjects    []string
-	NewTopics   []string
-	NewSubjects []string
+	Assertions  []AssertionInput
+}
+
+type AssertionInput struct {
+	Type      domain.KnowledgeType `json:"type"`
+	Subject   string               `json:"subject"`
+	Statement string               `json:"statement"`
+	Rationale string               `json:"rationale,omitempty"`
+	Trigger   string               `json:"trigger,omitempty"`
 }
 
 func Annotate(ctx context.Context, dataStore *store.Store, annotation Annotation) (int, error) {
 	if err := invocation.ValidateFeedstock(annotation.FeedstockID); err != nil {
 		return 0, err
 	}
-	if err := ValidateSpeechActs(annotation.SpeechActs); err != nil {
-		return 0, err
-	}
-	if strings.TrimSpace(annotation.Summary) == "" {
-		return 0, fmt.Errorf("summary is required")
-	}
-	candidate, err := dataStore.ReadCandidate(annotation.FeedstockID)
+	feedstock, _, err := dataStore.FindFeedstock(annotation.FeedstockID)
 	if err != nil {
-		return 0, fmt.Errorf("read pending feedstock: %w", err)
+		return 0, fmt.Errorf("read feedstock: %w", err)
 	}
-	definitions, err := parseDefinitions(annotation.NewTopics)
-	if err != nil {
-		return 0, fmt.Errorf("new topic: %w", err)
+	if feedstock.AnnotatedAt != nil {
+		return 0, fmt.Errorf("feedstock %s is already annotated", annotation.FeedstockID)
 	}
-	subjectDefinitions, err := parseDefinitions(annotation.NewSubjects)
-	if err != nil {
-		return 0, fmt.Errorf("new subject: %w", err)
+	if strings.TrimSpace(feedstock.Summary) == "" {
+		return 0, fmt.Errorf("feedstock %s must be summarized before annotation", annotation.FeedstockID)
 	}
-	for name := range definitions {
-		annotation.Topics = append(annotation.Topics, name)
-	}
-	for name := range subjectDefinitions {
-		annotation.Subjects = append(annotation.Subjects, name)
-	}
-	annotation.Topics = domain.UniqueSorted(annotation.Topics)
-	annotation.Subjects = domain.UniqueSorted(annotation.Subjects)
 	now := time.Now().UTC()
-	added := 0
 	err = dataStore.WithLock(ctx, func() error {
+		current, _, err := dataStore.FindFeedstock(annotation.FeedstockID)
+		if err != nil {
+			return err
+		}
+		if current.AnnotatedAt != nil {
+			return fmt.Errorf("feedstock %s is already annotated", annotation.FeedstockID)
+		}
+		if strings.TrimSpace(current.Summary) == "" {
+			return fmt.Errorf("feedstock %s must be summarized before annotation", annotation.FeedstockID)
+		}
 		claim, err := invocation.Claim(dataStore.Root)
 		if err != nil {
 			return err
@@ -65,104 +64,149 @@ func Annotate(ctx context.Context, dataStore *store.Store, annotation Annotation
 				invocation.Rollback(claim)
 			}
 		}()
-		topicEntries, _, err := dataStore.LoadMasters("topics")
-		if err != nil {
-			return err
-		}
 		subjectEntries, _, err := dataStore.LoadMasters("subjects")
 		if err != nil {
 			return err
 		}
-		knownTopics := make(map[string]domain.Status, len(topicEntries))
-		for _, entry := range topicEntries {
-			knownTopics[entry.Name] = entry.Status
-		}
-		knownSubjects := make(map[string]domain.Status, len(subjectEntries))
+		knownSubjects := make(map[string]struct{}, len(subjectEntries))
 		for _, entry := range subjectEntries {
-			knownSubjects[entry.Name] = entry.Status
+			knownSubjects[entry.Name] = struct{}{}
 		}
-		for _, topic := range domain.UniqueSorted(annotation.Topics) {
-			status, exists := knownTopics[topic]
-			if exists && status == domain.StatusInvalidated {
-				return fmt.Errorf("topic %s is invalidated", topic)
-			}
-			if !exists {
-				definition := definitions[topic]
-				if definition == "" {
-					definition = "Pending definition proposed during feedstock classification."
-				}
-				created, err := dataStore.EnsureMaster("topics", domain.MasterEntry{
-					Name: topic, Definition: definition, Status: domain.StatusPending,
-					Created: now, Updated: now,
-				})
-				if err != nil {
-					return err
-				}
-				if created {
-					added++
-				}
-			}
-		}
-		for _, subject := range domain.UniqueSorted(annotation.Subjects) {
-			status, exists := knownSubjects[subject]
-			if exists && status == domain.StatusInvalidated {
-				return fmt.Errorf("subject %s is invalidated", subject)
-			}
-			if !exists {
-				definition := subjectDefinitions[subject]
-				if definition == "" {
-					definition = "Pending definition proposed during feedstock classification."
-				}
-				created, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{
-					Name: subject, Definition: definition, Status: domain.StatusPending,
-					Created: now, Updated: now,
-				})
-				if err != nil {
-					return err
-				}
-				if created {
-					added++
-				}
-			}
-		}
-		feedstock := domain.Feedstock{
-			Schema: domain.SchemaVersion, ID: candidate.ID, Session: candidate.Session,
-			Timestamp: candidate.Timestamp, Agent: candidate.Agent, CWD: candidate.CWD,
-			Repo: candidate.Repo, Branch: candidate.Branch, Commands: candidate.Commands,
-			FilesChanged: candidate.FilesChanged, Errors: candidate.Errors,
-			UserQuote: candidate.UserQuote, SpeechActs: annotation.SpeechActs,
-			Topics:   annotation.Topics,
-			Subjects: domain.UniqueSorted(append(candidate.Subjects, annotation.Subjects...)),
-			Summary:  annotation.Summary,
-		}
-		if len(feedstock.Subjects) == 0 {
-			return errors.New("at least one subject is required")
-		}
-		if err := dataStore.WriteFeedstock(feedstock); err != nil {
+		assertions, err := buildAssertions(
+			dataStore,
+			annotation.FeedstockID,
+			annotation.Assertions,
+			knownSubjects,
+		)
+		if err != nil {
 			return err
 		}
-		if err := dataStore.RemoveCandidate(annotation.FeedstockID); err != nil {
+		if err := dataStore.AnnotateFeedstock(
+			annotation.FeedstockID,
+			assertions,
+			now,
+		); err != nil {
 			return err
 		}
 		succeeded = true
 		return nil
 	})
-	return added, err
+	return 0, err
 }
 
-func parseDefinitions(values []string) (map[string]string, error) {
-	definitions := map[string]string{}
-	for _, value := range values {
-		name, definition, ok := strings.Cut(value, "=")
-		name = strings.TrimSpace(name)
-		definition = strings.TrimSpace(definition)
-		if !ok || name == "" || definition == "" {
-			return nil, fmt.Errorf("%q must use name=one-line definition", value)
-		}
-		if strings.ContainsAny(definition, "\r\n") {
-			return nil, fmt.Errorf("%q definition must be one line", name)
-		}
-		definitions[name] = definition
+func Summarize(ctx context.Context, dataStore *store.Store, feedstockID, summary string) error {
+	if err := invocation.ValidateFeedstock(feedstockID); err != nil {
+		return err
 	}
-	return definitions, nil
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return errors.New("summary is required")
+	}
+	feedstock, _, err := dataStore.FindFeedstock(feedstockID)
+	if err != nil {
+		return fmt.Errorf("read feedstock: %w", err)
+	}
+	if feedstock.AnnotatedAt != nil {
+		return fmt.Errorf("feedstock %s is already annotated", feedstockID)
+	}
+	if strings.TrimSpace(feedstock.Summary) != "" {
+		return fmt.Errorf("feedstock %s is already summarized", feedstockID)
+	}
+	return dataStore.WithLock(ctx, func() error {
+		current, _, err := dataStore.FindFeedstock(feedstockID)
+		if err != nil {
+			return err
+		}
+		if current.AnnotatedAt != nil {
+			return fmt.Errorf("feedstock %s is already annotated", feedstockID)
+		}
+		if strings.TrimSpace(current.Summary) != "" {
+			return fmt.Errorf("feedstock %s is already summarized", feedstockID)
+		}
+		claim, err := invocation.Claim(dataStore.Root)
+		if err != nil {
+			return err
+		}
+		succeeded := false
+		defer func() {
+			if !succeeded {
+				invocation.Rollback(claim)
+			}
+		}()
+		if err := dataStore.SummarizeFeedstock(feedstockID, summary); err != nil {
+			return err
+		}
+		succeeded = true
+		return nil
+	})
+}
+
+func buildAssertions(
+	dataStore *store.Store,
+	feedstockID string,
+	inputs []AssertionInput,
+	knownSubjects map[string]struct{},
+) ([]domain.Assertion, error) {
+	if len(inputs) > 32 {
+		return nil, errors.New("at most 32 assertions are allowed per feedstock")
+	}
+	assertions := make([]domain.Assertion, 0, len(inputs))
+	seenStatements := make(map[string]struct{}, len(inputs))
+	for index, input := range inputs {
+		input.Type = domain.KnowledgeType(strings.TrimSpace(string(input.Type)))
+		input.Subject = domain.MasterName(input.Subject)
+		input.Statement = strings.TrimSpace(input.Statement)
+		input.Rationale = strings.TrimSpace(input.Rationale)
+		input.Trigger = strings.TrimSpace(input.Trigger)
+		if err := dataStore.ValidateKnowledgeType(input.Type); err != nil {
+			return nil, fmt.Errorf("assertion %d type: %w", index+1, err)
+		}
+		if input.Subject != "" {
+			if _, exists := knownSubjects[input.Subject]; !exists {
+				return nil, fmt.Errorf(
+					"assertion %d subject %q is not defined in masters/subjects",
+					index+1,
+					input.Subject,
+				)
+			}
+		}
+		if input.Statement == "" {
+			return nil, fmt.Errorf("assertion %d requires statement", index+1)
+		}
+		if strings.ContainsAny(input.Statement, "\r\n") {
+			return nil, fmt.Errorf("assertion %d statement must be one line", index+1)
+		}
+		if input.Trigger != "" && input.Trigger != "always" {
+			return nil, fmt.Errorf("assertion %d has unsupported trigger %q", index+1, input.Trigger)
+		}
+		statementKey := strings.ToLower(input.Statement) + "\x00" + input.Subject
+		if _, exists := seenStatements[statementKey]; exists {
+			return nil, fmt.Errorf("assertion %d duplicates another statement", index+1)
+		}
+		seenStatements[statementKey] = struct{}{}
+		assertion := domain.Assertion{
+			Type: input.Type, Subject: input.Subject,
+			Statement: input.Statement, Rationale: input.Rationale, Trigger: input.Trigger,
+		}
+		assertion.ID = assertionID(feedstockID, assertion)
+		assertions = append(assertions, assertion)
+	}
+	return assertions, nil
+}
+
+func assertionID(feedstockID string, assertion domain.Assertion) string {
+	payload, _ := json.Marshal(struct {
+		FeedstockID string               `json:"feedstock_id"`
+		Type        domain.KnowledgeType `json:"type"`
+		Subject     string               `json:"subject"`
+		Statement   string               `json:"statement"`
+		Rationale   string               `json:"rationale,omitempty"`
+		Trigger     string               `json:"trigger,omitempty"`
+	}{
+		FeedstockID: feedstockID, Type: assertion.Type, Subject: assertion.Subject,
+		Statement: assertion.Statement,
+		Rationale: assertion.Rationale, Trigger: assertion.Trigger,
+	})
+	digest := sha256.Sum256(payload)
+	return "as-" + hex.EncodeToString(digest[:16])
 }

@@ -78,9 +78,9 @@ func TestMergeCodexConfigAndInstructionsAreIdempotent(t *testing.T) {
 	}
 	for _, expected := range []string{
 		"knowbrew knowledge [filters] -- <keywords>",
-		"knowbrew feedstock --subject <name> --topic <name>",
+		"knowbrew feedstock --subject <name> <keywords...>",
 		"Always place search keywords after `--`",
-		"status: active",
+		"approved: true",
 		"trigger: always",
 	} {
 		if !strings.Contains(string(instructions), expected) {

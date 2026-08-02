@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,8 @@ func TestFeedstockIsImmutableExceptBrewedAt(t *testing.T) {
 		t.Fatal(err)
 	}
 	feedstock := validFeedstock()
+	feedstock.Assertions = nil
+	feedstock.Types = nil
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +31,7 @@ func TestFeedstockIsImmutableExceptBrewedAt(t *testing.T) {
 		t.Fatal("expected immutable feedstock update to fail")
 	}
 	brewedAt := time.Now().UTC()
-	if err := dataStore.MarkBrewed(feedstock.ID, brewedAt); err != nil {
+	if err := dataStore.WriteBrewedFeedstock(feedstock, brewedAt); err != nil {
 		t.Fatal(err)
 	}
 	stored, _, err := dataStore.FindFeedstock(feedstock.ID)
@@ -39,7 +42,7 @@ func TestFeedstockIsImmutableExceptBrewedAt(t *testing.T) {
 		t.Fatalf("brewed_at = %v", stored.BrewedAt)
 	}
 	later := brewedAt.Add(time.Hour)
-	if err := dataStore.MarkBrewed(feedstock.ID, later); err != nil {
+	if err := dataStore.WriteBrewedFeedstock(stored, later); err != nil {
 		t.Fatal(err)
 	}
 	stored, _, _ = dataStore.FindFeedstock(feedstock.ID)
@@ -48,7 +51,44 @@ func TestFeedstockIsImmutableExceptBrewedAt(t *testing.T) {
 	}
 }
 
-func TestKnowledgeLifecycleAndSources(t *testing.T) {
+func TestKnowledgeEstablishedAtUsesNewestSupportingSource(t *testing.T) {
+	dataStore, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	older := validFeedstock()
+	older.Timestamp = time.Now().UTC().Add(-2 * time.Hour)
+	newer := older
+	newer.ID = "fs-newer"
+	newer.TurnID = "turn-newer"
+	newer.Timestamp = older.Timestamp.Add(time.Hour)
+	for _, feedstock := range []domain.Feedstock{older, newer} {
+		if err := dataStore.WriteFeedstock(feedstock); err != nil {
+			t.Fatal(err)
+		}
+	}
+	explicit, err := dataStore.KnowledgeEstablishedAt(domain.Knowledge{
+		EstablishedBy: older.ID,
+		Feedstocks:    []string{older.ID, newer.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !explicit.Equal(newer.Timestamp) {
+		t.Fatalf("established time = %s, want newest source %s", explicit, newer.Timestamp)
+	}
+	legacy, err := dataStore.KnowledgeEstablishedAt(domain.Knowledge{
+		Feedstocks: []string{older.ID, newer.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !legacy.Equal(newer.Timestamp) {
+		t.Fatalf("legacy established time = %s, want newest evidence %s", legacy, newer.Timestamp)
+	}
+}
+
+func TestKnowledgeLifecycleAndFeedstocks(t *testing.T) {
 	dataStore, _ := New(t.TempDir())
 	feedstock := validFeedstock()
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
@@ -56,8 +96,8 @@ func TestKnowledgeLifecycleAndSources(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	knowledge := domain.Knowledge{
-		Created: now, Updated: now, AppliesWhen: "When testing",
-		Sources: []string{feedstock.ID}, Status: domain.StatusActive,
+		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
+		Subject: "subject", Feedstocks: []string{feedstock.ID}, Status: domain.StatusActive,
 	}
 	if err := dataStore.WriteNewKnowledge("testing-rule", knowledge, "# Testing rule"); err != nil {
 		t.Fatal(err)
@@ -70,6 +110,25 @@ func TestKnowledgeLifecycleAndSources(t *testing.T) {
 	if stored.Status != domain.StatusPending {
 		t.Fatalf("new status = %q, want pending", stored.Status)
 	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "\nstatus:") ||
+		!strings.Contains(string(data), "approved: false") {
+		t.Fatalf("new knowledge frontmatter =\n%s", data)
+	}
+	data = []byte(strings.Replace(string(data), "approved: false", "approved: true", 1))
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stored, _, err = dataStore.ReadKnowledge(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.StatusActive {
+		t.Fatalf("manually activated status = %q, want active", stored.Status)
+	}
 	if err := dataStore.InvalidateKnowledge("testing-rule", []string{feedstock.ID}, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
@@ -80,36 +139,328 @@ func TestKnowledgeLifecycleAndSources(t *testing.T) {
 	if stored.Status != domain.StatusInvalidated || stored.InvalidatedAt == nil {
 		t.Fatalf("invalidated knowledge = %#v", stored)
 	}
-	if err := dataStore.AddKnowledgeSources("testing-rule", []string{feedstock.ID}, now); err == nil {
-		t.Fatal("expected adding a source to invalidated knowledge to fail")
+	if err := dataStore.AddKnowledgeFeedstocks("testing-rule", []string{feedstock.ID}, now); err == nil {
+		t.Fatal("expected adding a feedstock to invalidated knowledge to fail")
 	}
 }
 
-func TestCandidateRoundTripUnderLock(t *testing.T) {
+func TestApprovedSuccessorRetiresPredecessorOnLaterReconciliation(t *testing.T) {
 	dataStore, _ := New(t.TempDir())
-	candidate := domain.FeedstockCandidate{
-		ID: "claude-session-t000001", Session: domain.SessionRef{ID: "session", Path: "/log"},
-		Timestamp: time.Now().UTC(), Agent: "claude", UserQuote: "hello",
-	}
-	if err := dataStore.WithLock(context.Background(), func() error {
-		return dataStore.WriteCandidate(candidate)
-	}); err != nil {
+	feedstock := validFeedstock()
+	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := dataStore.ReadCandidate(candidate.ID)
+	now := time.Now().UTC()
+	base := domain.Knowledge{
+		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
+		Subject:    "subject",
+		Feedstocks: []string{feedstock.ID},
+	}
+	if err := dataStore.WriteNewKnowledge("old-rule", base, "## Claim\n\nUse the old rule."); err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.WriteNewKnowledge("combined-rule", domain.Knowledge{
+		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
+		Subject:    "subject",
+		Feedstocks: []string{feedstock.ID}, Supersedes: []string{"old-rule"},
+	}, "## Claim\n\nUse the combined rule."); err != nil {
+		t.Fatal(err)
+	}
+	successorPath, _ := dataStore.KnowledgePath("combined-rule")
+	data, err := os.ReadFile(successorPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.UserQuote != candidate.UserQuote {
-		t.Fatalf("quote = %q", loaded.UserQuote)
-	}
-	path, _ := dataStore.PendingPath(candidate.ID)
-	if _, err := os.Stat(path); err != nil {
+	data = []byte(strings.Replace(string(data), "approved: false", "approved: true", 1))
+	if err := os.WriteFile(successorPath, data, 0o644); err != nil {
 		t.Fatal(err)
+	}
+	changed, warnings, err := dataStore.ReconcileKnowledgeLifecycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed != 1 || len(warnings) != 0 {
+		t.Fatalf("changed = %d, warnings = %#v", changed, warnings)
+	}
+	oldPath, _ := dataStore.KnowledgePath("old-rule")
+	old, _, err := dataStore.ReadKnowledge(oldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.Status != domain.StatusSuperseded ||
+		old.SupersededBy != "combined-rule" ||
+		old.SupersededAt == nil {
+		t.Fatalf("old knowledge = %#v", old)
+	}
+	oldData, err := os.ReadFile(oldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(oldData), `superseded_by: "[[combined-rule]]"`) ||
+		strings.Contains(string(oldData), "\nstatus:") {
+		t.Fatalf("retired frontmatter =\n%s", oldData)
 	}
 }
 
-func TestWithLockFailsImmediatelyWhenHeld(t *testing.T) {
+func TestPendingSuccessorRetiresAndRestoresPendingPredecessor(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		changeSuccessor func(*testing.T, *Store, string)
+	}{
+		{
+			name: "deleted",
+			changeSuccessor: func(t *testing.T, _ *Store, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "invalidated",
+			changeSuccessor: func(t *testing.T, dataStore *Store, _ string) {
+				t.Helper()
+				if err := dataStore.InvalidateKnowledge(
+					"combined-rule",
+					[]string{validFeedstock().ID},
+					time.Now().UTC(),
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "unlinked",
+			changeSuccessor: func(t *testing.T, dataStore *Store, path string) {
+				t.Helper()
+				knowledge, body, err := dataStore.ReadKnowledge(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				knowledge.Supersedes = nil
+				data, err := encodeKnowledge(knowledge, body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, data, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dataStore, _ := New(t.TempDir())
+			feedstock := validFeedstock()
+			if err := dataStore.WriteFeedstock(feedstock); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			base := domain.Knowledge{
+				Created: now, Updated: now, Type: domain.KnowledgeType("property"),
+				Subject:    "subject",
+				Feedstocks: []string{feedstock.ID},
+			}
+			if err := dataStore.WriteNewKnowledge(
+				"old-rule",
+				base,
+				"## Claim\n\nUse the old rule.",
+			); err != nil {
+				t.Fatal(err)
+			}
+			if err := dataStore.WriteNewKnowledge("combined-rule", domain.Knowledge{
+				Created: now, Updated: now, Type: domain.KnowledgeType("property"),
+				Subject:    "subject",
+				Feedstocks: []string{feedstock.ID}, Supersedes: []string{"old-rule"},
+			}, "## Claim\n\nUse the combined rule."); err != nil {
+				t.Fatal(err)
+			}
+			changed, warnings, err := dataStore.ReconcileKnowledgeLifecycle(
+				context.Background(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed != 1 || len(warnings) != 0 {
+				t.Fatalf("retire changed = %d, warnings = %#v", changed, warnings)
+			}
+			oldPath, _ := dataStore.KnowledgePath("old-rule")
+			old, _, err := dataStore.ReadKnowledge(oldPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if old.Status != domain.StatusSuperseded ||
+				old.SupersededBy != "combined-rule" {
+				t.Fatalf("retired old knowledge = %#v", old)
+			}
+			successorPath, _ := dataStore.KnowledgePath("combined-rule")
+			test.changeSuccessor(t, dataStore, successorPath)
+			changed, warnings, err = dataStore.ReconcileKnowledgeLifecycle(
+				context.Background(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed != 1 {
+				t.Fatalf("restore changed = %d, warnings = %#v", changed, warnings)
+			}
+			old, _, err = dataStore.ReadKnowledge(oldPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if old.Status != domain.StatusPending ||
+				old.SupersededBy != "" ||
+				old.SupersededAt != nil {
+				t.Fatalf("restored old knowledge = %#v", old)
+			}
+		})
+	}
+}
+
+func TestPendingSuccessorDoesNotRetireApprovedPredecessorUntilApproved(t *testing.T) {
+	dataStore, _ := New(t.TempDir())
+	feedstock := validFeedstock()
+	if err := dataStore.WriteFeedstock(feedstock); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	base := domain.Knowledge{
+		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
+		Subject:    "subject",
+		Feedstocks: []string{feedstock.ID},
+	}
+	if err := dataStore.WriteNewKnowledge(
+		"pending-rule",
+		base,
+		"## Claim\n\nUse the pending rule.",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.WriteNewKnowledge(
+		"approved-rule",
+		base,
+		"## Claim\n\nUse the approved rule.",
+	); err != nil {
+		t.Fatal(err)
+	}
+	approvedPath, _ := dataStore.KnowledgePath("approved-rule")
+	approvedData, err := os.ReadFile(approvedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvedData = []byte(strings.Replace(
+		string(approvedData),
+		"approved: false",
+		"approved: true",
+		1,
+	))
+	if err := os.WriteFile(approvedPath, approvedData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.WriteNewKnowledge("combined-rule", domain.Knowledge{
+		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
+		Subject:    "subject",
+		Feedstocks: []string{feedstock.ID},
+		Supersedes: []string{"pending-rule", "approved-rule"},
+	}, "## Claim\n\nUse the combined rule."); err != nil {
+		t.Fatal(err)
+	}
+	changed, warnings, err := dataStore.ReconcileKnowledgeLifecycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed != 1 || len(warnings) != 0 {
+		t.Fatalf("pending reconciliation changed = %d, warnings = %#v", changed, warnings)
+	}
+	pendingPath, _ := dataStore.KnowledgePath("pending-rule")
+	pending, _, err := dataStore.ReadKnowledge(pendingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, _, err := dataStore.ReadKnowledge(approvedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != domain.StatusSuperseded ||
+		pending.SupersededBy != "combined-rule" {
+		t.Fatalf("pending predecessor = %#v", pending)
+	}
+	if approved.Status != domain.StatusActive || approved.SupersededBy != "" {
+		t.Fatalf("approved predecessor changed early = %#v", approved)
+	}
+	successorPath, _ := dataStore.KnowledgePath("combined-rule")
+	successorData, err := os.ReadFile(successorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successorData = []byte(strings.Replace(
+		string(successorData),
+		"approved: false",
+		"approved: true",
+		1,
+	))
+	if err := os.WriteFile(successorPath, successorData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, warnings, err = dataStore.ReconcileKnowledgeLifecycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed != 1 || len(warnings) != 0 {
+		t.Fatalf("approved reconciliation changed = %d, warnings = %#v", changed, warnings)
+	}
+	approved, _, err = dataStore.ReadKnowledge(approvedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Status != domain.StatusSuperseded ||
+		approved.SupersededBy != "combined-rule" {
+		t.Fatalf("approved predecessor after activation = %#v", approved)
+	}
+}
+
+func TestLegacyKnowledgeStatusIsReadWithoutRewritingTheFile(t *testing.T) {
+	dataStore, _ := New(t.TempDir())
+	feedstock := validFeedstock()
+	if err := dataStore.WriteFeedstock(feedstock); err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := dataStore.KnowledgePath("legacy-active-rule")
+	legacy := fmt.Sprintf(`---
+created: 2026-07-30T15:02:50Z
+updated: 2026-07-30T15:02:50Z
+type: "[[property]]"
+feedstocks:
+  - "[[%s]]"
+status: active
+---
+
+## Claim
+
+Read legacy active knowledge.
+`, feedstock.ID)
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	knowledge, _, err := dataStore.ReadKnowledge(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !knowledge.Approved || knowledge.Status != domain.StatusActive {
+		t.Fatalf("legacy knowledge = %#v", knowledge)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != legacy {
+		t.Fatalf("legacy file was rewritten:\n%s", after)
+	}
+}
+
+func TestMasterFilesUseFilenameIdentityAndAcceptLegacyFrontmatter(t *testing.T) {
 	dataStore, err := New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -117,22 +468,402 @@ func TestWithLockFailsImmediatelyWhenHeld(t *testing.T) {
 	if err := dataStore.EnsureLayout(); err != nil {
 		t.Fatal(err)
 	}
-	lock := flock.New(filepath.Join(dataStore.Root, ".state", "knowbrew.lock"))
+	created, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{
+		Name:       "knowbrew",
+		Definition: "The knowbrew command-line subject.",
+		Includes:   []string{"knowledge and feedstock behavior"},
+		Excludes:   []string{"unrelated command-line tools"},
+		Aliases:    []string{"/work/knowbrew"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("subject master was not created")
+	}
+	subjectPath := filepath.Join(dataStore.Root, "masters", "subjects", "knowbrew.md")
+	data, err := os.ReadFile(subjectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, forbidden := range []string{"\nname:", "\nstatus:", "\ncreated:", "\nupdated:"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("new master contains %q:\n%s", forbidden, text)
+		}
+	}
+	for _, required := range []string{
+		"definition: The knowbrew command-line subject.",
+		"includes:",
+		"- knowledge and feedstock behavior",
+		"excludes:",
+		"- unrelated command-line tools",
+		"aliases:",
+		"- /work/knowbrew",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("new master does not contain %q:\n%s", required, text)
+		}
+	}
+	legacyPath := filepath.Join(dataStore.Root, "masters", "subjects", "renamed-subject.md")
+	legacy := `---
+name: stale-frontmatter-name
+definition: A subject whose note was renamed.
+status: invalidated
+created: 2026-07-30T15:02:50Z
+updated: 2026-07-30T15:02:50Z
+---
+`
+	if err := os.WriteFile(legacyPath, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	subjects, warnings, err := dataStore.LoadMasters("subjects")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("legacy master warnings = %#v", warnings)
+	}
+	if len(subjects) != 2 || subjects[1].Name != "renamed-subject" ||
+		subjects[1].Definition != "A subject whose note was renamed." ||
+		strings.Join(subjects[0].Includes, ",") != "knowledge and feedstock behavior" ||
+		strings.Join(subjects[0].Excludes, ",") != "unrelated command-line tools" {
+		t.Fatalf("legacy master = %#v", subjects)
+	}
+}
+
+func TestEnsureSubjectMasterMergesAliasesAndPreservesContent(t *testing.T) {
+	dataStore, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dataStore.Root, "masters", "subjects", "knowbrew.md")
+	original := `---
+definition: The knowbrew subject.
+example: A knowbrew example.
+aliases:
+  - /old/worktree
+---
+
+Human-maintained body.
+`
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{
+		Name:       "knowbrew",
+		Definition: "A replacement definition that must not be used.",
+		Aliases: []string{
+			"/old/worktree",
+			"/new/worktree",
+			"ssh://git@github.com/siro33950/knowbrew.git",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Fatal("existing subject master was reported as created")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, required := range []string{
+		"definition: The knowbrew subject.",
+		"example: A knowbrew example.",
+		"- /old/worktree",
+		"- /new/worktree",
+		"- ssh://git@github.com/siro33950/knowbrew.git",
+		"Human-maintained body.",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("updated master does not contain %q:\n%s", required, text)
+		}
+	}
+	if strings.Contains(text, "replacement definition") {
+		t.Fatalf("existing definition was replaced:\n%s", text)
+	}
+}
+
+func TestDefaultTypeMastersAreGeneratedOnlyWhenEmpty(t *testing.T) {
+	dataStore, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	types, warnings, err := dataStore.LoadMasters("types")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(types) != 7 {
+		t.Fatalf("default types = %#v, warnings = %#v", types, warnings)
+	}
+	want := map[string]struct {
+		definition string
+		example    string
+	}{
+		"definition": {"The established meaning or boundary of a term or concept.", "A feedstock is an immutable record of one source turn."},
+		"property":   {"A durable established attribute or capability of a subject.", "The service accepts JSON Lines input."},
+		"relation":   {"An established relationship between two or more subjects or concepts.", "The archive belongs to the research collection."},
+		"principle":  {"An established generalized causal relationship, mechanism, or recurring tendency.", "Higher fermentation temperatures generally accelerate fermentation."},
+		"constraint": {"An established limit or required condition imposed by something other than a choice recorded here.", "The venue cannot admit more than 200 people."},
+		"decision":   {"A settled choice made by an authorized person or group and intended to remain applicable beyond the current task, together with its reason when known.", "Use SQLite because the index must be local and rebuildable."},
+		"preference": {"A stable stated preference of a person or group, rather than a one-time request or binding decision.", "The user prefers concise headings."},
+	}
+	for _, entry := range types {
+		expected, ok := want[entry.Name]
+		if !ok {
+			t.Fatalf("unexpected default type master = %#v", entry)
+		}
+		if entry.Definition != expected.definition || entry.Example != expected.example {
+			t.Fatalf("default type master %q = %#v", entry.Name, entry)
+		}
+		delete(want, entry.Name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing default type masters = %#v", want)
+	}
+
+	typeDir := filepath.Join(dataStore.Root, "masters", "types")
+	entries, err := os.ReadDir(typeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != "property.md" {
+			if err := os.Remove(filepath.Join(typeDir, entry.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	types, warnings, err = dataStore.LoadMasters("types")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(types) != 1 || types[0].Name != "property" {
+		t.Fatalf("types after leaving one master = %#v, warnings = %#v", types, warnings)
+	}
+}
+
+func TestKnowledgeTypeValidationUsesMasterFiles(t *testing.T) {
+	dataStore, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	typeDir := filepath.Join(dataStore.Root, "masters", "types")
+	entries, err := os.ReadDir(typeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if err := os.Remove(filepath.Join(typeDir, entry.Name())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := dataStore.EnsureMaster("types", domain.MasterEntry{
+		Name:       "observation",
+		Definition: "A verified observation.",
+		Example:    "The service returned HTTP 204.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.ValidateKnowledgeType("observation"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.ValidateKnowledgeType("property"); err == nil ||
+		!strings.Contains(err.Error(), "not defined in masters/types") {
+		t.Fatalf("removed type error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(typeDir, "observation.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, required := range []string{
+		"definition: A verified observation.",
+		"example: The service returned HTTP 204.",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("type master does not contain %q:\n%s", required, text)
+		}
+	}
+}
+
+func TestMasterReferencesWriteAsWikilinksAndReadAsPlainNames(t *testing.T) {
+	dataStore, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedstock := validFeedstock()
+	feedstock.Types = []domain.KnowledgeType{"property"}
+	feedstock.Subjects = []string{"subject"}
+	if err := dataStore.WriteFeedstock(feedstock); err != nil {
+		t.Fatal(err)
+	}
+	feedstockPath, err := dataStore.FeedstockPath(feedstock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedstockData, err := os.ReadFile(feedstockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(feedstockData), "\ntopics:") {
+		t.Fatalf("feedstock contains removed topics field:\n%s", feedstockData)
+	}
+	for _, required := range []string{
+		`- "[[property]]"`,
+		`- "[[subject]]"`,
+	} {
+		if !strings.Contains(string(feedstockData), required) {
+			t.Fatalf("feedstock does not contain %q:\n%s", required, feedstockData)
+		}
+	}
+	storedFeedstock, err := dataStore.ReadFeedstock(feedstockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(storedFeedstock.Subjects, ",") != "subject" ||
+		fmt.Sprint(storedFeedstock.Types) != "[property]" {
+		t.Fatalf("linked feedstock decoded as %#v", storedFeedstock)
+	}
+	rawFeedstock := strings.NewReplacer(
+		`"[[property]]"`, "property",
+		`"[[subject]]"`, "subject",
+	).Replace(string(feedstockData))
+	if err := os.WriteFile(feedstockPath, []byte(rawFeedstock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	storedFeedstock, err = dataStore.ReadFeedstock(feedstockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(storedFeedstock.Subjects, ",") != "subject" ||
+		fmt.Sprint(storedFeedstock.Types) != "[property]" {
+		t.Fatalf("plain feedstock decoded as %#v", storedFeedstock)
+	}
+
+	now := time.Now().UTC()
+	knowledge := domain.Knowledge{
+		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
+		Subject: "subject", Feedstocks: []string{feedstock.ID},
+		Status: domain.StatusPending,
+	}
+	if err := dataStore.WriteNewKnowledge("linked-knowledge", knowledge, "# Linked knowledge"); err != nil {
+		t.Fatal(err)
+	}
+	knowledgePath, err := dataStore.KnowledgePath("linked-knowledge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledgeData, err := os.ReadFile(knowledgePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(knowledgeData), "\ntopics:") {
+		t.Fatalf("knowledge contains removed topics field:\n%s", knowledgeData)
+	}
+	for _, required := range []string{
+		`type: "[[property]]"`,
+		`subject: "[[subject]]"`,
+		`- "[[` + feedstock.ID + `]]"`,
+	} {
+		if !strings.Contains(string(knowledgeData), required) {
+			t.Fatalf("knowledge does not contain %q:\n%s", required, knowledgeData)
+		}
+	}
+	obsoleteKey := "pro" + "ject:"
+	if strings.Contains(string(knowledgeData), obsoleteKey) {
+		t.Fatalf("knowledge contains obsolete key:\n%s", knowledgeData)
+	}
+	obsoleteFeedstockKey := "sour" + "ces:"
+	if strings.Contains(string(knowledgeData), obsoleteFeedstockKey) {
+		t.Fatalf("knowledge contains obsolete provenance key:\n%s", knowledgeData)
+	}
+	storedKnowledge, _, err := dataStore.ReadKnowledge(knowledgePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedKnowledge.Subject != "subject" ||
+		storedKnowledge.Type != "property" ||
+		strings.Join(storedKnowledge.Feedstocks, ",") != feedstock.ID {
+		t.Fatalf("linked knowledge decoded as %#v", storedKnowledge)
+	}
+	rawKnowledge := strings.NewReplacer(
+		`"[[property]]"`, "property",
+		`"[[subject]]"`, "subject",
+		`"[[`+feedstock.ID+`]]"`, feedstock.ID,
+	).Replace(string(knowledgeData))
+	if err := os.WriteFile(knowledgePath, []byte(rawKnowledge), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	storedKnowledge, _, err = dataStore.ReadKnowledge(knowledgePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedKnowledge.Subject != "subject" ||
+		storedKnowledge.Type != "property" ||
+		strings.Join(storedKnowledge.Feedstocks, ",") != feedstock.ID {
+		t.Fatalf("plain knowledge decoded as %#v", storedKnowledge)
+	}
+}
+
+func TestEnsureLayoutDoesNotCreateTopicMasters(t *testing.T) {
+	dataStore, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dataStore.Root, "masters", "topics")
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removed topic master directory exists or cannot be checked: %v", err)
+	}
+}
+
+func TestWithLockWaitsUntilHeldLockIsReleased(t *testing.T) {
+	dataStore, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	lock := flock.New(filepath.Join(dataStore.Root, ".knowbrew", "state", "knowbrew.lock"))
 	if err := lock.Lock(); err != nil {
 		t.Fatal(err)
 	}
-	defer lock.Unlock()
-
+	released := make(chan error, 1)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		released <- lock.Unlock()
+	}()
 	started := time.Now()
 	err = dataStore.WithLock(context.Background(), func() error {
-		t.Fatal("lock callback must not run")
 		return nil
 	})
-	if err == nil || err.Error() != "another knowbrew process holds the store lock" {
-		t.Fatalf("error = %v", err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("lock conflict took %s", elapsed)
+	if err := <-released; err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed < 75*time.Millisecond {
+		t.Fatalf("store lock did not wait: %s", elapsed)
 	}
 }
 
@@ -150,21 +881,20 @@ func TestListingsSkipBrokenMarkdownAndCollectWarnings(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	if err := dataStore.WriteNewKnowledge("valid-knowledge", domain.Knowledge{
-		Created: now, Updated: now, AppliesWhen: "When testing",
-		Sources: []string{feedstock.ID}, Status: domain.StatusPending,
+		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
+		Subject: "subject", Feedstocks: []string{feedstock.ID}, Status: domain.StatusPending,
 	}, "# Valid knowledge"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dataStore.EnsureMaster("topics", domain.MasterEntry{
-		Name: "testing", Definition: "Automated verification.", Status: domain.StatusPending,
-		Created: now, Updated: now,
+	if _, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{
+		Name: "testing", Definition: "Automated verification.",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	brokenPaths := []string{
 		filepath.Join(dataStore.Root, "feedstocks", "broken.md"),
 		filepath.Join(dataStore.Root, "knowledge", "broken-knowledge.md"),
-		filepath.Join(dataStore.Root, "masters", "topics", "broken-master.md"),
+		filepath.Join(dataStore.Root, "masters", "subjects", "broken-master.md"),
 	}
 	for _, path := range brokenPaths {
 		if err := os.WriteFile(path, []byte("---\nunknown_field: true\n---\nbroken\n"), 0o644); err != nil {
@@ -186,7 +916,7 @@ func TestListingsSkipBrokenMarkdownAndCollectWarnings(t *testing.T) {
 	if len(knowledge) != 1 || len(knowledgeWarnings) != 1 {
 		t.Fatalf("knowledge = %#v, warnings = %#v", knowledge, knowledgeWarnings)
 	}
-	masters, masterWarnings, err := dataStore.LoadMasters("topics")
+	masters, masterWarnings, err := dataStore.LoadMasters("subjects")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,12 +946,19 @@ func TestFindFeedstockUsesSentinelForMissingFeedstock(t *testing.T) {
 }
 
 func validFeedstock() domain.Feedstock {
+	annotatedAt := time.Date(2026, 7, 30, 1, 1, 0, 0, time.UTC)
 	return domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "claude-session-t000001",
+		TurnID:    "turn-1",
 		Session:   domain.SessionRef{ID: "session", Path: "/logs/session.jsonl"},
 		Timestamp: time.Date(2026, 7, 30, 1, 0, 0, 0, time.UTC),
-		Agent:     "claude", UserQuote: "Please test it.",
-		SpeechActs: []string{"request"}, Subjects: []string{"project"},
-		Summary: "The user requested testing.",
+		Agent:     "claude",
+		Types:     []domain.KnowledgeType{"property"},
+		Subjects:  []string{"subject"},
+		Summary:   "The user requested testing.", AnnotatedAt: &annotatedAt,
+		Assertions: []domain.Assertion{{
+			ID: "as-test", Type: "property", Subject: "subject",
+			Statement: "The test value is stable.",
+		}},
 	}
 }

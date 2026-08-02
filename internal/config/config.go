@@ -18,14 +18,28 @@ const (
 	APITokenEnvironment            = "KNOWBREW_API_KEY"
 	APIURLEnvironment              = "KNOWBREW_API_URL"
 	InvocationFeedstockEnvironment = "KNOWBREW_INVOCATION_FEEDSTOCK"
+	InvocationAssertionEnvironment = "KNOWBREW_INVOCATION_ASSERTION"
 	InvocationIDEnvironment        = "KNOWBREW_INVOCATION_ID"
 	DefaultLLMTimeout              = 5 * time.Minute
+	DefaultDrawConcurrency         = 5
+	DefaultDrawContextTurns        = 3
+	DefaultDrawMaxContextTurns     = 20
+	DefaultDrawEffort              = "low"
 )
 
 type LLM struct {
-	Backend string `toml:"backend"`
-	Model   string `toml:"model"`
-	Timeout string `toml:"timeout,omitempty"`
+	Backend    string `toml:"backend"`
+	DrawModel  string `toml:"draw_model"`
+	BrewModel  string `toml:"brew_model"`
+	DrawEffort string `toml:"draw_effort"`
+	BrewEffort string `toml:"brew_effort"`
+	Timeout    string `toml:"timeout,omitempty"`
+}
+
+type Draw struct {
+	Concurrency     int `toml:"concurrency"`
+	ContextTurns    int `toml:"context_turns"`
+	MaxContextTurns int `toml:"max_context_turns"`
 }
 
 type Source struct {
@@ -37,9 +51,15 @@ type Source struct {
 type Config struct {
 	Root    string   `toml:"root"`
 	LLM     LLM      `toml:"llm"`
+	Draw    Draw     `toml:"draw"`
 	Sources []Source `toml:"sources"`
 
-	Path string `toml:"-"`
+	Path                string `toml:"-"`
+	drawConcurrencySet  bool   `toml:"-"`
+	drawContextTurnsSet bool   `toml:"-"`
+	drawMaxContextSet   bool   `toml:"-"`
+	drawEffortSet       bool   `toml:"-"`
+	brewEffortSet       bool   `toml:"-"`
 }
 
 type Locator struct {
@@ -88,15 +108,44 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	return LoadPath(path)
+}
+
+// LoadPath reads one explicit configuration file without consulting the
+// process-wide locator. Setup uses it to preserve the root it is updating.
+func LoadPath(path string) (Config, error) {
 	var cfg Config
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+	metadata, err := toml.DecodeFile(path, &cfg)
+	if err != nil {
 		return Config{}, fmt.Errorf("read configuration %s: %w", path, err)
 	}
+	if metadata.IsDefined("llm", "model") {
+		return Config{}, fmt.Errorf(
+			"invalid configuration %s: [llm] model is no longer supported; migrate it to draw_model and brew_model",
+			path,
+		)
+	}
 	cfg.Path = path
+	cfg.drawConcurrencySet = metadata.IsDefined("draw", "concurrency")
+	cfg.drawContextTurnsSet = metadata.IsDefined("draw", "context_turns")
+	cfg.drawMaxContextSet = metadata.IsDefined("draw", "max_context_turns")
+	cfg.drawEffortSet = metadata.IsDefined("llm", "draw_effort")
+	cfg.brewEffortSet = metadata.IsDefined("llm", "brew_effort")
 	if err := cfg.Normalize(); err != nil {
 		return Config{}, fmt.Errorf("invalid configuration %s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// FillInitDefaults adds defaults only for keys absent from an existing file.
+// Explicit empty values remain user-owned and are preserved.
+func (cfg *Config) FillInitDefaults() {
+	if !cfg.drawEffortSet {
+		cfg.LLM.DrawEffort = DefaultDrawEffort
+	}
+	if !cfg.brewEffortSet {
+		cfg.LLM.BrewEffort = ""
+	}
 }
 
 func (cfg *Config) Normalize() error {
@@ -119,6 +168,28 @@ func (cfg *Config) Normalize() error {
 	case "claude-cli", "codex-cli", "api", "ollama":
 	default:
 		return fmt.Errorf("unsupported LLM backend %q", cfg.LLM.Backend)
+	}
+	if (cfg.LLM.Backend == "api" || cfg.LLM.Backend == "ollama") &&
+		(strings.TrimSpace(cfg.LLM.DrawModel) == "" || strings.TrimSpace(cfg.LLM.BrewModel) == "") {
+		return errors.New("API and Ollama backends require both draw_model and brew_model")
+	}
+	if cfg.Draw.Concurrency == 0 && !cfg.drawConcurrencySet {
+		cfg.Draw.Concurrency = DefaultDrawConcurrency
+	}
+	if cfg.Draw.Concurrency < 1 {
+		return errors.New("draw concurrency must be at least 1")
+	}
+	if cfg.Draw.ContextTurns == 0 && !cfg.drawContextTurnsSet {
+		cfg.Draw.ContextTurns = DefaultDrawContextTurns
+	}
+	if cfg.Draw.ContextTurns < 0 {
+		return errors.New("draw context_turns must be at least 0")
+	}
+	if cfg.Draw.MaxContextTurns == 0 && !cfg.drawMaxContextSet {
+		cfg.Draw.MaxContextTurns = DefaultDrawMaxContextTurns
+	}
+	if cfg.Draw.MaxContextTurns < cfg.Draw.ContextTurns {
+		return errors.New("draw max_context_turns must be at least context_turns")
 	}
 	if strings.TrimSpace(cfg.LLM.Timeout) == "" {
 		cfg.LLM.Timeout = DefaultLLMTimeout.String()
@@ -164,6 +235,12 @@ func Save(root string, cfg Config) (string, error) {
 	}
 	path := DefaultConfigPath(absoluteRoot)
 	onDisk := cfg
+	if onDisk.Draw.Concurrency == 0 {
+		onDisk.Draw.Concurrency = DefaultDrawConcurrency
+	}
+	if onDisk.Draw.MaxContextTurns == 0 {
+		onDisk.Draw.MaxContextTurns = DefaultDrawMaxContextTurns
+	}
 	onDisk.Path = ""
 	onDisk.Root = ".."
 	var data bytes.Buffer

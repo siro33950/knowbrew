@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,31 +16,28 @@ import (
 type Claude struct{}
 
 type claudeRecord struct {
-	Type          string          `json:"type"`
-	SessionID     string          `json:"sessionId"`
-	Timestamp     string          `json:"timestamp"`
-	CWD           string          `json:"cwd"`
-	GitBranch     string          `json:"gitBranch"`
-	IsMeta        bool            `json:"isMeta"`
-	IsSidechain   bool            `json:"isSidechain"`
-	Message       claudeMessage   `json:"message"`
-	ToolUseResult json.RawMessage `json:"toolUseResult"`
+	Type                      string        `json:"type"`
+	UUID                      string        `json:"uuid"`
+	SessionID                 string        `json:"sessionId"`
+	Timestamp                 string        `json:"timestamp"`
+	CWD                       string        `json:"cwd"`
+	GitBranch                 string        `json:"gitBranch"`
+	IsMeta                    bool          `json:"isMeta"`
+	IsSidechain               bool          `json:"isSidechain"`
+	IsCompactSummary          bool          `json:"isCompactSummary"`
+	IsVisibleInTranscriptOnly bool          `json:"isVisibleInTranscriptOnly"`
+	Message                   claudeMessage `json:"message"`
 }
 
 type claudeMessage struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content"`
+	StopReason string          `json:"stop_reason"`
 }
 
 type claudeBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text"`
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Input     json.RawMessage `json:"input"`
-	ToolUseID string          `json:"tool_use_id"`
-	Content   json.RawMessage `json:"content"`
-	IsError   bool            `json:"is_error"`
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 func (Claude) Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warning, error) {
@@ -56,18 +51,17 @@ func (Claude) Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warn
 	var candidates []domain.FeedstockCandidate
 	var warnings []diagnostic.Warning
 	var current *domain.FeedstockCandidate
-	commandByToolID := map[string]int{}
-	feedstockNumber := 0
+	var currentComplete bool
 
 	flush := func() {
 		if current == nil {
 			return
 		}
-		current.FilesChanged = domain.UniqueSorted(current.FilesChanged)
-		current.Errors = domain.UniqueSorted(current.Errors)
-		candidates = append(candidates, *current)
+		if currentComplete {
+			candidates = append(candidates, *current)
+		}
 		current = nil
-		commandByToolID = map[string]int{}
+		currentComplete = false
 	}
 
 	scanner := bufio.NewScanner(file)
@@ -86,6 +80,10 @@ func (Claude) Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warn
 		if record.SessionID != "" {
 			sessionID = record.SessionID
 		}
+		if current != nil && isClaudeSyntheticQuoteRecord(record) {
+			currentComplete = true
+			continue
+		}
 		if isClaudeHumanMessage(record) {
 			quote, err := claudeText(record.Message.Content)
 			if err != nil {
@@ -95,11 +93,13 @@ func (Claude) Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warn
 				))
 				continue
 			}
-			if strings.TrimSpace(quote) == "" {
+			if strings.TrimSpace(quote) == "" || isClaudeSyntheticQuote(quote) {
 				continue
 			}
+			if current != nil {
+				currentComplete = true
+			}
 			flush()
-			feedstockNumber++
 			timestamp, err := time.Parse(time.RFC3339Nano, record.Timestamp)
 			if err != nil {
 				warnings = append(warnings, diagnostic.FromError(
@@ -108,14 +108,16 @@ func (Claude) Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warn
 				))
 				continue
 			}
+			turnID := sourceTurnID(record.UUID, scanner.Bytes())
 			current = &domain.FeedstockCandidate{
-				ID:        FeedstockID("claude", sessionID, feedstockNumber),
+				ID:        FeedstockID("claude", sessionID, turnID),
+				TurnID:    turnID,
 				Session:   domain.SessionRef{ID: sessionID, Path: path},
 				Timestamp: timestamp,
 				Agent:     "claude",
 				CWD:       record.CWD,
 				Branch:    record.GitBranch,
-				UserQuote: quote,
+				Dialogue:  []domain.DialogueMessage{{Role: "user", Content: quote}},
 			}
 			continue
 		}
@@ -129,64 +131,17 @@ func (Claude) Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warn
 			current.Branch = record.GitBranch
 		}
 		if record.Type == "assistant" && record.Message.Role == "assistant" {
-			blocks, err := claudeBlocks(record.Message.Content)
-			if err != nil {
-				warnings = append(warnings, diagnostic.FromError(
-					fmt.Sprintf("%s:%d", path, line),
-					fmt.Errorf("decode assistant content: %w", err),
-				))
-				continue
-			}
-			for _, block := range blocks {
-				if block.Type != "tool_use" {
-					continue
-				}
-				switch block.Name {
-				case "Bash":
-					var input struct {
-						Command string `json:"command"`
-					}
-					if json.Unmarshal(block.Input, &input) == nil && strings.TrimSpace(input.Command) != "" {
-						current.Commands = append(current.Commands, domain.Command{Command: input.Command})
-						commandByToolID[block.ID] = len(current.Commands) - 1
-					}
-				case "Write", "Edit", "Read":
-					if block.Name == "Read" {
-						continue
-					}
-					var input struct {
-						FilePath string `json:"file_path"`
-					}
-					if json.Unmarshal(block.Input, &input) == nil && input.FilePath != "" {
-						current.FilesChanged = append(current.FilesChanged, input.FilePath)
-					}
+			text, decodeErr := claudeText(record.Message.Content)
+			if decodeErr == nil && strings.TrimSpace(text) != "" {
+				message := domain.DialogueMessage{Role: "assistant", Content: text}
+				if len(current.Dialogue) == 1 {
+					current.Dialogue = append(current.Dialogue, message)
+				} else {
+					current.Dialogue[1] = message
 				}
 			}
-		}
-		if record.Type == "user" && record.Message.Role == "user" {
-			blocks, err := claudeBlocks(record.Message.Content)
-			if err != nil {
-				warnings = append(warnings, diagnostic.FromError(
-					fmt.Sprintf("%s:%d", path, line),
-					fmt.Errorf("decode tool result content: %w", err),
-				))
-				continue
-			}
-			for _, block := range blocks {
-				if block.Type != "tool_result" {
-					continue
-				}
-				index, ok := commandByToolID[block.ToolUseID]
-				if !ok {
-					continue
-				}
-				exitCode, hasExit := claudeExitCode(record.ToolUseResult, block.Content, block.IsError)
-				if hasExit {
-					current.Commands[index].ExitCode = &exitCode
-				}
-				if block.IsError || (hasExit && exitCode != 0) {
-					current.Errors = append(current.Errors, clipped(rawText(block.Content)))
-				}
+			if record.Message.StopReason == "end_turn" {
+				currentComplete = true
 			}
 		}
 	}
@@ -197,8 +152,64 @@ func (Claude) Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warn
 	return candidates, warnings, nil
 }
 
+func (Claude) ExtractTurn(path, turnID string) ([]domain.DialogueMessage, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open Claude log %s: %w", path, err)
+	}
+	defer file.Close()
+
+	var userText, finalAssistantText string
+	found := false
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
+	for scanner.Scan() {
+		var record claudeRecord
+		if json.Unmarshal(scanner.Bytes(), &record) != nil {
+			continue
+		}
+		if isClaudeHumanMessage(record) {
+			quote, decodeErr := claudeText(record.Message.Content)
+			if decodeErr == nil && strings.TrimSpace(quote) != "" && !isClaudeSyntheticQuote(quote) {
+				recordTurnID := sourceTurnID(record.UUID, scanner.Bytes())
+				if found {
+					break
+				}
+				if recordTurnID == turnID {
+					found = true
+					userText = quote
+				}
+				continue
+			}
+		}
+		if !found || record.IsSidechain ||
+			record.Type != "assistant" || record.Message.Role != "assistant" {
+			continue
+		}
+		text, decodeErr := claudeText(record.Message.Content)
+		if decodeErr == nil && strings.TrimSpace(text) != "" {
+			finalAssistantText = text
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan Claude log %s: %w", path, err)
+	}
+	if !found {
+		return nil, fmt.Errorf("source turn %s was not found in Claude log %s", turnID, path)
+	}
+	messages := []domain.DialogueMessage{{Role: "user", Content: userText}}
+	if strings.TrimSpace(finalAssistantText) != "" {
+		messages = append(messages, domain.DialogueMessage{
+			Role: "assistant", Content: finalAssistantText,
+		})
+	}
+	return messages, nil
+}
+
 func isClaudeHumanMessage(record claudeRecord) bool {
-	if record.Type != "user" || record.Message.Role != "user" || record.IsMeta || record.IsSidechain {
+	if record.Type != "user" || record.Message.Role != "user" ||
+		record.IsMeta || record.IsSidechain ||
+		record.IsCompactSummary || record.IsVisibleInTranscriptOnly {
 		return false
 	}
 	blocks, err := claudeBlocks(record.Message.Content)
@@ -210,6 +221,23 @@ func isClaudeHumanMessage(record claudeRecord) bool {
 		}
 	}
 	return true
+}
+
+func isClaudeSyntheticQuote(quote string) bool {
+	switch strings.TrimSpace(quote) {
+	case "[Request interrupted by user]", "[Request interrupted by user for tool use]":
+		return true
+	default:
+		return false
+	}
+}
+
+func isClaudeSyntheticQuoteRecord(record claudeRecord) bool {
+	if record.Type != "user" || record.Message.Role != "user" {
+		return false
+	}
+	quote, err := claudeText(record.Message.Content)
+	return err == nil && isClaudeSyntheticQuote(quote)
 }
 
 func claudeText(raw json.RawMessage) (string, error) {
@@ -243,57 +271,4 @@ func claudeBlocks(raw json.RawMessage) ([]claudeBlock, error) {
 		return nil, err
 	}
 	return blocks, nil
-}
-
-var exitCodePattern = regexp.MustCompile(`(?i)exit code\s+([0-9]+)`)
-
-func claudeExitCode(raw, content json.RawMessage, isError bool) (int, bool) {
-	if len(raw) > 0 {
-		var values map[string]any
-		if json.Unmarshal(raw, &values) == nil {
-			for _, key := range []string{"exitCode", "exit_code", "code"} {
-				switch value := values[key].(type) {
-				case float64:
-					return int(value), true
-				case string:
-					if number, err := strconv.Atoi(value); err == nil {
-						return number, true
-					}
-				}
-			}
-		}
-	}
-	for _, value := range []string{rawText(raw), rawText(content)} {
-		match := exitCodePattern.FindStringSubmatch(value)
-		if len(match) == 2 {
-			if number, err := strconv.Atoi(match[1]); err == nil {
-				return number, true
-			}
-		}
-	}
-	if isError {
-		return 1, true
-	}
-	return 0, true
-}
-
-func rawText(raw json.RawMessage) string {
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		return text
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(raw, &blocks) == nil {
-		var parts []string
-		for _, block := range blocks {
-			if block.Text != "" {
-				parts = append(parts, block.Text)
-			}
-		}
-		return strings.Join(parts, "\n")
-	}
-	return string(raw)
 }

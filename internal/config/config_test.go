@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,11 @@ func TestSaveAndLoadUsesRootLocalConfigAndGlobalLocator(t *testing.T) {
 	t.Setenv(ConfigEnvironment, "")
 	root := filepath.Join(t.TempDir(), "vault")
 	cfg := Config{
-		LLM:     LLM{Backend: "claude-cli", Model: "test-model"},
+		LLM: LLM{
+			Backend: "claude-cli", DrawModel: "fast-model", BrewModel: "quality-model",
+			DrawEffort: "low", BrewEffort: "max",
+		},
+		Draw:    Draw{ContextTurns: DefaultDrawContextTurns},
 		Sources: []Source{{Agent: "claude", Parser: "claude", Path: "~/logs"}},
 	}
 	path, err := Save(root, cfg)
@@ -36,6 +41,21 @@ func TestSaveAndLoadUsesRootLocalConfigAndGlobalLocator(t *testing.T) {
 	}
 	if loaded.Sources[0].Path != filepath.Join(home, "logs") {
 		t.Fatalf("expanded source = %q", loaded.Sources[0].Path)
+	}
+	if loaded.LLM.DrawModel != "fast-model" || loaded.LLM.BrewModel != "quality-model" {
+		t.Fatalf("LLM models = %#v", loaded.LLM)
+	}
+	if loaded.LLM.DrawEffort != "low" || loaded.LLM.BrewEffort != "max" {
+		t.Fatalf("LLM efforts = %#v", loaded.LLM)
+	}
+	if loaded.Draw.Concurrency != DefaultDrawConcurrency {
+		t.Fatalf("draw concurrency = %d, want %d", loaded.Draw.Concurrency, DefaultDrawConcurrency)
+	}
+	if loaded.Draw.ContextTurns != DefaultDrawContextTurns {
+		t.Fatalf("draw context turns = %d, want %d", loaded.Draw.ContextTurns, DefaultDrawContextTurns)
+	}
+	if loaded.Draw.MaxContextTurns != DefaultDrawMaxContextTurns {
+		t.Fatalf("draw max context turns = %d, want %d", loaded.Draw.MaxContextTurns, DefaultDrawMaxContextTurns)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".config", "knowbrew", "location.toml")); err != nil {
 		t.Fatal(err)
@@ -103,5 +123,149 @@ func TestNormalizePopulatesDefaultLLMTimeout(t *testing.T) {
 	}
 	if cfg.LLM.Timeout != DefaultLLMTimeout.String() {
 		t.Fatalf("timeout = %q, want %q", cfg.LLM.Timeout, DefaultLLMTimeout.String())
+	}
+	if cfg.Draw.Concurrency != DefaultDrawConcurrency {
+		t.Fatalf("draw concurrency = %d, want %d", cfg.Draw.Concurrency, DefaultDrawConcurrency)
+	}
+	if cfg.Draw.ContextTurns != DefaultDrawContextTurns {
+		t.Fatalf("draw context turns = %d, want %d", cfg.Draw.ContextTurns, DefaultDrawContextTurns)
+	}
+	if cfg.Draw.MaxContextTurns != DefaultDrawMaxContextTurns {
+		t.Fatalf("draw max context turns = %d, want %d", cfg.Draw.MaxContextTurns, DefaultDrawMaxContextTurns)
+	}
+}
+
+func TestNormalizeDoesNotValidateEffortVocabulary(t *testing.T) {
+	cfg := Config{
+		Path: filepath.Join(t.TempDir(), ".knowbrew", "config.toml"),
+		LLM: LLM{
+			Backend: "claude-cli", DrawEffort: "accepted-by-a-future-cli",
+			BrewEffort: "backend-specific",
+		},
+	}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("effort vocabulary should be delegated to the backend: %v", err)
+	}
+}
+
+func TestLoadRejectsLegacyModelWithMigrationGuidance(t *testing.T) {
+	root := t.TempDir()
+	path := DefaultConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\nmodel = \"legacy\"\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(ConfigEnvironment, path)
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "migrate it to draw_model and brew_model") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadAllowsExistingConfigWithoutEffortKeys(t *testing.T) {
+	root := t.TempDir()
+	path := DefaultConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\ndraw_model = \"\"\nbrew_model = \"\"\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(ConfigEnvironment, path)
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LLM.DrawEffort != "" || loaded.LLM.BrewEffort != "" {
+		t.Fatalf("missing effort keys should remain empty: %#v", loaded.LLM)
+	}
+}
+
+func TestAPILLMRequiresBothTaskModels(t *testing.T) {
+	cfg := Config{
+		Path: filepath.Join(t.TempDir(), ".knowbrew", "config.toml"),
+		LLM:  LLM{Backend: "api", DrawModel: "fast"},
+	}
+	if err := cfg.Normalize(); err == nil || !strings.Contains(err.Error(), "both draw_model and brew_model") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadRejectsExplicitNonPositiveDrawConcurrency(t *testing.T) {
+	root := t.TempDir()
+	path := DefaultConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\n\n[draw]\nconcurrency = 0\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(ConfigEnvironment, path)
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "draw concurrency must be at least 1") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadAcceptsZeroAndRejectsNegativeDrawContextTurns(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{name: "disabled", value: 0},
+		{name: "negative", value: -1, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := DefaultConfigPath(root)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			data := fmt.Appendf(
+				nil,
+				"root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\n\n[draw]\nconcurrency = 1\ncontext_turns = %d\n",
+				test.value,
+			)
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(ConfigEnvironment, path)
+			loaded, err := Load()
+			if test.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "context_turns must be at least 0") {
+					t.Fatalf("error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.Draw.ContextTurns != 0 {
+				t.Fatalf("context turns = %d, want 0", loaded.Draw.ContextTurns)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsMaxContextBelowInitialContext(t *testing.T) {
+	root := t.TempDir()
+	path := DefaultConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\n\n[draw]\nconcurrency = 1\ncontext_turns = 3\nmax_context_turns = 2\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(ConfigEnvironment, path)
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "max_context_turns must be at least context_turns") {
+		t.Fatalf("error = %v", err)
 	}
 }

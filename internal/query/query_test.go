@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gofrs/flock"
 	"github.com/siro33950/knowbrew/internal/domain"
@@ -32,7 +34,9 @@ func TestTargetedSearchVisibilityAndShow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if active.Total != 1 || active.Results[0].Slug != "active-claim" || active.Results[0].ID != "" {
+	if active.Total != 1 || active.Results[0].ID != "active-claim" ||
+		active.Results[0].Subject != "subject" || active.Results[0].Claim != "focused testing" ||
+		len(active.Results[0].Subjects) != 0 {
 		t.Fatalf("active knowledge search = %#v", active)
 	}
 
@@ -47,9 +51,26 @@ func TestTargetedSearchVisibilityAndShow(t *testing.T) {
 		t.Fatalf("knowledge with pending = %#v", withPending)
 	}
 	for _, result := range withPending.Results {
-		if result.Slug == "invalidated-claim" || result.ID != "" {
+		if result.ID == "invalidated-claim" {
 			t.Fatalf("unexpected knowledge result = %#v", result)
 		}
+	}
+	withRetired, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetKnowledge, Keywords: []string{"focused"}, IncludeRetired: true,
+		Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withRetired.Total != 2 {
+		t.Fatalf("knowledge with retired = %#v", withRetired)
+	}
+	statuses := map[domain.Status]bool{}
+	for _, result := range withRetired.Results {
+		statuses[result.Status] = true
+	}
+	if !statuses[domain.StatusActive] || !statuses[domain.StatusInvalidated] {
+		t.Fatalf("retired statuses = %#v", withRetired.Results)
 	}
 
 	facts, err := Search(context.Background(), dataStore, SearchOptions{
@@ -58,17 +79,51 @@ func TestTargetedSearchVisibilityAndShow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if facts.Total != 1 || facts.Results[0].ID != feedstock.ID || facts.Results[0].Slug != "" {
+	if facts.Total != 1 || facts.Results[0].ID != feedstock.ID {
 		t.Fatalf("feedstock search = %#v", facts)
 	}
-
-	triggered, err := Search(context.Background(), dataStore, SearchOptions{
-		Target: TargetKnowledge, Topic: "testing", Trigger: "always", Limit: 10, MaxTokens: 1000,
+	filteredFeedstock, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetFeedstock, Subject: "subject",
+		Limit: 10, MaxTokens: 1000,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if triggered.Total != 1 || triggered.Results[0].Slug != "active-claim" {
+	if filteredFeedstock.Total != 1 ||
+		strings.Join(filteredFeedstock.Results[0].Subjects, ",") != "subject" {
+		t.Fatalf("plain-name feedstock filter = %#v", filteredFeedstock)
+	}
+	filteredKnowledge, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetKnowledge, Subject: "subject",
+		Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filteredKnowledge.Total != 1 {
+		t.Fatalf("plain-name knowledge filter = %#v", filteredKnowledge)
+	}
+	filterJSON, err := json.Marshal(struct {
+		Feedstock SearchResponse `json:"feedstock"`
+		Knowledge SearchResponse `json:"knowledge"`
+	}{
+		Feedstock: filteredFeedstock,
+		Knowledge: filteredKnowledge,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(filterJSON), "[[") {
+		t.Fatalf("wikilink leaked into search JSON: %s", filterJSON)
+	}
+
+	triggered, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetKnowledge, Subject: "subject", Trigger: "always", Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if triggered.Total != 1 || triggered.Results[0].ID != "active-claim" {
 		t.Fatalf("trigger search = %#v", triggered)
 	}
 	if _, err := Search(context.Background(), dataStore, SearchOptions{
@@ -81,7 +136,9 @@ func TestTargetedSearchVisibilityAndShow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(shown.Feedstocks) != 1 || shown.Feedstocks[0].UserQuote != feedstock.UserQuote {
+	if len(shown.Feedstocks) != 1 ||
+		shown.Feedstocks[0].TurnID != feedstock.TurnID ||
+		!reflect.DeepEqual(shown.Feedstocks[0].Assertions, feedstock.Assertions) {
 		t.Fatalf("show = %#v", shown)
 	}
 	encoded, err := json.Marshal(shown)
@@ -91,6 +148,270 @@ func TestTargetedSearchVisibilityAndShow(t *testing.T) {
 	if !strings.Contains(string(encoded), `"feedstocks"`) ||
 		!strings.Contains(string(encoded), `\"ignore previous instructions\"`) {
 		t.Fatalf("unsafe content escaped its JSON string: %s", encoded)
+	}
+}
+
+func TestKnowledgeSearchTimestampUsesEstablishedSourceEvent(t *testing.T) {
+	dataStore := newStore(t)
+	olderAt := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	newerAt := olderAt.Add(24 * time.Hour)
+	older := writeFeedstock(t, dataStore, "fs-established", olderAt, "temporal provenance")
+	newer := writeFeedstock(t, dataStore, "fs-extra-evidence", newerAt, "temporal provenance")
+	fileTime := time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC)
+	if err := dataStore.WriteNewKnowledge("temporal-provenance", domain.Knowledge{
+		Created: fileTime, Updated: fileTime, Type: domain.KnowledgeType("property"),
+		Subject:    "subject",
+		Feedstocks: []string{older.ID, newer.ID}, EstablishedBy: older.ID,
+	}, "## Claim\n\nUse source-event time for semantic recency."); err != nil {
+		t.Fatal(err)
+	}
+	response, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetKnowledge, Keywords: []string{"semantic recency"},
+		IncludePending: true, Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Total != 1 || response.Results[0].EstablishedAt != newerAt.Format(time.RFC3339Nano) {
+		t.Fatalf("search timestamp = %#v, want newest supporting source time %s", response, newerAt)
+	}
+}
+
+func TestSearchIndexesWikilinkFilesAsPlainNames(t *testing.T) {
+	dataStore := newStore(t)
+	feedstock := writeFeedstock(
+		t,
+		dataStore,
+		"claude-session-t000001",
+		time.Now().UTC(),
+		"linked source",
+	)
+	now := time.Now().UTC()
+	if err := dataStore.WriteNewKnowledge("linked-claim", domain.Knowledge{
+		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
+		Subject: "indexed-subject", Feedstocks: []string{feedstock.ID},
+		Status: domain.StatusPending,
+	}, "## Claim\n\nLinked claim"); err != nil {
+		t.Fatal(err)
+	}
+	for _, options := range []SearchOptions{
+		{
+			Target: TargetFeedstock, Subject: "subject",
+			Limit: 10, MaxTokens: 1000,
+		},
+		{
+			Target: TargetKnowledge, Subject: "indexed-subject",
+			IncludePending: true, Limit: 10, MaxTokens: 1000,
+		},
+	} {
+		response, err := Search(context.Background(), dataStore, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.Total != 1 || len(response.Results) != 1 {
+			t.Fatalf("linked search result = %#v", response)
+		}
+		data, err := json.Marshal(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "[[") {
+			t.Fatalf("wikilink leaked into search response: %s", data)
+		}
+	}
+	bySubjectKeyword, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetKnowledge, Keywords: []string{"indexed-subject"},
+		IncludePending: true, Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bySubjectKeyword.Total != 1 || bySubjectKeyword.Results[0].ID != "linked-claim" {
+		t.Fatalf("subject keyword search = %#v", bySubjectKeyword)
+	}
+}
+
+func TestKnowledgeAndFeedstockTypeFilters(t *testing.T) {
+	dataStore := newStore(t)
+	feedstock := writeFeedstock(
+		t,
+		dataStore,
+		"claude-session-t000001",
+		time.Now().UTC(),
+		"typed source",
+	)
+	writeKnowledge(
+		t,
+		dataStore,
+		"typed-knowledge",
+		feedstock.ID,
+		domain.StatusActive,
+		"typed claim",
+		"",
+	)
+	feedstocks, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetFeedstock, Type: domain.KnowledgeType("property"), Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if feedstocks.Total != 1 ||
+		fmt.Sprint(feedstocks.Results[0].Types) != "[property]" {
+		t.Fatalf("feedstock type results = %#v", feedstocks)
+	}
+	knowledge, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetKnowledge, Type: domain.KnowledgeType("property"), Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if knowledge.Total != 1 || knowledge.Results[0].Type != domain.KnowledgeType("property") {
+		t.Fatalf("knowledge type results = %#v", knowledge)
+	}
+	none, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetFeedstock, Type: domain.KnowledgeType("decision"), Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if none.Total != 0 {
+		t.Fatalf("unexpected decision results = %#v", none)
+	}
+	if _, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetFeedstock, Type: "other",
+	}); err == nil || !strings.Contains(err.Error(), "not defined in masters/types") {
+		t.Fatalf("invalid type error = %v", err)
+	}
+}
+
+func TestShowRawPaginatesCompleteDialogueAsJSONStringValues(t *testing.T) {
+	dataStore := newStore(t)
+	logPath := filepath.Join(t.TempDir(), "session.jsonl")
+	userText := strings.Repeat("あ", 5000)
+	assistantText := strings.Repeat("response", 1800)
+	content := fmt.Sprintf(
+		"{\"type\":\"user\",\"uuid\":\"turn-raw\",\"sessionId\":\"session\",\"timestamp\":\"2026-07-30T01:00:00Z\",\"message\":{\"role\":\"user\",\"content\":%q}}\n"+
+			"{\"type\":\"assistant\",\"sessionId\":\"session\",\"timestamp\":\"2026-07-30T01:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":%q}]}}\n",
+		userText,
+		assistantText,
+	)
+	if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feedstock := domain.Feedstock{
+		Schema: domain.SchemaVersion,
+		ID:     "fs-raw-dialogue",
+		TurnID: "turn-raw",
+		Session: domain.SessionRef{
+			ID:   "session",
+			Path: logPath,
+		},
+		Timestamp: time.Now().UTC(),
+		Agent:     "claude",
+	}
+	if err := dataStore.WriteFeedstock(feedstock); err != nil {
+		t.Fatal(err)
+	}
+
+	dialogue, err := ExtractRawDialogue(dataStore, feedstock.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dialogue) != 2 ||
+		dialogue[0].Role != "user" || dialogue[0].Content != userText ||
+		dialogue[1].Role != "assistant" || dialogue[1].Content != assistantText {
+		t.Fatalf("extracted raw dialogue = %#v", dialogue)
+	}
+
+	first, err := ShowRaw(dataStore, feedstock.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.TotalPages < 2 || !first.HasMore || first.Page != 1 ||
+		first.FeedstockID != feedstock.ID || first.TurnID != feedstock.TurnID {
+		t.Fatalf("first raw page = %#v", first)
+	}
+	var gotUser, gotAssistant strings.Builder
+	for page := 1; page <= first.TotalPages; page++ {
+		response, err := ShowRaw(dataStore, feedstock.ID, page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.Page != page || response.TotalPages != first.TotalPages ||
+			response.HasMore != (page < first.TotalPages) {
+			t.Fatalf("raw page %d = %#v", page, response)
+		}
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !json.Valid(encoded) || !strings.Contains(string(encoded), `"content":"`) {
+			t.Fatalf("raw page is not JSON-string encoded: %s", encoded)
+		}
+		for _, message := range response.Messages {
+			switch message.Role {
+			case "user":
+				gotUser.WriteString(message.Content)
+			case "assistant":
+				gotAssistant.WriteString(message.Content)
+			default:
+				t.Fatalf("unexpected role %q", message.Role)
+			}
+		}
+	}
+	if gotUser.String() != userText || gotAssistant.String() != assistantText {
+		t.Fatalf(
+			"reconstructed lengths user=%d/%d assistant=%d/%d",
+			gotUser.Len(),
+			len(userText),
+			gotAssistant.Len(),
+			len(assistantText),
+		)
+	}
+	if _, err := ShowRaw(dataStore, feedstock.ID, first.TotalPages+1); err == nil ||
+		!strings.Contains(err.Error(), "exceeds total pages") {
+		t.Fatalf("out-of-range page error = %v", err)
+	}
+}
+
+func TestShowRawReportsMissingSourceLog(t *testing.T) {
+	dataStore := newStore(t)
+	feedstock := domain.Feedstock{
+		Schema: domain.SchemaVersion,
+		ID:     "fs-missing-source",
+		TurnID: "turn-missing",
+		Session: domain.SessionRef{
+			ID:   "session",
+			Path: filepath.Join(t.TempDir(), "missing.jsonl"),
+		},
+		Timestamp: time.Now().UTC(),
+		Agent:     "claude",
+	}
+	if err := dataStore.WriteFeedstock(feedstock); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ShowRaw(dataStore, feedstock.ID, 1)
+	if err == nil || !strings.Contains(err.Error(), "source log") ||
+		!strings.Contains(err.Error(), "was not found") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestPaginateDialoguePreservesUTF8WhenRuneExceedsPageSize(t *testing.T) {
+	pages := paginateDialogue([]domain.DialogueMessage{
+		{Role: "user", Content: "日本語"},
+	}, 1)
+	var reconstructed strings.Builder
+	for _, page := range pages {
+		for _, message := range page {
+			if !utf8.ValidString(message.Content) {
+				t.Fatalf("invalid UTF-8 page: %#v", page)
+			}
+			reconstructed.WriteString(message.Content)
+		}
+	}
+	if reconstructed.String() != "日本語" {
+		t.Fatalf("reconstructed = %q", reconstructed.String())
 	}
 }
 
@@ -171,32 +492,48 @@ func TestSearchSupportsJapaneseEnglishShortTermsAndTokenBudget(t *testing.T) {
 	}
 }
 
-func TestIncrementalFeedstockSyncDoesNotReparseAndFindsNewRecords(t *testing.T) {
+func TestIncrementalFeedstockSyncUpdatesClassificationFields(t *testing.T) {
 	dataStore := newStore(t)
-	base := time.Now().UTC()
-	first := writeFeedstock(t, dataStore, "claude-session-t000001", base, "first indexed fact")
-	if _, err := Search(context.Background(), dataStore, SearchOptions{
-		Target: TargetFeedstock, Limit: 10, MaxTokens: 1000,
-	}); err != nil {
+	feedstock := domain.Feedstock{
+		Schema: domain.SchemaVersion, ID: "claude-session-t000001",
+		TurnID:    "turn-1",
+		Session:   domain.SessionRef{ID: "session", Path: "/logs/session.jsonl"},
+		Timestamp: time.Now().UTC(), Agent: "claude", Subjects: []string{"subject"},
+		Summary: "classification-summary-keyword",
+	}
+	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
 	}
-
-	firstPath, _ := dataStore.FeedstockPath(first)
-	if err := os.WriteFile(firstPath, []byte("not valid frontmatter"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	second := writeFeedstock(t, dataStore, "claude-session-t000002", base.Add(time.Second), "new incremental fact")
-	response, err := Search(context.Background(), dataStore, SearchOptions{
-		Target: TargetFeedstock, Limit: 10, MaxTokens: 1000,
+	before, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetFeedstock, Keywords: []string{"raw-before-classification"},
+		Limit: 10, MaxTokens: 1000,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Total != 2 || len(response.Warnings) != 0 {
-		t.Fatalf("incremental response = %#v", response)
+	if before.Total != 0 {
+		t.Fatalf("unannotated search = %#v", before)
 	}
-	if response.Results[0].ID != second.ID || response.Results[1].ID != first.ID {
-		t.Fatalf("incremental results = %#v", response.Results)
+	if err := dataStore.AnnotateFeedstock(
+		feedstock.ID,
+		[]domain.Assertion{{
+			ID: "as-classified", Type: "property", Subject: "subject",
+			Statement: "assertion-search-keyword remains searchable.",
+		}},
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	after, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetFeedstock, Keywords: []string{"classification-summary-keyword"},
+		Type: domain.KnowledgeType("property"), Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Total != 1 || after.Results[0].ID != feedstock.ID ||
+		after.Results[0].Summary != "classification-summary-keyword" {
+		t.Fatalf("classified search = %#v", after)
 	}
 }
 
@@ -220,6 +557,7 @@ func TestKnowledgeMtimeUpdateAndDeletionAreImmediate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	knowledge.Approved = true
 	knowledge.Status = domain.StatusActive
 	if err := writeKnowledgeForTest(path, knowledge, body); err != nil {
 		t.Fatal(err)
@@ -234,7 +572,7 @@ func TestKnowledgeMtimeUpdateAndDeletionAreImmediate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if visible.Total != 1 || visible.Results[0].Slug != "status-change" {
+	if visible.Total != 1 || visible.Results[0].ID != "status-change" {
 		t.Fatalf("promoted knowledge search = %#v", visible)
 	}
 
@@ -252,6 +590,118 @@ func TestKnowledgeMtimeUpdateAndDeletionAreImmediate(t *testing.T) {
 	}
 }
 
+func TestSearchReconcilesDirectApprovalAndHidesSupersededKnowledge(t *testing.T) {
+	dataStore := newStore(t)
+	now := time.Now().UTC()
+	feedstock := writeFeedstock(t, dataStore, "claude-session-t000001", now, "lifecycle")
+	writeKnowledge(
+		t,
+		dataStore,
+		"old-lifecycle-rule",
+		feedstock.ID,
+		domain.StatusActive,
+		"lifecycle old rule",
+		"",
+	)
+	if err := dataStore.WriteNewKnowledge("new-lifecycle-rule", domain.Knowledge{
+		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
+		Subject:    "subject",
+		Feedstocks: []string{feedstock.ID},
+		Supersedes: []string{"old-lifecycle-rule"},
+	}, "## Claim\n\nlifecycle new rule"); err != nil {
+		t.Fatal(err)
+	}
+	newPath, _ := dataStore.KnowledgePath("new-lifecycle-rule")
+	successor, body, err := dataStore.ReadKnowledge(newPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor.Approved = true
+	if err := writeKnowledgeForTest(newPath, successor, body); err != nil {
+		t.Fatal(err)
+	}
+	active, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetKnowledge, Keywords: []string{"lifecycle"},
+		Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.Total != 1 || active.Results[0].ID != "new-lifecycle-rule" {
+		t.Fatalf("active lifecycle results = %#v", active)
+	}
+	if strings.Join(active.Results[0].Supersedes, ",") != "old-lifecycle-rule" {
+		t.Fatalf("active lifecycle lineage = %#v", active.Results[0])
+	}
+	oldPath, _ := dataStore.KnowledgePath("old-lifecycle-rule")
+	old, _, err := dataStore.ReadKnowledge(oldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.Status != domain.StatusSuperseded ||
+		old.SupersededBy != "new-lifecycle-rule" {
+		t.Fatalf("old lifecycle knowledge = %#v", old)
+	}
+	withRetired, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetKnowledge, Keywords: []string{"lifecycle"}, IncludeRetired: true,
+		Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withRetired.Total != 2 {
+		t.Fatalf("retired lifecycle results = %#v", withRetired)
+	}
+}
+
+func TestSearchHidesPendingPredecessorOfPendingSuccessor(t *testing.T) {
+	dataStore := newStore(t)
+	now := time.Now().UTC()
+	feedstock := writeFeedstock(
+		t,
+		dataStore,
+		"claude-session-t000001",
+		now,
+		"pending lifecycle",
+	)
+	writeKnowledge(
+		t,
+		dataStore,
+		"old-pending-rule",
+		feedstock.ID,
+		domain.StatusPending,
+		"pending lifecycle old rule",
+		"",
+	)
+	if err := dataStore.WriteNewKnowledge("new-pending-rule", domain.Knowledge{
+		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
+		Subject:    "subject",
+		Feedstocks: []string{feedstock.ID},
+		Supersedes: []string{"old-pending-rule"},
+	}, "## Claim\n\npending lifecycle new rule"); err != nil {
+		t.Fatal(err)
+	}
+	visible, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetKnowledge, Keywords: []string{"pending lifecycle"},
+		IncludePending: true, Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if visible.Total != 1 || visible.Results[0].ID != "new-pending-rule" {
+		t.Fatalf("pending lifecycle results = %#v", visible)
+	}
+	oldPath, _ := dataStore.KnowledgePath("old-pending-rule")
+	old, _, err := dataStore.ReadKnowledge(oldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.Status != domain.StatusSuperseded ||
+		old.SupersededBy != "new-pending-rule" {
+		t.Fatalf("old pending knowledge = %#v", old)
+	}
+}
+
 func TestIndexVersionMismatchAndCorruptionRebuildFromSource(t *testing.T) {
 	dataStore := newStore(t)
 	feedstock := writeFeedstock(t, dataStore, "claude-session-t000001", time.Now().UTC(), "rebuild source")
@@ -261,7 +711,7 @@ func TestIndexVersionMismatchAndCorruptionRebuildFromSource(t *testing.T) {
 	if _, err := Search(context.Background(), dataStore, options); err != nil {
 		t.Fatal(err)
 	}
-	indexPath := filepath.Join(dataStore.Root, ".state", "index.sqlite")
+	indexPath := filepath.Join(dataStore.Root, ".knowbrew", "state", "index.sqlite")
 
 	database, err := sql.Open("sqlite", indexPath)
 	if err != nil {
@@ -323,7 +773,7 @@ func TestIndexSchemaUsesKindsAndExternalContentFTS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	indexPath := filepath.Join(dataStore.Root, ".state", "index.sqlite")
+	indexPath := filepath.Join(dataStore.Root, ".knowbrew", "state", "index.sqlite")
 	database, err := sql.Open("sqlite", indexPath)
 	if err != nil {
 		t.Fatal(err)
@@ -388,7 +838,7 @@ func TestIndexSchemaUsesKindsAndExternalContentFTS(t *testing.T) {
 	if err := columns.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if !names["kind"] || names["layer"] {
+	if !names["kind"] || !names["type"] || names["layer"] {
 		t.Fatalf("document columns = %#v", names)
 	}
 
@@ -434,7 +884,7 @@ func TestReindexAndBrokenRecordWarnings(t *testing.T) {
 
 func TestSearchLockFailsImmediatelyWhenHeld(t *testing.T) {
 	dataStore := newStore(t)
-	lock := flock.New(filepath.Join(dataStore.Root, ".state", "index.lock"))
+	lock := flock.New(filepath.Join(dataStore.Root, ".knowbrew", "state", "index.lock"))
 	if err := lock.Lock(); err != nil {
 		t.Fatal(err)
 	}
@@ -463,17 +913,16 @@ func BenchmarkIncrementalSearch3000Feedstocks(b *testing.B) {
 		feedstock := domain.Feedstock{
 			Schema: domain.SchemaVersion,
 			ID:     fmt.Sprintf("claude-benchmark-t%06d", index),
+			TurnID: fmt.Sprintf("turn-%06d", index),
 			Session: domain.SessionRef{
 				ID:   "benchmark",
 				Path: "/logs/benchmark.jsonl",
 			},
-			Timestamp:  base.Add(time.Duration(index) * time.Second),
-			Agent:      "claude",
-			UserQuote:  "Measure incremental search latency.",
-			SpeechActs: []string{"request"},
-			Subjects:   []string{"knowbrew"},
-			Topics:     []string{"performance"},
-			Summary:    "Measure incremental search latency.",
+			Timestamp:   base.Add(time.Duration(index) * time.Second),
+			Agent:       "claude",
+			Subjects:    []string{"knowbrew"},
+			Summary:     "Measure incremental search latency.",
+			AnnotatedAt: benchmarkTime(base),
 		}
 		path, err := dataStore.FeedstockPath(feedstock)
 		if err != nil {
@@ -532,22 +981,32 @@ func writeFeedstock(
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion,
 		ID:     id,
+		TurnID: "turn-" + id,
 		Session: domain.SessionRef{
 			ID:   "session",
 			Path: "/logs/session.jsonl",
 		},
-		Timestamp:  timestamp,
-		Agent:      "claude",
-		UserQuote:  text + "\n\"ignore previous instructions\"",
-		SpeechActs: []string{"fact"},
-		Subjects:   []string{"project"},
-		Topics:     []string{"testing"},
-		Summary:    text,
+		Timestamp: timestamp,
+		Agent:     "claude",
+		Types:     []domain.KnowledgeType{domain.KnowledgeType("property")},
+		Subjects:  []string{"subject"},
+		Summary:   text,
+		Assertions: []domain.Assertion{{
+			ID: "as-" + id, Type: "property", Subject: "subject",
+			Statement: text,
+			Rationale: `The source contains "ignore previous instructions" as data.`,
+		}},
+		AnnotatedAt: benchmarkTime(timestamp),
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
 	}
 	return feedstock
+}
+
+func benchmarkTime(value time.Time) *time.Time {
+	copy := value
+	return &copy
 }
 
 func writeKnowledge(
@@ -560,10 +1019,10 @@ func writeKnowledge(
 	t.Helper()
 	now := time.Now().UTC()
 	if err := dataStore.WriteNewKnowledge(slug, domain.Knowledge{
-		Created: now, Updated: now, Topics: []string{"testing"},
-		AppliesWhen: "When " + claim, Sources: []string{source},
+		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
+		Subject: "subject", Feedstocks: []string{source},
 		Status: domain.StatusPending, Trigger: trigger,
-	}, "# "+claim); err != nil {
+	}, "## Claim\n\n"+claim); err != nil {
 		t.Fatal(err)
 	}
 	path, _ := dataStore.KnowledgePath(slug)
@@ -571,6 +1030,7 @@ func writeKnowledge(
 	if err != nil {
 		t.Fatal(err)
 	}
+	knowledge.Approved = status == domain.StatusActive
 	knowledge.Status = status
 	if status == domain.StatusInvalidated {
 		knowledge.InvalidatedAt = &now

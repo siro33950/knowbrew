@@ -1,11 +1,11 @@
 package parser
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/siro33950/knowbrew/internal/diagnostic"
 	"github.com/siro33950/knowbrew/internal/domain"
@@ -13,6 +13,7 @@ import (
 
 type Parser interface {
 	Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warning, error)
+	ExtractTurn(path, turnID string) ([]domain.DialogueMessage, error)
 }
 
 func For(name string) (Parser, error) {
@@ -26,15 +27,19 @@ func For(name string) (Parser, error) {
 	}
 }
 
-var unsafeID = regexp.MustCompile(`[^A-Za-z0-9._:-]+`)
+func FeedstockID(agent, sessionID, turnID string) string {
+	digest := sha256.Sum256([]byte(
+		"knowbrew-feedstock-v1\x00" + agent + "\x00" + sessionID + "\x00" + turnID,
+	))
+	return "fs-" + hex.EncodeToString(digest[:16])
+}
 
-func FeedstockID(agent, sessionID string, number int) string {
-	sessionID = unsafeID.ReplaceAllString(sessionID, "-")
-	sessionID = strings.Trim(sessionID, "-")
-	if sessionID == "" {
-		sessionID = "unknown"
+func sourceTurnID(explicit string, rawRecord []byte) string {
+	if explicit = strings.TrimSpace(explicit); explicit != "" {
+		return explicit
 	}
-	return fmt.Sprintf("%s-%s-t%06d", agent, sessionID, number)
+	digest := sha256.Sum256(rawRecord)
+	return "record-" + hex.EncodeToString(digest[:16])
 }
 
 func sessionIDFromPath(path string) string {
@@ -50,17 +55,4 @@ func sessionIDFromPath(path string) string {
 
 func SessionIDHint(path string) string {
 	return sessionIDFromPath(path)
-}
-
-func clipped(value string) string {
-	const limit = 4000
-	value = strings.TrimSpace(value)
-	if len(value) <= limit {
-		return value
-	}
-	end := limit
-	for end > 0 && !utf8.RuneStart(value[end]) {
-		end--
-	}
-	return value[:end] + "…"
 }

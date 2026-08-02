@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/siro33950/knowbrew/internal/config"
@@ -22,12 +23,35 @@ type Task string
 var ErrTimeout = errors.New("LLM backend timed out")
 
 const (
-	TaskAnnotate Task = "annotate"
-	TaskBrew     Task = "brew"
+	TaskSummarize Task = "summarize"
+	TaskAnnotate  Task = "annotate"
+	TaskBrew      Task = "brew"
+
+	diagnosticMaxLines = 20
+	diagnosticMaxRunes = 2000
 )
 
+const diagnosticTruncatedMarker = "[earlier diagnostic output truncated]"
+
 type Runner interface {
-	Run(context.Context, Task, string, string) error
+	Run(context.Context, Task, string, string) (RunResult, error)
+}
+
+type RunResult struct {
+	Output json.RawMessage
+	Usage  Usage
+	Reads  invocation.ReadState
+}
+
+type assertionContextKey struct{}
+
+func WithAssertion(ctx context.Context, assertionID string) context.Context {
+	return context.WithValue(ctx, assertionContextKey{}, strings.TrimSpace(assertionID))
+}
+
+func assertionFromContext(ctx context.Context) string {
+	value, _ := ctx.Value(assertionContextKey{}).(string)
+	return strings.TrimSpace(value)
 }
 
 type CommandRunner struct {
@@ -35,83 +59,201 @@ type CommandRunner struct {
 	Executable string
 	WorkDir    string
 	Progress   io.Writer
+	Verbose    bool
+	progressMu sync.Mutex
 }
 
-func New(cfg config.Config, executable, workDir string, progress io.Writer) (Runner, error) {
+func New(cfg config.Config, executable, workDir string, progress io.Writer, verbose ...bool) (Runner, error) {
+	streamOutput := len(verbose) > 0 && verbose[0]
 	if cfg.LLM.Backend == "api" || cfg.LLM.Backend == "ollama" {
-		return NewToolRunner(cfg, executable, workDir, progress), nil
+		return NewToolRunner(cfg, executable, workDir, progress, streamOutput), nil
 	}
 	return &CommandRunner{
 		Config:     cfg,
 		Executable: executable,
 		WorkDir:    workDir,
 		Progress:   progress,
+		Verbose:    streamOutput,
 	}, nil
 }
 
-func (runner *CommandRunner) Run(ctx context.Context, task Task, feedstockID, prompt string) error {
+func (runner *CommandRunner) Run(
+	ctx context.Context,
+	task Task,
+	feedstockID,
+	prompt string,
+) (RunResult, error) {
 	timeout, err := runner.Config.LLM.TimeoutDuration()
 	if err != nil {
-		return err
+		return RunResult{}, err
 	}
 	runContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var command *exec.Cmd
-	prompt = fmt.Sprintf("%s\n\nUse this exact knowbrew executable for every operation: %s", prompt, runner.Executable)
+	model, err := modelForTask(runner.Config, task)
+	if err != nil {
+		return RunResult{}, err
+	}
+	effort, err := effortForTask(runner.Config, task)
+	if err != nil {
+		return RunResult{}, err
+	}
+	typeNames, err := knowledgeTypeNames(runner.Config, task)
+	if err != nil {
+		return RunResult{}, err
+	}
+	schemaData, err := json.Marshal(resultSchema(task, typeNames))
+	if err != nil {
+		return RunResult{}, fmt.Errorf("encode result schema: %w", err)
+	}
+	schemaPath, err := writeTemporaryFile("knowbrew-result-schema-", schemaData)
+	if err != nil {
+		return RunResult{}, err
+	}
+	defer os.Remove(schemaPath)
+	resultPath, err := writeTemporaryFile("knowbrew-result-", nil)
+	if err != nil {
+		return RunResult{}, err
+	}
+	defer os.Remove(resultPath)
+	if task != TaskSummarize {
+		prompt = fmt.Sprintf("%s\n\nUse this exact knowbrew executable only for the permitted read operations: %s", prompt, runner.Executable)
+	}
 	switch runner.Config.LLM.Backend {
 	case "claude-cli":
 		args := []string{
 			"-p", prompt,
-			"--tools", "Bash",
-			"--allowedTools", strings.Join(claudeAllowedTools(runner.Executable, task), " "),
 			"--permission-mode", "dontAsk",
 			"--safe-mode",
 			"--no-session-persistence",
+			"--strict-mcp-config",
+			"--output-format", "json",
+			"--json-schema", string(schemaData),
 		}
-		if runner.Config.LLM.Model != "" {
-			args = append(args, "--model", runner.Config.LLM.Model)
+		allowed := claudeAllowedTools(runner.Executable, task)
+		if len(allowed) == 0 {
+			args = append(args, "--tools", "")
+		} else {
+			args = append(args, "--tools", "Bash", "--allowedTools", strings.Join(allowed, " "))
+		}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		if strings.TrimSpace(effort) != "" {
+			args = append(args, "--effort", effort)
 		}
 		command = exec.CommandContext(runContext, "claude", args...)
 	case "codex-cli":
-		args := []string{
-			"exec", "--sandbox", "workspace-write", "--ephemeral",
-			"--ignore-user-config", "--skip-git-repo-check", "-C", runner.WorkDir,
+		args := []string{"exec"}
+		if strings.TrimSpace(effort) != "" {
+			args = append(args, "-c", "model_reasoning_effort="+effort)
 		}
-		if runner.Config.LLM.Model != "" {
-			args = append(args, "--model", runner.Config.LLM.Model)
+		args = append(args,
+			"--sandbox", "workspace-write", "--ephemeral",
+			"--skip-git-repo-check", "--json", "-C", runner.WorkDir,
+			"--output-schema", schemaPath, "--output-last-message", resultPath,
+		)
+		if model != "" {
+			args = append(args, "--model", model)
 		}
 		args = append(args, prompt)
 		command = exec.CommandContext(runContext, "codex", args...)
 	default:
-		return fmt.Errorf("unsupported command LLM backend %q", runner.Config.LLM.Backend)
+		return RunResult{}, fmt.Errorf("unsupported command LLM backend %q", runner.Config.LLM.Backend)
 	}
 	command.Dir = runner.WorkDir
 	invocationID := newInvocationID()
 	defer invocation.Cleanup(runner.Config.Root, invocationID)
-	command.Env = invocationEnvironment(os.Environ(), runner.Config.Path, feedstockID, invocationID)
+	command.Env = invocationEnvironment(
+		os.Environ(), runner.Config.Path, feedstockID, assertionFromContext(ctx), invocationID,
+	)
 	stdout := newTailWriter(32 << 10)
 	stderr := newTailWriter(32 << 10)
-	if runner.Progress != nil {
-		command.Stdout = io.MultiWriter(runner.Progress, stdout)
-		command.Stderr = io.MultiWriter(runner.Progress, stderr)
+	usageOutput := &usageCapture{}
+	if runner.Verbose && runner.Progress != nil {
+		liveOutput := lockedWriter{writer: runner.Progress, mu: &runner.progressMu}
+		command.Stdout = io.MultiWriter(liveOutput, stdout, usageOutput)
+		command.Stderr = io.MultiWriter(liveOutput, stderr)
 	} else {
-		command.Stdout = stdout
+		command.Stdout = io.MultiWriter(stdout, usageOutput)
 		command.Stderr = stderr
 	}
 	if err := command.Run(); err != nil {
-		if invocation.Completed(runner.Config.Root, invocationID) {
-			return nil
-		}
-		diagnostic := commandDiagnostic(stderr.String(), stdout.String())
+		usage := usageOutput.Usage(runner.Config.LLM.Backend)
+		diagnostic := commandDiagnostic(stderr.String(), stdout.String(), prompt)
 		if errors.Is(runContext.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("%w after %s%s", ErrTimeout, timeout, diagnostic)
+			return RunResult{Usage: usage}, fmt.Errorf("%w after %s%s", ErrTimeout, timeout, diagnostic)
 		}
 		if errors.Is(runContext.Err(), context.Canceled) {
-			return runContext.Err()
+			return RunResult{Usage: usage}, runContext.Err()
 		}
-		return fmt.Errorf("%s failed: %w%s", runner.Config.LLM.Backend, err, diagnostic)
+		return RunResult{Usage: usage}, fmt.Errorf("%s failed: %w%s", runner.Config.LLM.Backend, err, diagnostic)
 	}
-	return nil
+	usage := usageOutput.Usage(runner.Config.LLM.Backend)
+	var output json.RawMessage
+	if runner.Config.LLM.Backend == "codex-cli" {
+		data, readErr := os.ReadFile(resultPath)
+		if readErr != nil {
+			return RunResult{Usage: usage}, fmt.Errorf("read structured result: %w", readErr)
+		}
+		output = json.RawMessage(strings.TrimSpace(string(data)))
+	} else {
+		output, err = claudeStructuredOutput(usageOutput.Bytes())
+		if err != nil {
+			return RunResult{Usage: usage}, err
+		}
+	}
+	if !json.Valid(output) {
+		return RunResult{Usage: usage}, errors.New("backend returned invalid structured JSON")
+	}
+	reads, err := invocation.ReadStateForInvocation(runner.Config.Root, invocationID)
+	if err != nil {
+		return RunResult{Output: output, Usage: usage}, err
+	}
+	return RunResult{Output: output, Usage: usage, Reads: reads}, nil
+}
+
+func (runner *CommandRunner) RunWithUsage(
+	ctx context.Context,
+	task Task,
+	feedstockID,
+	prompt string,
+) (Usage, error) {
+	result, err := runner.Run(ctx, task, feedstockID, prompt)
+	return result.Usage, err
+}
+
+type lockedWriter struct {
+	writer io.Writer
+	mu     *sync.Mutex
+}
+
+func (writer lockedWriter) Write(data []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return writer.writer.Write(data)
+}
+
+func modelForTask(cfg config.Config, task Task) (string, error) {
+	switch task {
+	case TaskSummarize, TaskAnnotate:
+		return strings.TrimSpace(cfg.LLM.DrawModel), nil
+	case TaskBrew:
+		return strings.TrimSpace(cfg.LLM.BrewModel), nil
+	default:
+		return "", fmt.Errorf("unsupported LLM task %q", task)
+	}
+}
+
+func effortForTask(cfg config.Config, task Task) (string, error) {
+	switch task {
+	case TaskSummarize, TaskAnnotate:
+		return cfg.LLM.DrawEffort, nil
+	case TaskBrew:
+		return cfg.LLM.BrewEffort, nil
+	default:
+		return "", fmt.Errorf("unsupported LLM task %q", task)
+	}
 }
 
 type tailWriter struct {
@@ -139,18 +281,53 @@ func (writer *tailWriter) String() string {
 	return strings.ToValidUTF8(string(writer.data), "�")
 }
 
-func commandDiagnostic(stderr, stdout string) string {
-	var parts []string
-	if value := strings.TrimSpace(stderr); value != "" {
-		parts = append(parts, "stderr:\n"+value)
+func commandDiagnostic(stderr, stdout, prompt string) string {
+	stderr = compactDiagnostic(stderr, prompt)
+	stdout = compactDiagnostic(stdout, prompt)
+	if stdout != "" && (stdout == stderr || strings.Contains(stderr, stdout)) {
+		stdout = ""
 	}
-	if value := strings.TrimSpace(stdout); value != "" {
-		parts = append(parts, "stdout:\n"+value)
+	var parts []string
+	if stderr != "" {
+		parts = append(parts, "stderr:\n"+stderr)
+	}
+	if stdout != "" {
+		parts = append(parts, "stdout:\n"+stdout)
 	}
 	if len(parts) == 0 {
 		return ""
 	}
 	return "\n" + strings.Join(parts, "\n")
+}
+
+func compactDiagnostic(output, prompt string) string {
+	if prompt != "" {
+		output = strings.ReplaceAll(output, prompt, "")
+	}
+	output = strings.ReplaceAll(output, "\r\n", "\n")
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return ""
+	}
+	lines := strings.Split(output, "\n")
+	runes := []rune(output)
+	if len(lines) <= diagnosticMaxLines && len(runes) <= diagnosticMaxRunes {
+		return output
+	}
+	if len(lines) >= diagnosticMaxLines {
+		lines = lines[len(lines)-(diagnosticMaxLines-1):]
+		output = strings.Join(lines, "\n")
+	}
+	budget := diagnosticMaxRunes - len([]rune(diagnosticTruncatedMarker)) - 1
+	runes = []rune(output)
+	if len(runes) > budget {
+		output = string(runes[len(runes)-budget:])
+	}
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return diagnosticTruncatedMarker
+	}
+	return diagnosticTruncatedMarker + "\n" + output
 }
 
 func newInvocationID() string {
@@ -165,41 +342,60 @@ func claudeAllowedTools(executable string, task Task) []string {
 	pattern := func(command string) string {
 		return "Bash(" + executable + " " + command + ")"
 	}
+	if task == TaskSummarize {
+		return nil
+	}
 	if task == TaskAnnotate {
-		return []string{pattern("feedstock annotate *")}
+		return []string{pattern("feedstock context *")}
 	}
 	return []string{
-		pattern("knowledge create *"),
-		pattern("knowledge add-source *"),
-		pattern("knowledge invalidate *"),
-		pattern("knowledge"),
-		pattern("knowledge -- *"),
-		pattern("knowledge --include-pending *"),
-		pattern("knowledge --subject *"),
-		pattern("knowledge --topic *"),
-		pattern("knowledge --since *"),
-		pattern("knowledge --until *"),
-		pattern("knowledge --limit *"),
-		pattern("knowledge --max-tokens *"),
-		pattern("feedstock"),
-		pattern("feedstock -- *"),
-		pattern("feedstock --subject *"),
-		pattern("feedstock --topic *"),
-		pattern("feedstock --since *"),
-		pattern("feedstock --until *"),
-		pattern("feedstock --limit *"),
-		pattern("feedstock --max-tokens *"),
-		pattern("feedstock --session *"),
-		pattern("feedstock --agent *"),
-		pattern("feedstock --last *"),
-		pattern("show *"),
+		pattern("knowledge catalog *"),
+		pattern("knowledge show *"),
 	}
 }
 
-func invocationEnvironment(base []string, configPath, feedstockID, invocationID string) []string {
+func writeTemporaryFile(pattern string, data []byte) (string, error) {
+	file, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", fmt.Errorf("create temporary result file: %w", err)
+	}
+	path := file.Name()
+	if len(data) > 0 {
+		if _, err := file.Write(data); err != nil {
+			file.Close()
+			os.Remove(path)
+			return "", fmt.Errorf("write temporary result file: %w", err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(path)
+		return "", fmt.Errorf("close temporary result file: %w", err)
+	}
+	return path, nil
+}
+
+func claudeStructuredOutput(data []byte) (json.RawMessage, error) {
+	var response struct {
+		StructuredOutput json.RawMessage `json:"structured_output"`
+		Result           string          `json:"result"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, fmt.Errorf("decode Claude structured response: %w", err)
+	}
+	if len(response.StructuredOutput) > 0 && string(response.StructuredOutput) != "null" {
+		return response.StructuredOutput, nil
+	}
+	if json.Valid([]byte(response.Result)) {
+		return json.RawMessage(response.Result), nil
+	}
+	return nil, errors.New("Claude returned no structured output")
+}
+
+func invocationEnvironment(base []string, configPath, feedstockID, assertionID, invocationID string) []string {
 	values := map[string]string{
 		config.ConfigEnvironment:              configPath,
 		config.InvocationFeedstockEnvironment: feedstockID,
+		config.InvocationAssertionEnvironment: assertionID,
 		config.InvocationIDEnvironment:        invocationID,
 	}
 	out := make([]string, 0, len(base)+len(values))
@@ -212,6 +408,7 @@ func invocationEnvironment(base []string, configPath, feedstockID, invocationID 
 	for _, key := range []string{
 		config.ConfigEnvironment,
 		config.InvocationFeedstockEnvironment,
+		config.InvocationAssertionEnvironment,
 		config.InvocationIDEnvironment,
 	} {
 		out = append(out, key+"="+values[key])
@@ -221,127 +418,25 @@ func invocationEnvironment(base []string, configPath, feedstockID, invocationID 
 
 func commandForTool(executable string, name string, arguments map[string]any) ([]string, error) {
 	switch name {
-	case "feedstock_annotate":
-		args := []string{"feedstock", "annotate", stringValue(arguments, "feedstock_id")}
-		args = appendRepeated(args, "--speech-act", stringSlice(arguments["speech_acts"]))
-		args = appendRepeated(args, "--topic", stringSlice(arguments["topics"]))
-		args = appendRepeated(args, "--subject", stringSlice(arguments["subjects"]))
-		args = append(args, "--summary", stringValue(arguments, "summary"))
-		args = appendRepeated(args, "--new-topic", stringSlice(arguments["new_topics"]))
-		args = appendRepeated(args, "--new-subject", stringSlice(arguments["new_subjects"]))
+	case "feedstock_context":
+		return []string{
+			executable, "feedstock", "context", stringValue(arguments, "feedstock_id"),
+		}, nil
+	case "knowledge_catalog":
+		args := []string{"knowledge", "catalog", "--subject", stringValue(arguments, "subject")}
 		return append([]string{executable}, args...), nil
-	case "knowledge_create":
-		args := []string{"knowledge", "create", stringValue(arguments, "slug"),
-			"--applies-when", stringValue(arguments, "applies_when"),
-			"--body", stringValue(arguments, "body"),
-		}
-		args = appendRepeated(args, "--source", stringSlice(arguments["sources"]))
-		args = appendRepeated(args, "--topic", stringSlice(arguments["topics"]))
-		if value := stringValue(arguments, "project"); value != "" {
-			args = append(args, "--project", value)
-		}
-		if value := stringValue(arguments, "trigger"); value != "" {
-			args = append(args, "--trigger", value)
-		}
-		args = appendRepeated(args, "--new-topic", stringSlice(arguments["new_topics"]))
-		args = appendRepeated(args, "--new-subject", stringSlice(arguments["new_subjects"]))
-		return append([]string{executable}, args...), nil
-	case "knowledge_add_source":
-		args := []string{"knowledge", "add-source", stringValue(arguments, "slug")}
-		args = appendRepeated(args, "--source", stringSlice(arguments["sources"]))
-		return append([]string{executable}, args...), nil
-	case "knowledge_invalidate":
-		args := []string{"knowledge", "invalidate", stringValue(arguments, "slug")}
-		args = appendRepeated(args, "--source", stringSlice(arguments["sources"]))
-		return append([]string{executable}, args...), nil
-	case "knowledge_search":
-		args := []string{"knowledge"}
-		if boolValue(arguments, "include_pending") {
-			args = append(args, "--include-pending")
-		}
-		args = appendSearchFlags(args, arguments)
-		args = appendKeywords(args, arguments)
-		return append([]string{executable}, args...), nil
-	case "feedstock_search":
-		args := []string{"feedstock"}
-		args = appendSearchFlags(args, arguments)
-		args = appendStringFlag(args, "--session", stringValue(arguments, "session"))
-		args = appendStringFlag(args, "--agent", stringValue(arguments, "agent"))
-		args = appendIntFlag(args, "--last", intValue(arguments, "last"))
-		args = appendKeywords(args, arguments)
-		return append([]string{executable}, args...), nil
-	case "show":
-		args := append([]string{"show"}, stringSlice(arguments["feedstock_ids"])...)
+	case "knowledge_show":
+		args := []string{"knowledge", "show"}
+		args = append(args, stringSlice(arguments["knowledge_ids"])...)
 		return append([]string{executable}, args...), nil
 	default:
 		return nil, fmt.Errorf("unsupported tool %q", name)
 	}
 }
 
-func appendSearchFlags(args []string, arguments map[string]any) []string {
-	args = appendStringFlag(args, "--subject", stringValue(arguments, "subject"))
-	args = appendStringFlag(args, "--topic", stringValue(arguments, "topic"))
-	args = appendStringFlag(args, "--since", stringValue(arguments, "since"))
-	args = appendStringFlag(args, "--until", stringValue(arguments, "until"))
-	args = appendIntFlag(args, "--limit", intValue(arguments, "limit"))
-	args = appendIntFlag(args, "--max-tokens", intValue(arguments, "max_tokens"))
-	return args
-}
-
-func appendStringFlag(args []string, flag, value string) []string {
-	if strings.TrimSpace(value) != "" {
-		args = append(args, flag, value)
-	}
-	return args
-}
-
-func appendIntFlag(args []string, flag string, value int) []string {
-	if value > 0 {
-		args = append(args, flag, fmt.Sprintf("%d", value))
-	}
-	return args
-}
-
-func appendKeywords(args []string, arguments map[string]any) []string {
-	keywords := stringSlice(arguments["keywords"])
-	if len(keywords) > 0 {
-		args = append(args, "--")
-		args = append(args, keywords...)
-	}
-	return args
-}
-
-func appendRepeated(args []string, flag string, values []string) []string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			args = append(args, flag, value)
-		}
-	}
-	return args
-}
-
 func stringValue(values map[string]any, key string) string {
 	value, _ := values[key].(string)
 	return value
-}
-
-func boolValue(values map[string]any, key string) bool {
-	value, _ := values[key].(bool)
-	return value
-}
-
-func intValue(values map[string]any, key string) int {
-	switch value := values[key].(type) {
-	case int:
-		return value
-	case float64:
-		return int(value)
-	case json.Number:
-		parsed, _ := value.Int64()
-		return int(parsed)
-	default:
-		return 0
-	}
 }
 
 func stringSlice(value any) []string {
