@@ -7,33 +7,25 @@ feature rather than opening a public issue.
 
 ## Trust model
 
-Session logs, remembered user text, knowledge bodies, and search results are
+Session logs, remembered text, knowledge bodies, and search results are
 untrusted data. knowbrew reduces memory-poisoning risk by:
 
-- leaving the raw dialogue in the read-only source log instead of copying it
-  into Feedstock;
-- mechanically excluding tool and thinking blocks before supplying the target
-  dialogue and bounded adjacent dialogue to annotation, or returning dialogue
-  through `show --raw`;
-- treating Feedstock `summary` and Assertions as LLM-generated annotations,
-  not source text;
-- making classification use one validated annotation command and brewing verify
-  one persisted Assertion at a time before a relation-only submission that the
-  CLI applies mechanically with source-time guards;
-- requiring every Brew relation target to appear in the exact-subject catalog
-  and be read in full during the same invocation;
-- keeping generated knowledge unapproved until a human checks `approved`;
-- limiting SessionStart injection to approved, effective-active
-  `trigger: always` knowledge;
-- returning stored and raw retrieved content only as JSON string values;
-- retaining feedstock references for every knowledge, including invalidated and
-  superseded records.
+- keeping your session logs read-only: the raw dialogue stays in the source log
+  and is never copied into a knowledge record;
+- excluding tool and thinking blocks from the dialogue given to the LLM;
+- treating everything the LLM produces as an annotation, applied by the CLI
+  only after validation — the LLM never writes files itself;
+- keeping generated knowledge unapproved until a human checks `approved`, and
+  limiting session-start injection to approved `trigger: always` knowledge;
+- returning retrieved content only as JSON string values, so remembered text
+  stays structurally separate from agent instructions;
+- retaining the source references of every knowledge record, including
+  invalidated and superseded ones.
 
-Invocation read/operation claims, locks, and the disposable index are stored
-under `<root>/.knowbrew/state/`; they are not Knowledge and are never injected
-into an agent session.
+## Operational notes
 
-LLM CLI backends still execute a local coding agent. Review the backend's
-permissions and run knowbrew only against roots and logs you trust the local
-process to read. API credentials must be supplied through environment
-variables and should never be placed in knowledge, logs, or configuration files.
+LLM CLI backends run a local coding agent. Review that backend's permissions,
+and point knowbrew only at roots and logs you trust the local process to read.
+
+API credentials must be supplied through environment variables. Never place
+them in knowledge, logs, or configuration files.

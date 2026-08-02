@@ -34,55 +34,21 @@ knowbrew init
 
 ## How it works
 
-Three layers, following a brewing metaphor:
+Three steps, following a brewing metaphor:
 
 ```text
-session logs  ──draw──▶  feedstock  ──brew──▶  knowledge
+session logs  ──draw──▶  feedstock  ──brew──▶  knowledge  ──▶  you approve
 (untouched)              (what happened,       (what is worth
                           one per turn)         remembering)
 ```
 
-**`draw`** reads your session logs and records one *feedstock* per completed or
-interrupted turn. A still-running final turn is left in the source log and is
-acquired by a later draw only after its terminal record appears. Its
-acquisition phase writes only mechanical source identity and environment fields.
-It then completes two separate LLM phases. First, all missing summaries are
-created in parallel from only each target turn's user input and agent response.
-After every summary finishes, all missing Assertion sets are extracted in
-parallel. Assertion extraction receives the target user input and earlier turns
-only; it never receives the target agent response, generated summary, or future
-turns. If the initial earlier window cannot resolve a target reference, the
-extractor may load one larger bounded earlier window. The raw dialogue stays in
-the source log. An agent response establishes an Assertion only when a later
-user turn explicitly adopts, corrects, or rejects it.
-The classification agents return schema-validated structured results; they do
-not write Feedstock files. The draw process validates those results and performs
-each Store transition itself.
+**`draw`** reads your session logs and records one *feedstock* per turn: a short
+summary plus the atomic claims that turn established. The raw dialogue stays in
+the source log; a feedstock only points back to it.
 
-Each Assertion has exactly one type, an explicit subject string, and a
-self-contained statement, with optional rationale and trigger. An empty subject
-string means that no current subject master matches.
-Draw matches each atomic meaning against every subject master. If several
-subjects match, it emits one Assertion per subject; if none match, it keeps one
-subjectless Assertion for later reclassification rather than creating
-subjectless Knowledge.
-Feedstock `types` and `subjects` are mechanically derived from its Assertions,
-so an empty Assertion set remains an efficient mechanical Brew filter and no
-independent Feedstock classification can disagree with its body.
-
-**`brew`** reads that evidence and writes *knowledge*: established semantic
-claims that remain useful beyond the source turn and can later be corrected,
-replaced, or distilled independently. For each subjectful Assertion in source
-order, Brew verifies it against the original dialogue, loads the exact subject's
-Knowledge catalog, reads every plausible relation in full, and returns only the
-semantic relation: `equivalent`, `complements`, or `conflicts`. Type-master
-definitions are the sole authority for semantic eligibility in both Draw and
-Brew; neither stage adds a separate hard-coded category exclusion list.
-
-Atomic means independently changeable, not merely “written as one sentence.”
-If A could later be corrected or invalidated while B remains true, A and B are
-separate records. Conditions, scope limits, and exceptions that determine
-whether A is true stay in A's Claim.
+**`brew`** reads that evidence and writes *knowledge*: claims that stay useful
+beyond the turn they came from. Each record has one type and one subject, and
+can later be corrected, replaced, or merged as your project evolves.
 
 **You approve.** New knowledge starts with an unchecked `approved` property.
 Check it in Obsidian, or change it to `approved: true` in Markdown. Only then
@@ -99,8 +65,7 @@ knowbrew init
 
 It asks which session logs to read, which LLM backend to use, and whether to
 register itself with Claude Code and Codex. Running `init` again seeds the form
-from the current configuration, preserves settings it does not ask about and
-custom sources, and fills defaults only for newly introduced missing keys.
+from your current configuration and keeps settings it does not ask about.
 
 Then build your knowledge base:
 
@@ -109,31 +74,13 @@ knowbrew draw    # session logs → feedstock
 knowbrew brew    # feedstock → pending knowledge
 ```
 
-Both are idempotent and safe to re-run. With no paths or flags, `draw` reparses
-configured session files modified in the last 24 hours, derives deterministic
-feedstock IDs, ignores the still-running terminal turn, writes only missing records, summarizes only records without a
-summary, and extracts Assertions only from summarized unannotated records in
-those selected sessions. It keeps no acquisition cursor or
-per-session state. Concurrent `draw` processes wait for one another and then
-recheck the same window, so overlapping hooks do not duplicate acquisition or
-classification. Run the commands from a hook, from cron, or by hand.
+Both are idempotent and safe to re-run — they only fill in what is missing, so
+overlapping runs never duplicate anything. Run them from a hook, from cron, or
+by hand.
 
-`brew` processes the Assertions already stored in Feedstock; it has no separate
-candidate files or extraction pass. Source verification may preserve an
-Assertion, correct its wording without changing its ID or subject, or reject and
-delete it. The CLI records each resolved Assertion ID in `brewed_assertions`.
-After interruption, Knowledge assertion references repair any write completed
-before that marker, and the next run processes only unresolved subjectful
-Assertions. Subjectless Assertions remain unbrewed so a later subject edit can
-make them eligible.
-
-While either command is running, its progress line shows cumulative input and
-output tokens separately (`in ... / out ...`). The final JSON includes a
-`usage` object with the backend, model, standard input, cache-read input,
-cache-write input, output, and total token counts. These fields can be
-multiplied by the current provider rates to calculate API cost. knowbrew does
-not embed a price table because provider prices change independently of the
-CLI; a token class that the backend does not report is returned as zero.
+With no arguments, `draw` looks at configured session files modified in the last
+24 hours. Use `--since 7d` (or an RFC3339 timestamp) to widen the window, or
+`--all` to scan everything you have.
 
 Review what was created, and promote what you want your agent to use:
 
@@ -165,20 +112,24 @@ knowbrew show <feedstock-id> --raw                # the original conversation
 
 Keywords go after `--`. With keywords you get relevance ranking; without them
 you get newest-first, which makes `feedstock` a readable timeline of what you
-worked on. Subject identifies the concrete target; cross-cutting themes are
-found by full-text search instead of a separate controlled vocabulary.
-Feedstock full-text search indexes its summary and Assertions; use `show --raw`
-when you need the untouched dialogue from the source log.
+worked on.
 
 Your agent uses these same commands. `init` writes usage instructions into your
 `CLAUDE.md` / `AGENTS.md` so it knows when to reach for them.
 
+### Token usage
+
+While `draw` or `brew` runs, the progress line shows cumulative input and output
+tokens (`in ... / out ...`), and the final JSON includes a `usage` object with
+the backend, model, and per-class token counts. Multiply those by your
+provider's current rates to get the cost. knowbrew ships no price table because
+provider prices change independently of the CLI.
+
 ## Knowledge types
 
 Every knowledge record has exactly one type. Types are master notes under
-`masters/types/`; their filenames are the values accepted by `--type`, and
-their `definition` and optional `example` fields are supplied to the
-classification and brewing agents. `init` creates these seven defaults:
+`masters/types/`; their filenames are the values accepted by `--type`. `init`
+creates these seven defaults:
 
 | Type | What it holds |
 |---|---|
@@ -191,34 +142,27 @@ classification and brewing agents. `init` creates these seven defaults:
 | `preference` | A stable stated preference, rather than a one-time request or binding decision |
 
 Types are useful as filters (`--type decision` to review your decisions), and
-they keep brewing honest: qualification happens before atomic splitting, and an
-Assertion is written only when its semantic meaning fits one type exactly.
-Acquisition labels such as feedback and final document forms such as a wiki or
-runbook are not knowledge types. You can edit the master wording, add types, or
-delete unused types. Defaults are regenerated only when `masters/types/` has no
-type notes at all; if even one remains, knowbrew leaves the directory untouched.
+they keep brewing honest: a claim is recorded only when it fits one type
+exactly.
+
+You can edit the master wording, add types, or delete unused ones. Defaults are
+regenerated only when `masters/types/` has no type notes at all; if even one
+remains, knowbrew leaves the directory untouched.
 
 ## Subjects
 
 Subjects are stable target names stored as master notes under
-`masters/subjects/`. knowbrew automatically adds a subject master only when it
-can mechanically derive one from a Git repository. The repository remote and
-working directory are recorded as aliases of that master.
-This mechanical step only prepares the vocabulary; it never assigns a subject
-to a Feedstock. Draw prefers an explicit target in the dialogue and uses the
-repository as the implicit target only when the owner is omitted and the claim
-is about the system being worked on.
+`masters/subjects/`. knowbrew adds one automatically only when it can derive it
+from a Git repository, recording the remote and working directory as aliases.
 
-A subject note may contain `definition`, `includes`, and `excludes`. Draw and
-Brew use those semantic fields as the authority for subject boundaries; a name
-alone is the fallback when they are absent, and an exclusion vetoes a name
-match. `aliases` are machine lookup keys only and are never supplied as semantic
-evidence to the LLM.
+A subject note may contain `definition`, `includes`, and `excludes`. Those
+fields decide what belongs to the subject; a name alone is the fallback when
+they are absent, and an exclusion overrides a name match.
 
-Draw may match only existing subject masters or omit the subject; Brew must
-preserve the Assertion's subject. Neither agent can create one. An unknown
-`--subject` is an error, and there is no `--new-subject` flag. You can still
-create, rename, merge, or delete subject master notes directly in the vault.
+Only you can create subjects — knowbrew never invents one. An unknown
+`--subject` is an error, and there is no `--new-subject` flag. Create, rename,
+merge, or delete subject notes directly in your vault. Claims that match no
+subject are kept aside, so editing a subject later can make them eligible.
 
 ## Configuration
 
@@ -231,14 +175,14 @@ root = ".."
 backend = "claude-cli"    # or codex-cli, api, ollama
 draw_model = ""           # per-turn classification: prefer a fast model
 brew_model = ""           # knowledge decisions: prefer a strong model
-draw_effort = "low"        # repeated classification: low is the init default
-brew_effort = ""           # empty uses the backend or user default
+draw_effort = "low"       # repeated classification: low is the init default
+brew_effort = ""          # empty uses the backend or user default
 timeout = "5m"
 
 [draw]
-concurrency = 5           # workers used independently by each LLM phase
-context_turns = 3         # earlier dialogue turns supplied to Assertion extraction
-max_context_turns = 20    # one bounded earlier fallback window
+concurrency = 5           # parallel LLM workers
+context_turns = 3         # earlier dialogue turns given to the extractor
+max_context_turns = 20    # bounded fallback window
 
 [[sources]]
 agent = "claude"
@@ -282,79 +226,33 @@ Prebuilt binaries are on
 ## Command reference
 
 ```text
-knowbrew init                     interactive setup
-knowbrew draw [flags] [path...]      session logs → feedstock
-knowbrew brew [--verbose]            feedstock → pending knowledge
-knowbrew knowledge [keywords...]  search knowledge (alias: kn)
-knowbrew knowledge show <id...>  inspect knowledge in any lifecycle state
-knowbrew feedstock [keywords...]  search or replay feedstock
-knowbrew show <id...>             one feedstock record; --raw for the dialogue
+knowbrew init                      interactive setup
+knowbrew draw [flags] [path...]    session logs → feedstock
+knowbrew brew [--verbose]          feedstock → pending knowledge
+knowbrew knowledge [keywords...]   search knowledge (alias: kn)
+knowbrew knowledge show <id...>    inspect knowledge in any lifecycle state
+knowbrew feedstock [keywords...]   search or replay feedstock
+knowbrew show <id...>              one feedstock record; --raw for the dialogue
 ```
 
-Shared search flags: `--subject`, `--type`, `--since`, `--until`,
-`--limit`, `--max-tokens`, `--reindex`. `knowledge` adds `--include-pending`,
+Shared search flags: `--subject`, `--type`, `--since`, `--until`, `--limit`,
+`--max-tokens`, `--reindex`. `knowledge` adds `--include-pending`,
 `--include-retired`, and `--trigger always`. `feedstock` adds `--session`,
 `--agent`, and `--last N`.
 
-`draw` with no arguments scans configured session files modified during the
-last 24 hours. The modification window selects files; each selected session is
-parsed in full so adjacent-turn context remains available. Use `--since 6h`,
-`--since 7d`, or an RFC3339 timestamp/date to change the window, `--until` to
-set its other boundary, and `--source claude` or `--source codex` to limit
-configured sources. `--all` is required to scan all configured history. An
-explicit file or directory path is never time-limited unless you also pass
-`--since` or `--until`.
+`draw` flags: `--all`, `--since`, `--until`, `--source claude|codex`,
+`--verbose`. An explicit file or directory path is never time-limited unless you
+also pass `--since` or `--until`.
 
-Acquisition is keyed by agent, session ID, and turn ID, so reparsing overlapping
-windows or moving a log does not create duplicates. Summarization and Assertion
-extraction are limited to incomplete feedstocks from sessions selected by the current invocation;
-unrelated old pending records are not swept in.
+Some subcommands exist only for the LLM backend to call and are not meant for
+direct use.
 
-The LLM backend may use only three read operations: `feedstock context`,
-`knowledge catalog`, and `knowledge show`. Summary, Assertion, and Brew agents
-return schema-validated structured results without a target Feedstock or
-Assertion ID. The parent draw or brew process owns that target, validates the
-result, and performs the single Store mutation. It also derives Feedstock
-`types` and `subjects`, assigns deterministic Assertion IDs, and renders the
-Feedstock body. Brew handles one Assertion per invocation. The catalog is
-discovery only: every relation target must then be read in full in that same
-invocation before the structured decision is returned. The parent rereads current files under
-lock, applies source-time guards, generates the Knowledge ID and filename, and
-mechanically chooses evidence addition, pending revision, pending successor,
-consolidation, or creation.
+## Security
 
-Semantic recency comes from source events, not Markdown file mtimes.
-Knowledge recency is the newest timestamp among all supporting feedstocks.
-A historical Assertion may add equivalent evidence to a matching version, but
-cannot merge with, conflict with, or replace newer Knowledge. Knowledge search
-returns the effective source time as `established_at`.
-
-Approval never depends on a CLI event. A later search, hook lookup, or brew run
-observes direct edits to `approved`. When an approved record has `supersedes`
-links, its predecessors are durably marked with `superseded_by` and excluded
-from normal retrieval while remaining on disk. A pending successor never
-retires an active predecessor until the human approves the successor; pending
-predecessors can be retired immediately. Legacy records with a `status` field
-remain readable and are not bulk-rewritten.
-
-## Design guarantees
-
-- Your session logs are read-only. knowbrew never modifies or copies them.
-- Feedstock mechanical fields, summary, and annotation time are immutable once
-  written. Brew may correct or reject an Assertion only after checking the
-  original dialogue; `types` and `subjects` are then recomputed mechanically.
-- Pending Knowledge may be revised in place before human approval. Active
-  Knowledge is never overwritten: replacements are pending successors, and an
-  approved successor retires its predecessor as `superseded` while retaining
-  both files.
-- Every knowledge record has a stable ID used as its filename and cites both
-  supporting Feedstocks and exact Assertion headings through Obsidian wikilinks.
-- Retrieval returns JSON, keeping remembered content structurally separate from
-  agent instructions.
-- Runtime locks, the search index, and invocation claims live under
-  `<root>/.knowbrew/state/`. Feedstock and Knowledge remain authoritative.
-
-See [SECURITY.md](SECURITY.md) for the trust model.
+Your session logs are read-only, generated knowledge stays unapproved until you
+check it, and API credentials are read from environment variables only. See
+[SECURITY.md](SECURITY.md) for the trust model and how to report a
+vulnerability.
 
 ## Development
 
