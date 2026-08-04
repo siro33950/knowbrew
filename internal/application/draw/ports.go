@@ -47,6 +47,10 @@ type RunLock interface {
 	Lock(context.Context) (func() error, error)
 }
 
+type SearchIndex interface {
+	Sync(context.Context) ([]diagnostic.Warning, error)
+}
+
 type Progress interface {
 	Write([]byte) (int, error)
 	Start(string)
@@ -57,12 +61,13 @@ type Progress interface {
 }
 
 type Service struct {
-	Settings   Settings
-	Repository Repository
-	Sources    SourceGateway
-	Runner     agent.Runner
-	Progress   Progress
-	RunLock    RunLock
+	Settings    Settings
+	Repository  Repository
+	Sources     SourceGateway
+	Runner      agent.Runner
+	Progress    Progress
+	RunLock     RunLock
+	SearchIndex SearchIndex
 }
 
 type unrestrictedInvocation struct{}

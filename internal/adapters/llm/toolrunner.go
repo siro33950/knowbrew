@@ -305,9 +305,12 @@ func toolSchemas(task Task, typeNames []string) []map[string]any {
 		}
 	}
 	return []map[string]any{
-		toolDefinition("knowledge_catalog", "List compact Knowledge semantics for the assertion subject", map[string]any{
-			"type": "object", "required": []string{"subject"},
-			"properties": map[string]any{"subject": map[string]any{"type": "string"}},
+		toolDefinition("knowledge_catalog", "Search compact Knowledge candidates for the verified assertion statement and subject", map[string]any{
+			"type": "object", "required": []string{"subject", "query"},
+			"properties": map[string]any{
+				"subject": map[string]any{"type": "string"},
+				"query":   map[string]any{"type": "string", "minLength": 1},
+			},
 		}),
 		toolDefinition("knowledge_show", "Read full semantic content for selected Knowledge IDs", map[string]any{
 			"type": "object", "required": []string{"knowledge_ids"},

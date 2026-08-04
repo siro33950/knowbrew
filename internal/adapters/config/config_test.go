@@ -183,6 +183,38 @@ func TestLoadAllowsExistingConfigWithoutEffortKeys(t *testing.T) {
 	if loaded.LLM.DrawEffort != "" || loaded.LLM.BrewEffort != "" {
 		t.Fatalf("missing effort keys should remain empty: %#v", loaded.LLM)
 	}
+	if loaded.Embedding.Model != "" {
+		t.Fatalf("missing embedding config should keep full-text compatibility: %#v", loaded.Embedding)
+	}
+}
+
+func TestFillInitDefaultsSelectsRecommendedEmbeddingModel(t *testing.T) {
+	cfg := Config{}
+	cfg.FillInitDefaults()
+	if cfg.Embedding.Model != EmbeddingRuri {
+		t.Fatalf("embedding model = %q, want %q", cfg.Embedding.Model, EmbeddingRuri)
+	}
+}
+
+func TestNormalizeEmbeddingConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "custom-model")
+	cfg := Config{Path: filepath.Join(t.TempDir(), "config.toml"), LLM: LLM{Backend: "claude-cli"}, Embedding: Embedding{
+		Model: EmbeddingCustom, Path: path,
+	}}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Embedding.Path != path {
+		t.Fatalf("custom path = %q, want %q", cfg.Embedding.Path, path)
+	}
+	cfg = Config{Path: filepath.Join(t.TempDir(), "config.toml"), LLM: LLM{Backend: "claude-cli"}, Embedding: Embedding{Model: EmbeddingCustom}}
+	if err := cfg.Normalize(); err == nil || !strings.Contains(err.Error(), "requires path") {
+		t.Fatalf("missing custom path error = %v", err)
+	}
+	cfg = Config{Path: filepath.Join(t.TempDir(), "config.toml"), LLM: LLM{Backend: "claude-cli"}, Embedding: Embedding{Model: "unknown"}}
+	if err := cfg.Normalize(); err == nil || !strings.Contains(err.Error(), "unsupported embedding model") {
+		t.Fatalf("unknown model error = %v", err)
+	}
 }
 
 func TestAPILLMRequiresBothTaskModels(t *testing.T) {

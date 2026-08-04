@@ -478,7 +478,7 @@ func TestAssertionPromptIncludesSourceContextAndSemanticSubjectWithoutAliases(t 
 		`"definition": "Model-specific agent behavior."`,
 		`"includes"`, `"excludes"`, "Source verification", "Type qualification",
 		"knowledge_type_master as the sole authority", "Do not apply a separate hard-coded category",
-		"Subject catalog", "Full inspection",
+		"Subject candidates", "Full inspection",
 		"Verify statement and rationale independently",
 		"merely say the user requested, specified, confirmed, or explicitly stated",
 		"same type, subject, and statement with an empty rationale",
@@ -699,4 +699,33 @@ func TestRunProcessesAssertionsOnceAndReportsAssertionProgress(t *testing.T) {
 	if updated.BrewedAt == nil {
 		t.Fatal("feedstock was not completed")
 	}
+}
+
+func TestRunRequiresPreBrewIndexSyncAndTreatsPostSyncAsWarning(t *testing.T) {
+	t.Run("pre-sync failure stops brew", func(t *testing.T) {
+		dataStore := newBrewStore(t)
+		index := &recordingSearchIndex{failOn: map[int]error{1: errors.New("pre-sync failed")}}
+		_, err := runForTest(context.Background(), testConfig(dataStore.Root), nil, nil, index)
+		if err == nil || !strings.Contains(err.Error(), "synchronize search index before brewing") {
+			t.Fatalf("pre-sync error = %v", err)
+		}
+		if index.calls != 1 {
+			t.Fatalf("pre-sync calls = %d, want 1", index.calls)
+		}
+	})
+
+	t.Run("post-sync failure is reported", func(t *testing.T) {
+		dataStore := newBrewStore(t)
+		index := &recordingSearchIndex{failOn: map[int]error{2: errors.New("post-sync failed")}}
+		summary, err := runForTest(context.Background(), testConfig(dataStore.Root), nil, nil, index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index.calls != 2 {
+			t.Fatalf("sync calls = %d, want 2", index.calls)
+		}
+		if len(summary.Warnings) != 1 || !strings.Contains(summary.Warnings[0].Message, "post-sync failed") {
+			t.Fatalf("post-sync warnings = %#v", summary.Warnings)
+		}
+	})
 }

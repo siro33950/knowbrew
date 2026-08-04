@@ -11,42 +11,152 @@ permissions:
   id-token: write
 
 jobs:
-  release:
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-SNAPSHOT-${GITHUB_SHA:0:7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26-intel
+            goos: darwin
+            goarch: amd64
+            binary: knowbrew
+          - runner: macos-26
+            goos: darwin
+            goarch: arm64
+            binary: knowbrew
+          - runner: ubuntu-22.04
+            goos: linux
+            goarch: amd64
+            binary: knowbrew
+          - runner: ubuntu-22.04-arm
+            goos: linux
+            goarch: arm64
+            binary: knowbrew
+          - runner: windows-2025
+            goos: windows
+            goarch: amd64
+            binary: knowbrew.exe
+            llvm_host: x86_64
+            llvm_sha256: B9B68A4D276E16FA25802AABA458E4638F64B3884C290AACCDC2D87083B6CA35
+            cc: x86_64-w64-mingw32-clang
+            cxx: x86_64-w64-mingw32-clang++
+          - runner: windows-11-arm
+            goos: windows
+            goarch: arm64
+            binary: knowbrew.exe
+            llvm_host: aarch64
+            llvm_sha256: 312593669435BD0BFC1A43AC3FBA23C8B27E0610BADE88B2738E5A01702A99BA
+            cc: aarch64-w64-mingw32-clang
+            cxx: aarch64-w64-mingw32-clang++
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - uses: actions/setup-go@v6
         with:
           go-version: "1.25.x"
           cache: true
 
-      - name: Create GitHub release
-        if: github.event_name == 'push'
-        uses: goreleaser/goreleaser-action@v7
-        with:
-          distribution: goreleaser
-          version: "~> v2"
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Windows C toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "llvm-mingw.zip"
+          $destination = Join-Path $env:RUNNER_TEMP "llvm-mingw"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/20260616/llvm-mingw-20260616-ucrt-${{ matrix.llvm_host }}.zip"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash
+          if ($actual -ne "${{ matrix.llvm_sha256 }}") {
+            throw "llvm-mingw checksum mismatch: $actual"
+          }
+          Expand-Archive -Path $archive -DestinationPath $destination
+          $toolchain = Get-ChildItem -Path $destination -Directory | Select-Object -First 1
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $toolchain.FullName "bin")
+          Add-Content -Path $env:GITHUB_ENV -Value "CC=${{ matrix.cc }}"
+          Add-Content -Path $env:GITHUB_ENV -Value "CXX=${{ matrix.cxx }}"
 
-      - name: Build release snapshot
-        if: github.event_name == 'workflow_dispatch'
-        uses: goreleaser/goreleaser-action@v7
-        with:
-          distribution: goreleaser
-          version: "~> v2"
-          args: release --snapshot --clean
+      - name: Build and smoke-test Unix binary
+        if: runner.os != 'Windows'
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KNOWBREW_VERSION: ${{ needs.prepare.outputs.version }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/siro33950/knowbrew/internal/adapters/cli.version=$KNOWBREW_VERSION" \
+            -o "artifact/${{ matrix.binary }}" ./cmd/knowbrew
+          "./artifact/${{ matrix.binary }}" --version
+
+      - name: Build and smoke-test Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          KNOWBREW_VERSION: ${{ needs.prepare.outputs.version }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          go build -trimpath `
+            -ldflags "-s -w -X github.com/siro33950/knowbrew/internal/adapters/cli.version=$env:KNOWBREW_VERSION" `
+            -o "artifact/${{ matrix.binary }}" ./cmd/knowbrew
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "./artifact/${{ matrix.binary }}" --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: knowbrew-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: artifact/${{ matrix.binary }}
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: build-artifacts
 
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
+
+      - name: Assemble release artifacts
+        env:
+          KNOWBREW_VERSION: ${{ needs.prepare.outputs.version }}
+        run: node scripts/assemble-release.mjs build-artifacts dist
 
       - name: Build npm packages
         run: node scripts/build-npm-packages.mjs dist
@@ -67,6 +177,19 @@ jobs:
           do
             npm pack --dry-run "$package"
           done
+
+      - name: Create GitHub release
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/*.tar.gz \
+            dist/*.zip \
+            dist/checksums.txt \
+            --generate-notes \
+            --verify-tag
 
       - name: Publish platform packages
         if: github.event_name == 'push'

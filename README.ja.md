@@ -110,6 +110,12 @@ knowbrew show <feedstock-id> --raw                # 元の対話そのもの
 キーワードは `--` の後に書きます。キーワードありなら関連度順、なしなら新しい順に
 なるため、`feedstock` はそのまま作業の時系列として読めます。
 
+意味検索が有効なら、キーワード付き検索は FTS5 とベクトル検索を並行実行し、RRFで
+順位を統合します。knowledge は Claim だけ、feedstock は Summary だけをベクトル化
+します。subject・type・ライフサイクル・agent・session・期間のフィルタは引き続き
+完全一致です。検索スコアは確信度ではないため返しません。片方だけを診断するときは
+`--search-mode text` / `--search-mode vector` を使えます。既定は `hybrid` です。
+
 エージェントも同じコマンドを使います。`init` が `CLAUDE.md` / `AGENTS.md` に
 使い方を書き込むので、いつ使うべきかをエージェントが判断できます。
 
@@ -124,7 +130,7 @@ knowbrew show <feedstock-id> --raw                # 元の対話そのもの
 ## 知識の型（type）
 
 knowledge は必ず1つの型を持ちます。型は `masters/types/` 配下のマスターノートで、
-そのファイル名が `--type` に渡せる値です。`init` は次の7つを作成します。
+そのファイル名が `--type` に渡せる値です。`init` は次の8つを作成します。
 
 | 型 | 何を保持するか |
 |---|---|
@@ -134,6 +140,7 @@ knowledge は必ず1つの型を持ちます。型は `masters/types/` 配下の
 | `principle` | 確立した一般化された原因・機序・反復的傾向 |
 | `constraint` | 外部から課された、確立した制限や必要条件 |
 | `decision` | 現在のタスクを越えて維持される意図をもつ決定（暫定的・一回限りの調整は除く） |
+| `intent` | 現在の実現手段から独立して、対象・規則・設計が存在する理由を示す持続的な目的や品質 |
 | `preference` | 安定した表明済みの選好（一回限りの要望や拘束力ある決定ではない） |
 
 型はフィルタとして便利で（`--type decision` で決定事項を見直す）、醸造の精度も
@@ -179,6 +186,10 @@ concurrency = 5           # 並列LLMワーカー数
 context_turns = 3         # 抽出時に渡す先行ターン数
 max_context_turns = 20    # 上限付きのフォールバック窓
 
+[embedding]
+model = "ruri-v3-130m-int8-onnx" # または snowflake..., qwen3..., disabled, custom
+# path = "/absolute/path/to/model" # custom の場合のみ必須
+
 [[sources]]
 agent = "claude"
 path = "/Users/example/.claude/projects"
@@ -202,12 +213,23 @@ CLIバックエンドはあなた自身のエージェントを起動するた�
 指示に従います。これらのバックグラウンドジョブでは MCP サーバーは読み込まれず、
 knowbrew 自身の SessionStart フックも発火しません。
 
+`init` では、日本語推奨のRuri・英語推奨のSnowflake・品質優先のQwen3・全文検索
+のみ、の4つから選びます。管理対象のモデルと実行環境は knowbrew が取得・固定し、
+`.knowbrew/state/models/` に置きます。設定済みの管理モデルや自前モデルが利用不能な
+場合、エラーを隠して全文検索へ切り替えることはありません。
+
+自前モデルは `model = "custom"` とし、`manifest.json` を含むディレクトリを
+`path` に指定します。manifest の共通必須項目は `id`・`backend`・`dimension`・
+`model_file` です。ONNXではさらに `tokenizer_file`・`runtime_file`・`input_names`・
+`output_name`、llama.cppでは `executable_file` を使います。ファイルパスはmanifestを
+置いたディレクトリからの相対パスです。
+
 ## 必要なもの
 
 - LLMバックエンドが1つ: Claude Code CLI、Codex CLI、ツール呼び出しに対応した
   OpenAI互換エンドポイント、またはツール対応モデルを持つ Ollama
-- ソースからビルドする場合のみ Go 1.25 以降（SQLite FTS5 は純Go実装のため
-  CGO は不要）
+- ソースからビルドする場合のみ Go 1.25 以降とCコンパイラ（FTS5は純Go、
+  sqlite-vecは公式Go bindingから静的リンク）
 
 その他のインストール方法:
 
@@ -228,10 +250,11 @@ knowbrew knowledge [keywords...]   knowledgeを検索（別名: kn）
 knowbrew knowledge show <id...>    任意の状態のknowledgeを表示
 knowbrew feedstock [keywords...]   feedstockを検索・再生
 knowbrew show <id...>              feedstock 1件; --raw で元の対話
+knowbrew index sync|rebuild|status 派生検索索引の保守
 ```
 
 検索の共通フラグ: `--subject`・`--type`・`--since`・`--until`・`--limit`・
-`--max-tokens`・`--reindex`。`knowledge` にはさらに `--include-pending`・
+`--max-tokens`・`--reindex`・`--search-mode`。`knowledge` にはさらに `--include-pending`・
 `--include-retired`・`--trigger always`。`feedstock` にはさらに `--session`・
 `--agent`・`--last N`。
 

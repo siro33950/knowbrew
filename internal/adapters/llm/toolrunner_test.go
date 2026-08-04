@@ -22,7 +22,7 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 }
 
 var testKnowledgeTypes = []string{
-	"definition", "property", "relation", "principle", "constraint", "decision", "preference",
+	"definition", "property", "relation", "principle", "constraint", "decision", "intent", "preference",
 }
 
 func TestDecodeToolArgumentsAcceptsOpenAIStringAndOllamaObject(t *testing.T) {
@@ -52,8 +52,11 @@ func TestCommandForToolMapsAssertionWorkflow(t *testing.T) {
 			want:      []string{"/bin/knowbrew", "feedstock", "context", "fs-1"},
 		},
 		{
-			name: "knowledge_catalog", arguments: map[string]any{"subject": "knowbrew"},
-			want: []string{"/bin/knowbrew", "knowledge", "catalog", "--subject", "knowbrew"},
+			name: "knowledge_catalog", arguments: map[string]any{"subject": "knowbrew", "query": "verified statement"},
+			want: []string{
+				"/bin/knowbrew", "knowledge", "catalog", "--subject", "knowbrew",
+				"--query", "verified statement",
+			},
 		},
 		{
 			name: "knowledge_show", arguments: map[string]any{"knowledge_ids": []any{"kn-1", "kn-2"}},
@@ -226,7 +229,7 @@ func TestToolRunnerStreamsCommandOutputOnlyWhenVerbose(t *testing.T) {
 		transport := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 			rounds++
 			if rounds == 1 {
-				return jsonResponse(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"read-1","type":"function","function":{"name":"knowledge_catalog","arguments":{"subject":"knowbrew"}}}]}}]}`), nil
+				return jsonResponse(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"read-1","type":"function","function":{"name":"knowledge_catalog","arguments":{"subject":"knowbrew","query":"verified statement"}}}]}}]}`), nil
 			}
 			return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"{\"verification\":\"verified\",\"corrected_assertion\":null,\"resolution\":{\"kind\":\"new\",\"knowledge_ids\":[],\"draft\":null}}"}}]}`), nil
 		})

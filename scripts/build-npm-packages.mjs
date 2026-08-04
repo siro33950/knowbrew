@@ -80,7 +80,7 @@ async function resolveArtifactPath(artifact) {
       }
     }
   }
-  throw new Error(`GoReleaser artifact is missing: ${artifact.path}`);
+  throw new Error(`Release artifact is missing: ${artifact.path}`);
 }
 
 async function writePackageJSON(directory, contents) {

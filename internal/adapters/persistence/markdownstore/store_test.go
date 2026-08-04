@@ -602,7 +602,7 @@ func TestDefaultTypeMastersAreGeneratedOnlyWhenEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(warnings) != 0 || len(types) != 7 {
+	if len(warnings) != 0 || len(types) != 8 {
 		t.Fatalf("default types = %#v, warnings = %#v", types, warnings)
 	}
 	want := map[string]struct {
@@ -615,6 +615,7 @@ func TestDefaultTypeMastersAreGeneratedOnlyWhenEmpty(t *testing.T) {
 		"principle":  {"An established generalized causal relationship, mechanism, or recurring tendency.", "Higher fermentation temperatures generally accelerate fermentation."},
 		"constraint": {"An established limit or required condition imposed by something other than a choice recorded here.", "The venue cannot admit more than 200 people."},
 		"decision":   {"A settled choice made by an authorized person or group and intended to remain applicable beyond the current task, together with its reason when known.", "Use SQLite because the index must be local and rebuildable."},
+		"intent":     {"A durable intended outcome or quality that explains why a subject, rule, or design exists, independently of the current means used to achieve it.", "Feedstock classification remains consistent with its Assertions so records without Assertions are not presented as classified."},
 		"preference": {"A stable stated preference of a person or group, rather than a one-time request or binding decision.", "The user prefers concise headings."},
 	}
 	for _, entry := range types {

@@ -114,6 +114,14 @@ Keywords go after `--`. With keywords you get relevance ranking; without them
 you get newest-first, which makes `feedstock` a readable timeline of what you
 worked on.
 
+When semantic search is enabled, keyword queries run FTS5 and vector search in
+parallel and merge their ranks with reciprocal rank fusion. Knowledge vectors
+contain only the claim; feedstock vectors contain only the summary. Exact
+subject, type, lifecycle, agent, session, and time filters still apply. Search
+scores are intentionally not exposed because they are ranks, not confidence.
+Use `--search-mode text` or `--search-mode vector` only when diagnosing one
+branch; the default is `hybrid`.
+
 Your agent uses these same commands. `init` writes usage instructions into your
 `CLAUDE.md` / `AGENTS.md` so it knows when to reach for them.
 
@@ -129,7 +137,7 @@ provider prices change independently of the CLI.
 
 Every knowledge record has exactly one type. Types are master notes under
 `masters/types/`; their filenames are the values accepted by `--type`. `init`
-creates these seven defaults:
+creates these eight defaults:
 
 | Type | What it holds |
 |---|---|
@@ -139,6 +147,7 @@ creates these seven defaults:
 | `principle` | An established generalized cause, mechanism, or recurring tendency |
 | `constraint` | An established externally imposed limit or required condition |
 | `decision` | A settled choice intended beyond the current task, excluding tentative or one-time adjustments |
+| `intent` | A durable intended outcome or quality that explains why a subject, rule, or design exists independently of its current implementation |
 | `preference` | A stable stated preference, rather than a one-time request or binding decision |
 
 Types are useful as filters (`--type decision` to review your decisions), and
@@ -184,6 +193,10 @@ concurrency = 5           # parallel LLM workers
 context_turns = 3         # earlier dialogue turns given to the extractor
 max_context_turns = 20    # bounded fallback window
 
+[embedding]
+model = "ruri-v3-130m-int8-onnx" # or snowflake..., qwen3..., disabled, custom
+# path = "/absolute/path/to/model" # required only for custom
+
 [[sources]]
 agent = "claude"
 path = "/Users/example/.claude/projects"
@@ -207,12 +220,24 @@ knowbrew writes follows your instructions, including the language you write in.
 Your MCP servers are not loaded for these background jobs, and knowbrew's own
 SessionStart hook does not fire inside them.
 
+`init` offers Japanese-recommended Ruri, English-recommended Snowflake,
+quality-first Qwen3, or disabled full-text-only search. knowbrew downloads and
+pins the selected managed model and runtime under `.knowbrew/state/models/`.
+Configured managed or custom model files must be usable; knowbrew never hides a
+model error by silently falling back to text search.
+
+For a self-managed model, set `model = "custom"` and point `path` at a directory
+containing `manifest.json`. The manifest requires `id`, `backend`, `dimension`,
+and `model_file`; ONNX additionally uses `tokenizer_file`, `runtime_file`,
+`input_names`, and `output_name`, while llama.cpp uses `executable_file`.
+Manifest file paths are relative to that directory.
+
 ## Requirements
 
 - One LLM backend: Claude Code CLI, Codex CLI, an OpenAI-compatible endpoint
   with tool calling, or Ollama with a tool-capable model
-- Go 1.25 or later only if you build from source (SQLite FTS5 ships as pure Go;
-  CGO is not required)
+- Go 1.25 or later and a C compiler only if you build from source (FTS5 uses
+  pure Go; sqlite-vec is statically linked through its official Go binding)
 
 Alternative installs:
 
@@ -233,10 +258,11 @@ knowbrew knowledge [keywords...]   search knowledge (alias: kn)
 knowbrew knowledge show <id...>    inspect knowledge in any lifecycle state
 knowbrew feedstock [keywords...]   search or replay feedstock
 knowbrew show <id...>              one feedstock record; --raw for the dialogue
+knowbrew index sync|rebuild|status maintain the derived search indexes
 ```
 
 Shared search flags: `--subject`, `--type`, `--since`, `--until`, `--limit`,
-`--max-tokens`, `--reindex`. `knowledge` adds `--include-pending`,
+`--max-tokens`, `--reindex`, `--search-mode`. `knowledge` adds `--include-pending`,
 `--include-retired`, and `--trigger always`. `feedstock` adds `--session`,
 `--agent`, and `--last N`.
 

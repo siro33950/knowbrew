@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/siro33950/knowbrew/internal/adapters/config"
 	dialogueadapter "github.com/siro33950/knowbrew/internal/adapters/dialogue"
+	embeddingadapter "github.com/siro33950/knowbrew/internal/adapters/embedding"
 	invocationadapter "github.com/siro33950/knowbrew/internal/adapters/invocation"
 	"github.com/siro33950/knowbrew/internal/adapters/invocation/state"
 	"github.com/siro33950/knowbrew/internal/adapters/llm"
@@ -27,6 +29,7 @@ import (
 	"github.com/siro33950/knowbrew/internal/application/diagnostic"
 	"github.com/siro33950/knowbrew/internal/application/draw"
 	knowledgeapp "github.com/siro33950/knowbrew/internal/application/knowledge"
+	searchapp "github.com/siro33950/knowbrew/internal/application/search"
 	"github.com/siro33950/knowbrew/internal/domain"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -55,6 +58,7 @@ func newRootCommand() *cobra.Command {
 		newShowCommand(),
 		newFeedstockCommand(),
 		newKnowledgeCommand(),
+		newIndexCommand(),
 	)
 	return root
 }
@@ -115,6 +119,7 @@ func newDrawCommand() *cobra.Command {
 					Path: filepath.Join(cfg.Root, ".knowbrew", "state", "draw.lock"),
 					Name: "draw",
 				},
+				SearchIndex: drawSearchIndex{Config: cfg, Store: dataStore},
 			}
 			summary, err := service.RunWithOptions(command.Context(), options)
 			if err != nil {
@@ -198,6 +203,10 @@ func newBrewCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			index, err := searchSynchronizer(cfg, repository.Store)
+			if err != nil {
+				return err
+			}
 			service := brew.Service{
 				Settings: brew.Settings{
 					ContextTurns: cfg.Draw.ContextTurns,
@@ -213,11 +222,16 @@ func newBrewCommand() *cobra.Command {
 					Path: filepath.Join(cfg.Root, ".knowbrew", "state", "brew.lock"),
 					Name: "brew",
 				},
+				SearchIndex: index,
 			}
 			summary, err := service.Run(command.Context())
+			closeErr := index.Close()
 			if err != nil {
 				display.Abort()
-				return err
+				return errors.Join(err, closeErr)
+			}
+			if closeErr != nil {
+				return closeErr
 			}
 			return writeJSON(os.Stdout, summary)
 		},
@@ -275,6 +289,7 @@ func newShowCommand() *cobra.Command {
 
 type searchFlags struct {
 	subject, typeValue, since, until string
+	mode                             string
 	limit, maxTokens                 int
 	reindex                          bool
 }
@@ -287,30 +302,31 @@ func addSearchFlags(command *cobra.Command, flags *searchFlags) {
 	command.Flags().IntVar(&flags.limit, "limit", 20, "Maximum returned results")
 	command.Flags().IntVar(&flags.maxTokens, "max-tokens", 2000, "Approximate maximum JSON result tokens")
 	command.Flags().BoolVar(&flags.reindex, "reindex", false, "Fully rebuild the derived search index")
+	command.Flags().StringVar(&flags.mode, "search-mode", string(searchapp.ModeHybrid), "Search mode: hybrid, text, or vector")
 }
 
 func runSearch(
 	command *cobra.Command,
-	target query.Target,
+	target searchapp.Target,
 	keywords []string,
 	flags searchFlags,
-	options query.SearchOptions,
-) (query.SearchResponse, error) {
+	options searchapp.Options,
+) (searchapp.Response, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return query.SearchResponse{}, err
+		return searchapp.Response{}, err
 	}
 	dataStore, err := store.New(cfg.Root)
 	if err != nil {
-		return query.SearchResponse{}, err
+		return searchapp.Response{}, err
 	}
 	since, err := parseOptionalTime(flags.since, false)
 	if err != nil {
-		return query.SearchResponse{}, fmt.Errorf("invalid --since: %w", err)
+		return searchapp.Response{}, fmt.Errorf("invalid --since: %w", err)
 	}
 	until, err := parseOptionalTime(flags.until, true)
 	if err != nil {
-		return query.SearchResponse{}, fmt.Errorf("invalid --until: %w", err)
+		return searchapp.Response{}, fmt.Errorf("invalid --until: %w", err)
 	}
 	options.Target = target
 	options.Keywords = keywords
@@ -318,7 +334,7 @@ func runSearch(
 	if flags.typeValue != "" {
 		knowledgeType := domain.KnowledgeType(flags.typeValue)
 		if err := domain.ValidateKnowledgeTypeName(knowledgeType); err != nil {
-			return query.SearchResponse{}, fmt.Errorf("invalid --type: %w", err)
+			return searchapp.Response{}, fmt.Errorf("invalid --type: %w", err)
 		}
 		options.Type = knowledgeType
 	}
@@ -327,7 +343,21 @@ func runSearch(
 	options.Limit = flags.limit
 	options.MaxTokens = flags.maxTokens
 	options.Reindex = flags.reindex
-	return query.Search(command.Context(), dataStore, options)
+	options.Mode = searchapp.Mode(flags.mode)
+	if options.Trigger != "" {
+		service := searchapp.Service{Gateway: query.Gateway{Store: dataStore}}
+		return service.Search(command.Context(), options)
+	}
+	encoder, err := embeddingadapter.Open(cfg.Root, cfg.Embedding)
+	if err != nil {
+		return searchapp.Response{}, err
+	}
+	service := searchapp.Service{Gateway: query.Gateway{Store: dataStore, Encoder: encoder}}
+	response, searchErr := service.Search(command.Context(), options)
+	if encoder == nil {
+		return response, searchErr
+	}
+	return response, errors.Join(searchErr, encoder.Close())
 }
 
 func newFeedstockCommand() *cobra.Command {
@@ -344,7 +374,7 @@ func newFeedstockCommand() *cobra.Command {
 			if command.Flags().Changed("last") && last <= 0 {
 				return errors.New("--last must be greater than zero")
 			}
-			response, err := runSearch(command, query.TargetFeedstock, keywords, flags, query.SearchOptions{
+			response, err := runSearch(command, searchapp.TargetFeedstock, keywords, flags, searchapp.Options{
 				Session: session, Agent: agent, Last: last,
 			})
 			if err != nil {
@@ -512,14 +542,15 @@ func newKnowledgeCommand() *cobra.Command {
 				}
 				if _, internalInvocation := os.LookupEnv(config.InvocationIDEnvironment); internalInvocation {
 					return writeJSON(command.OutOrStdout(), map[string]any{
-						"approved_rules": make([]query.SearchResult, 0),
+						"approved_rules": make([]approvedRule, 0),
 						"total":          0,
 						"returned":       0,
+						"has_more":       false,
 						"truncated":      false,
 					})
 				}
 			}
-			response, err := runSearch(command, query.TargetKnowledge, keywords, flags, query.SearchOptions{
+			response, err := runSearch(command, searchapp.TargetKnowledge, keywords, flags, searchapp.Options{
 				IncludePending: includePending,
 				IncludeRetired: includeRetired, Trigger: trigger,
 			})
@@ -527,10 +558,15 @@ func newKnowledgeCommand() *cobra.Command {
 				return err
 			}
 			if trigger != "" {
+				rules := make([]approvedRule, len(response.Results))
+				for index, result := range response.Results {
+					rules[index] = approvedRule{ID: result.ID, Claim: result.Claim, Subject: result.Subject}
+				}
 				output := map[string]any{
-					"approved_rules": response.Results,
+					"approved_rules": rules,
 					"total":          response.Total,
 					"returned":       response.Returned,
+					"has_more":       response.HasMore,
 					"truncated":      response.Truncated,
 				}
 				if len(response.Warnings) > 0 {
@@ -549,20 +585,46 @@ func newKnowledgeCommand() *cobra.Command {
 	return parent
 }
 
+type approvedRule struct {
+	ID      string `json:"id"`
+	Claim   string `json:"claim"`
+	Subject string `json:"subject,omitempty"`
+}
+
 func newKnowledgeCatalogCommand() *cobra.Command {
-	var subject string
+	var subject, queryText string
 	command := &cobra.Command{
 		Use:    "catalog",
 		Short:  "List compact Knowledge semantics for one assertion subject",
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			dataStore, err := configuredStore()
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			dataStore, err := store.New(cfg.Root)
+			if err != nil {
+				return err
+			}
+			encoder, err := embeddingadapter.Open(cfg.Root, cfg.Embedding)
+			if err != nil {
+				return err
+			}
+			searchService := searchapp.Service{Gateway: query.Gateway{Store: dataStore, Encoder: encoder}}
+			candidateIDs, err := searchService.CandidateIDs(command.Context(), searchapp.Options{
+				Target: searchapp.TargetKnowledge, Keywords: []string{queryText}, Subject: subject,
+				IncludePending: true, Limit: 30,
+			})
+			if encoder != nil {
+				err = errors.Join(err, encoder.Close())
+			}
 			if err != nil {
 				return err
 			}
 			entries, err := brew.Catalog(
-				repositoryFor(dataStore), invocationadapter.Guard{Root: dataStore.Root}, subject,
+				repositoryFor(dataStore), invocationadapter.Guard{Root: dataStore.Root},
+				subject, candidateIDs,
 			)
 			if err != nil {
 				return err
@@ -573,7 +635,9 @@ func newKnowledgeCatalogCommand() *cobra.Command {
 		},
 	}
 	command.Flags().StringVar(&subject, "subject", "", "Exact assertion subject")
+	command.Flags().StringVar(&queryText, "query", "", "Verified or corrected assertion statement")
 	_ = command.MarkFlagRequired("subject")
+	_ = command.MarkFlagRequired("query")
 	return command
 }
 
@@ -699,6 +763,114 @@ func configuredStore() (*store.Store, error) {
 		return nil, err
 	}
 	return store.New(cfg.Root)
+}
+
+func newIndexCommand() *cobra.Command {
+	parent := &cobra.Command{
+		Use:   "index",
+		Short: "Synchronize, rebuild, or inspect derived search indexes",
+		Args:  cobra.NoArgs,
+	}
+	parent.AddCommand(
+		&cobra.Command{
+			Use:   "sync",
+			Short: "Synchronize changed Markdown records into the search indexes",
+			Args:  cobra.NoArgs,
+			RunE: func(command *cobra.Command, _ []string) error {
+				return withConfiguredSearch(func(service searchapp.Service) error {
+					report, warnings, err := service.Synchronize(command.Context(), false)
+					if err != nil {
+						return err
+					}
+					return writeJSON(command.OutOrStdout(), map[string]any{
+						"sync": report, "warnings": warnings,
+					})
+				})
+			},
+		},
+		&cobra.Command{
+			Use:   "rebuild",
+			Short: "Rebuild all derived search indexes from Markdown",
+			Args:  cobra.NoArgs,
+			RunE: func(command *cobra.Command, _ []string) error {
+				return withConfiguredSearch(func(service searchapp.Service) error {
+					report, warnings, err := service.Synchronize(command.Context(), true)
+					if err != nil {
+						return err
+					}
+					return writeJSON(command.OutOrStdout(), map[string]any{
+						"sync": report, "warnings": warnings,
+					})
+				})
+			},
+		},
+		&cobra.Command{
+			Use:   "status",
+			Short: "Inspect search index synchronization state",
+			Args:  cobra.NoArgs,
+			RunE: func(command *cobra.Command, _ []string) error {
+				return withConfiguredSearch(func(service searchapp.Service) error {
+					status, warnings, err := service.Status(command.Context())
+					if err != nil {
+						return err
+					}
+					return writeJSON(command.OutOrStdout(), map[string]any{
+						"status": status, "warnings": warnings,
+					})
+				})
+			},
+		},
+	)
+	return parent
+}
+
+func withConfiguredSearch(run func(searchapp.Service) error) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	dataStore, err := store.New(cfg.Root)
+	if err != nil {
+		return err
+	}
+	encoder, err := embeddingadapter.Open(cfg.Root, cfg.Embedding)
+	if err != nil {
+		return err
+	}
+	service := searchapp.Service{Gateway: query.Gateway{Store: dataStore, Encoder: encoder}}
+	runErr := run(service)
+	if encoder == nil {
+		return runErr
+	}
+	return errors.Join(runErr, encoder.Close())
+}
+
+func searchSynchronizer(cfg config.Config, dataStore *store.Store) (query.Synchronizer, error) {
+	encoder, err := embeddingadapter.Open(cfg.Root, cfg.Embedding)
+	if err != nil {
+		return query.Synchronizer{}, err
+	}
+	return query.Synchronizer{Service: searchapp.Service{
+		Gateway: query.Gateway{Store: dataStore, Encoder: encoder},
+	}, Encoder: encoder}, nil
+}
+
+type drawSearchIndex struct {
+	Config config.Config
+	Store  *store.Store
+}
+
+func (index drawSearchIndex) Sync(ctx context.Context) ([]diagnostic.Warning, error) {
+	encoder, err := embeddingadapter.Open(index.Config.Root, index.Config.Embedding)
+	if err != nil {
+		return nil, err
+	}
+	service := searchapp.Service{Gateway: query.Gateway{Store: index.Store, Encoder: encoder}}
+	_, warnings, syncErr := service.Synchronize(ctx, false)
+	if encoder == nil {
+		return warnings, syncErr
+	}
+	return warnings, errors.Join(syncErr, encoder.Close())
 }
 
 func repositoryFor(dataStore *store.Store) *persistenceadapter.Markdown {

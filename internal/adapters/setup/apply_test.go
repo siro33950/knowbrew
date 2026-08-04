@@ -19,7 +19,8 @@ func TestApplyCreatesRootLocalConfigAndUserLocator(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
 	if err := Apply(Choices{
 		Root: root, Backend: "claude-cli", DrawModel: "fast-model", BrewModel: "quality-model",
-		InstallClaude: false, InstallCodex: false,
+		EmbeddingModel: config.EmbeddingDisabled,
+		InstallClaude:  false, InstallCodex: false,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +53,9 @@ func TestApplyCreatesRootLocalConfigAndUserLocator(t *testing.T) {
 	if loaded.Draw.MaxContextTurns != config.DefaultDrawMaxContextTurns {
 		t.Fatalf("draw max context turns = %d", loaded.Draw.MaxContextTurns)
 	}
+	if loaded.Embedding.Model != config.EmbeddingDisabled {
+		t.Fatalf("embedding model = %q", loaded.Embedding.Model)
+	}
 	data, err := os.ReadFile(filepath.Join(root, ".knowbrew", "config.toml"))
 	if err != nil {
 		t.Fatal(err)
@@ -61,6 +65,7 @@ func TestApplyCreatesRootLocalConfigAndUserLocator(t *testing.T) {
 		`brew_effort = ""`,
 		`context_turns = 3`,
 		`max_context_turns = 20`,
+		`model = "disabled"`,
 	} {
 		if !strings.Contains(string(data), required) {
 			t.Fatalf("config does not contain %q:\n%s", required, data)
@@ -74,7 +79,7 @@ func TestApplyCreatesRootLocalConfigAndUserLocator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(warnings) != 0 || len(types) != 7 {
+	if len(warnings) != 0 || len(types) != 8 {
 		t.Fatalf("init type masters = %#v, warnings = %#v", types, warnings)
 	}
 }
@@ -95,7 +100,8 @@ func TestApplyReinitPreservesUnaskedSettingsCustomSourcesAndData(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
 	if err := Apply(Choices{
 		Root: root, Backend: "codex-cli", DrawModel: "old-draw", BrewModel: "old-brew",
-		SourceNames: []string{"claude", "codex"}, InstallClaude: false, InstallCodex: false,
+		EmbeddingModel: config.EmbeddingDisabled,
+		SourceNames:    []string{"claude", "codex"}, InstallClaude: false, InstallCodex: false,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +127,8 @@ func TestApplyReinitPreservesUnaskedSettingsCustomSourcesAndData(t *testing.T) {
 
 	if err := Apply(Choices{
 		Root: root, Backend: "codex-cli", DrawModel: "new-draw", BrewModel: "new-brew",
-		SourceNames: []string{"codex"}, InstallClaude: false, InstallCodex: false,
+		EmbeddingModel: config.EmbeddingDisabled,
+		SourceNames:    []string{"codex"}, InstallClaude: false, InstallCodex: false,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +186,8 @@ path = "` + customPath + `"
 	}
 	if err := Apply(Choices{
 		Root: root, Backend: "codex-cli", DrawModel: "draw-existing", BrewModel: "brew-existing",
-		InstallClaude: false, InstallCodex: false,
+		EmbeddingModel: config.EmbeddingDisabled,
+		InstallClaude:  false, InstallCodex: false,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -195,5 +203,44 @@ path = "` + customPath + `"
 	}
 	if len(updated.Sources) != 1 || updated.Sources[0].Path != customPath {
 		t.Fatalf("custom source was not preserved: %#v", updated.Sources)
+	}
+}
+
+func TestApplyReinitPreservesCustomEmbeddingPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv(config.ConfigEnvironment, "")
+	root := filepath.Join(t.TempDir(), "vault")
+	if err := Apply(Choices{
+		Root: root, Backend: "codex-cli", DrawModel: "draw", BrewModel: "brew",
+		EmbeddingModel: config.EmbeddingDisabled,
+		InstallClaude:  false, InstallCodex: false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadPath(config.DefaultConfigPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	customPath := filepath.Join(root, "models", "custom")
+	cfg.Embedding = config.Embedding{Model: config.EmbeddingCustom, Path: customPath}
+	if _, err := config.Save(root, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Apply(Choices{
+		Root: root, Backend: "codex-cli", DrawModel: "draw", BrewModel: "brew",
+		EmbeddingModel: config.EmbeddingCustom,
+		InstallClaude:  false, InstallCodex: false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := config.LoadPath(config.DefaultConfigPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Embedding.Model != config.EmbeddingCustom || updated.Embedding.Path != customPath {
+		t.Fatalf("custom embedding after reinit = %#v", updated.Embedding)
 	}
 }

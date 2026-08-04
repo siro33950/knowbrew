@@ -71,6 +71,13 @@ func (service Service) Run(ctx context.Context) (Summary, error) {
 	summary := Summary{Usage: agent.NewUsageReport(
 		service.Settings.Backend, service.Settings.Model, agent.Usage{},
 	)}
+	if service.SearchIndex != nil {
+		indexWarnings, syncErr := service.SearchIndex.Sync(ctx)
+		diagnostic.Add(&summary.Warnings, display, indexWarnings...)
+		if syncErr != nil {
+			return summary, fmt.Errorf("synchronize search index before brewing: %w", syncErr)
+		}
+	}
 	_, lifecycleWarnings, err := knowledgeapp.Reconcile(ctx, service.Lifecycle)
 	diagnostic.Add(&summary.Warnings, display, lifecycleWarnings...)
 	if err != nil {
@@ -228,6 +235,15 @@ func (service Service) Run(ctx context.Context) (Summary, error) {
 		advance()
 	}
 	summary.Usage = agent.NewUsageReport(service.Settings.Backend, service.Settings.Model, usage)
+	if service.SearchIndex != nil {
+		indexWarnings, syncErr := service.SearchIndex.Sync(ctx)
+		diagnostic.Add(&summary.Warnings, display, indexWarnings...)
+		if syncErr != nil {
+			diagnostic.Add(&summary.Warnings, display,
+				diagnostic.FromError("search index", syncErr),
+			)
+		}
+	}
 	display.Complete(fmt.Sprintf(
 		"Brewing complete · %d/%d assertions · %s", completed, len(pending), agent.FormatUsage(usage),
 	))
@@ -336,7 +352,7 @@ Follow this order exactly:
 1. Source verification. Compare assertion with target_dialogue. Use context_before and context_after to resolve references, approvals, rejections, corrections, and the meaning of repeated statements. Reject content that is not established or supported by the resolved source, including an assistant-only proposal that the user never accepted. Repetition of an already established meaning remains valid evidence. Verify statement and rationale independently: rationale must be a source-supported reason why the statement was chosen or holds, not provenance or a restatement of its status. Phrases that merely say the user requested, specified, confirmed, or explicitly stated something, or that it appeared in requirements or completion criteria, are not rationale. If the statement is valid but rationale is unsupported or non-explanatory, choose corrected and return the same type, subject, and statement with an empty rationale.
 2. Type qualification. Treat knowledge_type_master as the sole authority for semantic Knowledge eligibility. The assertion must be one coherent meaning that fits exactly one listed type. If its assigned type is wrong but another listed type fits, correct it; if no listed type fits, reject it. Do not apply a separate hard-coded category or exclusion list. Preserve every condition and qualification in the statement itself. Keep rationale only when it passes the independent source-and-purpose check; never invent one.
 3. Assertion result. Choose verified, corrected, or rejected. corrected must keep the same subject and provide the complete corrected assertion without an ID. rejected performs no Knowledge comparison.
-4. Subject catalog. For verified or corrected content, run "knowbrew knowledge catalog --subject %s" exactly once. The catalog is discovery only, never final evidence.
+4. Subject candidates. For verified or corrected content, run "knowbrew knowledge catalog --subject %s --query <verified-or-corrected-statement>" exactly once. Pass the complete statement after source verification and type qualification. The returned semantic candidates are discovery only, never final evidence.
 5. Full inspection. Select every Knowledge that might concern the same assertion unit, including apparently related but possibly independent entries. Read all selected records in one "knowbrew knowledge show <knowledge-id...>" command. Never assign a relation to a record you did not inspect in full.
 6. Semantic resolution. Resolve this atomic assertion against exactly one independently maintainable Knowledge unit. A Knowledge unit answers one independently maintainable question. A mapping, matrix, or set of peer cases may remain one unit when every item answers that same question on the same axis. new means no inspected Knowledge has the same independently maintainable meaning. equivalent means the same claim and scope. complements means compatible nonredundant content that must be maintained as one combined answer, including another peer item on the same mapping axis. If the incoming assertion answers a different question or adds a separately maintainable rule, choose new even when it is closely related. conflicts means overlapping scope that cannot be true simultaneously. Merely sharing a subject, noun, feature, rationale, or type is no relation. Type is metadata, not identity. If several records appear to require different relation kinds, select the single record representing the same atomic Knowledge unit; unrelated records are not targets.
 7. Draft composition. For a complements decision, write a complete merged draft that still answers only the one question established in step 6. Write the statement in the language and style required by the user's configuration. Use concise natural prose for a single proposition. When the answer contains peer values, backend-specific behavior, cases, or other parallel mappings, write a short lead sentence followed by a Markdown bullet list; never serialize peer items into one sentence by chaining conjunctions. Preserve conditions and exceptions that qualify the claim, but do not append separately maintainable rules or implementation details that answer another question. Do not put headings inside statement. Rationale must explain why the claim holds or why the design was chosen; do not use it to repeat the statement, mapping, or source history.

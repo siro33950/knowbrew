@@ -23,7 +23,7 @@ func TestCommandSurfaceDoesNotExposeDistill(t *testing.T) {
 	for _, command := range root.Commands() {
 		got[command.Name()] = true
 	}
-	for _, name := range []string{"init", "draw", "brew", "show", "feedstock", "knowledge"} {
+	for _, name := range []string{"init", "draw", "brew", "show", "feedstock", "knowledge", "index"} {
 		if !got[name] {
 			t.Errorf("missing command %q", name)
 		}
@@ -36,6 +36,60 @@ func TestCommandSurfaceDoesNotExposeDistill(t *testing.T) {
 	}
 	if got["completion"] {
 		t.Fatal("unexpected default completion command")
+	}
+}
+
+func TestSearchModeAndIndexCommands(t *testing.T) {
+	rootDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.ConfigEnvironment, configPath)
+
+	invalid := newRootCommand()
+	invalid.SetArgs([]string{"feedstock", "meaning", "--search-mode", "invalid"})
+	if err := invalid.Execute(); err == nil || !strings.Contains(err.Error(), "hybrid, text, or vector") {
+		t.Fatalf("invalid search mode error = %v", err)
+	}
+	disabled := newRootCommand()
+	disabled.SetArgs([]string{"feedstock", "meaning", "--search-mode", "vector"})
+	if err := disabled.Execute(); err == nil || !strings.Contains(err.Error(), "vector search is disabled") {
+		t.Fatalf("disabled vector error = %v", err)
+	}
+
+	for _, subcommand := range []string{"sync", "rebuild"} {
+		var output bytes.Buffer
+		command := newRootCommand()
+		command.SetOut(&output)
+		command.SetArgs([]string{"index", subcommand})
+		if err := command.Execute(); err != nil {
+			t.Fatalf("index %s: %v", subcommand, err)
+		}
+		if !strings.Contains(output.String(), `"sync"`) {
+			t.Fatalf("index %s output = %s", subcommand, output.String())
+		}
+	}
+	var output bytes.Buffer
+	status := newRootCommand()
+	status.SetOut(&output)
+	status.SetArgs([]string{"index", "status"})
+	if err := status.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Status struct {
+			SemanticEnabled bool `json:"semantic_enabled"`
+			Documents       int  `json:"documents"`
+			Unsynchronized  int  `json:"unsynchronized"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Status.SemanticEnabled || response.Status.Documents != 0 || response.Status.Unsynchronized != 0 {
+		t.Fatalf("index status = %#v", response.Status)
 	}
 }
 
@@ -515,7 +569,10 @@ func TestKnowledgeSubmitCreatesIDBasedPendingKnowledgeWithSubject(t *testing.T) 
 	t.Setenv(config.InvocationAssertionEnvironment, "as-subject")
 	t.Setenv(config.InvocationIDEnvironment, "submit-subject")
 	catalog := newRootCommand()
-	catalog.SetArgs([]string{"knowledge", "catalog", "--subject", "knowbrew"})
+	catalog.SetArgs([]string{
+		"knowledge", "catalog", "--subject", "knowbrew",
+		"--query", "The subject flag preserves attribution.",
+	})
 	if err := catalog.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +739,7 @@ func TestNormalTriggerSearchStillBuildsIndex(t *testing.T) {
 	})
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n\n[embedding]\nmodel = \"" + config.EmbeddingRuri + "\"\n"
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}

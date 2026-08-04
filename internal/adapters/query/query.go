@@ -25,7 +25,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const indexSchemaVersion = 13
+const indexSchemaVersion = 14
 const rawPageSizeBytes = 12_000
 
 type Target string

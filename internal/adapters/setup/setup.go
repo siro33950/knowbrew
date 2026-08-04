@@ -2,6 +2,7 @@ package setup
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/charmbracelet/huh"
 	"github.com/siro33950/knowbrew/internal/adapters/config"
+	embeddingadapter "github.com/siro33950/knowbrew/internal/adapters/embedding"
 	"github.com/siro33950/knowbrew/internal/adapters/fsutil"
 	"github.com/siro33950/knowbrew/internal/adapters/persistence/markdownstore"
 	"golang.org/x/term"
@@ -27,13 +29,14 @@ const (
 )
 
 type Choices struct {
-	Root          string
-	Backend       string
-	DrawModel     string
-	BrewModel     string
-	SourceNames   []string
-	InstallClaude bool
-	InstallCodex  bool
+	Root           string
+	Backend        string
+	DrawModel      string
+	BrewModel      string
+	EmbeddingModel string
+	SourceNames    []string
+	InstallClaude  bool
+	InstallCodex   bool
 }
 
 func RunInteractive() error {
@@ -72,6 +75,7 @@ func RunInteractive() error {
 	backend := "claude-cli"
 	drawModel := ""
 	brewModel := ""
+	embeddingModel := config.DefaultEmbeddingModel
 	selected := defaults
 	installClaude := true
 	installCodex := true
@@ -80,6 +84,7 @@ func RunInteractive() error {
 		backend = existing.LLM.Backend
 		drawModel = existing.LLM.DrawModel
 		brewModel = existing.LLM.BrewModel
+		embeddingModel = existing.Embedding.Model
 		selected = selectedDetectedSources(existing.Sources, available)
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -93,6 +98,17 @@ func RunInteractive() error {
 			filepath.Join(home, ".codex", "AGENTS.md"),
 			filepath.Join(home, ".codex", "config.toml"),
 		)
+	}
+	embeddingOptions := []huh.Option[string]{
+		huh.NewOption("Japanese recommended — ruri-v3-130m INT8 ONNX", config.EmbeddingRuri),
+		huh.NewOption("English recommended — snowflake-arctic-embed-m-v1.5 INT8 ONNX", config.EmbeddingSnowflake),
+		huh.NewOption("Quality first — Qwen3-Embedding-0.6B Q8_0", config.EmbeddingQwen),
+		huh.NewOption("Disabled — full-text search only", config.EmbeddingDisabled),
+	}
+	if existing != nil && existing.Embedding.Model == config.EmbeddingCustom {
+		embeddingOptions = append([]huh.Option[string]{
+			huh.NewOption("Current custom model — "+existing.Embedding.Path, config.EmbeddingCustom),
+		}, embeddingOptions...)
 	}
 	firstGroupFields := []huh.Field{
 		huh.NewNote().
@@ -150,6 +166,11 @@ func RunInteractive() error {
 				}
 				return nil
 			}),
+		huh.NewSelect[string]().
+			Title("Select semantic search").
+			Description("Downloads and manages the selected local embedding model. Existing configurations can choose disabled.").
+			Options(embeddingOptions...).
+			Value(&embeddingModel),
 	)
 	form := huh.NewForm(
 		huh.NewGroup(firstGroupFields...),
@@ -169,7 +190,8 @@ func RunInteractive() error {
 		return errors.New("initialization cancelled")
 	}
 	return Apply(Choices{
-		Root: root, Backend: backend, DrawModel: drawModel, BrewModel: brewModel, SourceNames: selected,
+		Root: root, Backend: backend, DrawModel: drawModel, BrewModel: brewModel,
+		EmbeddingModel: embeddingModel, SourceNames: selected,
 		InstallClaude: installClaude, InstallCodex: installCodex,
 	})
 }
@@ -178,6 +200,10 @@ func Apply(choices Choices) error {
 	root, err := filepath.Abs(choices.Root)
 	if err != nil {
 		return err
+	}
+	embeddingModel := strings.TrimSpace(choices.EmbeddingModel)
+	if embeddingModel == "" {
+		embeddingModel = config.DefaultEmbeddingModel
 	}
 	available := detectedSources()
 	var selectedSources []config.Source
@@ -200,7 +226,8 @@ func Apply(choices Choices) error {
 			ContextTurns:    config.DefaultDrawContextTurns,
 			MaxContextTurns: config.DefaultDrawMaxContextTurns,
 		},
-		Sources: selectedSources,
+		Embedding: config.Embedding{Model: embeddingModel},
+		Sources:   selectedSources,
 	}
 	if _, statErr := os.Stat(configPath); statErr == nil {
 		existing, loadErr := config.LoadPath(configPath)
@@ -213,6 +240,12 @@ func Apply(choices Choices) error {
 		cfg.LLM.Backend = choices.Backend
 		cfg.LLM.DrawModel = choices.DrawModel
 		cfg.LLM.BrewModel = choices.BrewModel
+		cfg.Embedding.Model = embeddingModel
+		if embeddingModel == config.EmbeddingCustom && existing.Embedding.Model == config.EmbeddingCustom {
+			cfg.Embedding.Path = existing.Embedding.Path
+		} else {
+			cfg.Embedding.Path = ""
+		}
 		cfg.Sources = mergeSelectedSources(existing.Sources, selectedSources, available)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return statErr
@@ -232,6 +265,13 @@ func Apply(choices Choices) error {
 	}
 	if err := dataStore.EnsureLayout(); err != nil {
 		return err
+	}
+	if cfg.Embedding.Model != config.EmbeddingCustom {
+		if err := embeddingadapter.Prepare(
+			context.Background(), root, cfg.Embedding.Model, os.Stdout,
+		); err != nil {
+			return err
+		}
 	}
 	configPath, err = config.Save(root, cfg)
 	if err != nil {

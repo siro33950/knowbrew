@@ -25,6 +25,12 @@ const (
 	DefaultDrawContextTurns        = 3
 	DefaultDrawMaxContextTurns     = 20
 	DefaultDrawEffort              = "low"
+	DefaultEmbeddingModel          = EmbeddingRuri
+	EmbeddingDisabled              = "disabled"
+	EmbeddingRuri                  = "ruri-v3-130m-int8-onnx"
+	EmbeddingSnowflake             = "snowflake-arctic-embed-m-v1.5-int8-onnx"
+	EmbeddingQwen                  = "qwen3-embedding-0.6b-q8_0"
+	EmbeddingCustom                = "custom"
 )
 
 type LLM struct {
@@ -42,6 +48,11 @@ type Draw struct {
 	MaxContextTurns int `toml:"max_context_turns"`
 }
 
+type Embedding struct {
+	Model string `toml:"model"`
+	Path  string `toml:"path,omitempty"`
+}
+
 type Source struct {
 	Agent  string `toml:"agent"`
 	Path   string `toml:"path"`
@@ -49,10 +60,11 @@ type Source struct {
 }
 
 type Config struct {
-	Root    string   `toml:"root"`
-	LLM     LLM      `toml:"llm"`
-	Draw    Draw     `toml:"draw"`
-	Sources []Source `toml:"sources"`
+	Root      string    `toml:"root"`
+	LLM       LLM       `toml:"llm"`
+	Draw      Draw      `toml:"draw"`
+	Embedding Embedding `toml:"embedding"`
+	Sources   []Source  `toml:"sources"`
 
 	Path                string `toml:"-"`
 	drawConcurrencySet  bool   `toml:"-"`
@@ -60,6 +72,7 @@ type Config struct {
 	drawMaxContextSet   bool   `toml:"-"`
 	drawEffortSet       bool   `toml:"-"`
 	brewEffortSet       bool   `toml:"-"`
+	embeddingModelSet   bool   `toml:"-"`
 }
 
 type Locator struct {
@@ -131,6 +144,7 @@ func LoadPath(path string) (Config, error) {
 	cfg.drawMaxContextSet = metadata.IsDefined("draw", "max_context_turns")
 	cfg.drawEffortSet = metadata.IsDefined("llm", "draw_effort")
 	cfg.brewEffortSet = metadata.IsDefined("llm", "brew_effort")
+	cfg.embeddingModelSet = metadata.IsDefined("embedding", "model")
 	if err := cfg.Normalize(); err != nil {
 		return Config{}, fmt.Errorf("invalid configuration %s: %w", path, err)
 	}
@@ -145,6 +159,9 @@ func (cfg *Config) FillInitDefaults() {
 	}
 	if !cfg.brewEffortSet {
 		cfg.LLM.BrewEffort = ""
+	}
+	if !cfg.embeddingModelSet {
+		cfg.Embedding.Model = DefaultEmbeddingModel
 	}
 }
 
@@ -196,6 +213,21 @@ func (cfg *Config) Normalize() error {
 	}
 	if _, err := cfg.LLM.TimeoutDuration(); err != nil {
 		return err
+	}
+	cfg.Embedding.Model = strings.TrimSpace(cfg.Embedding.Model)
+	switch cfg.Embedding.Model {
+	case "", EmbeddingDisabled, EmbeddingRuri, EmbeddingSnowflake, EmbeddingQwen:
+		cfg.Embedding.Path = ""
+	case EmbeddingCustom:
+		if strings.TrimSpace(cfg.Embedding.Path) == "" {
+			return errors.New("custom embedding model requires path")
+		}
+		cfg.Embedding.Path, err = expandPath(cfg.Embedding.Path)
+		if err != nil {
+			return fmt.Errorf("resolve custom embedding model: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported embedding model %q", cfg.Embedding.Model)
 	}
 	for index := range cfg.Sources {
 		source := &cfg.Sources[index]

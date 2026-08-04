@@ -26,7 +26,7 @@ func invocationForTest(dataStore *store.Store) invocationadapter.Guard {
 }
 
 func catalogForTest(dataStore *store.Store, subject string) ([]CatalogEntry, error) {
-	return Catalog(repositoryForTest(dataStore), invocationForTest(dataStore), subject)
+	return Catalog(repositoryForTest(dataStore), invocationForTest(dataStore), subject, nil)
 }
 
 func showForTest(dataStore *store.Store, ids []string) ([]ShownKnowledge, error) {
@@ -69,6 +69,7 @@ func runForTest(
 	cfg config.Config,
 	runner agent.Runner,
 	progress io.Writer,
+	indexes ...SearchIndex,
 ) (Summary, error) {
 	dataStore, err := store.New(cfg.Root)
 	if err != nil {
@@ -90,5 +91,18 @@ func runForTest(
 			Name: "brew",
 		},
 	}
+	if len(indexes) > 0 {
+		service.SearchIndex = indexes[0]
+	}
 	return service.Run(ctx)
+}
+
+type recordingSearchIndex struct {
+	calls  int
+	failOn map[int]error
+}
+
+func (index *recordingSearchIndex) Sync(context.Context) ([]diagnostic.Warning, error) {
+	index.calls++
+	return nil, index.failOn[index.calls]
 }

@@ -102,6 +102,25 @@ func TestDrawIsIdempotentWithoutPersistentSessionState(t *testing.T) {
 	}
 }
 
+func TestDrawSynchronizesSearchIndexAfterCompletionAndWarnsOnFailure(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Config{
+		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
+		LLM: config.LLM{Backend: "claude-cli"},
+	}
+	index := &recordingSearchIndex{failOn: map[int]error{1: errors.New("index unavailable")}}
+	summary, err := RunWithOptions(context.Background(), cfg, Options{}, nil, nil, index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index.calls != 1 {
+		t.Fatalf("search index sync calls = %d, want 1", index.calls)
+	}
+	if len(summary.Warnings) != 1 || !strings.Contains(summary.Warnings[0].Message, "index unavailable") {
+		t.Fatalf("summary warnings = %#v", summary.Warnings)
+	}
+}
+
 func TestManualDirectoryInfersParserPerFile(t *testing.T) {
 	dir := t.TempDir()
 	claudePath := filepath.Join(dir, "01234567-89ab-cdef-0123-456789abcdef.jsonl")

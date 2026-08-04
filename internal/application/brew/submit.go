@@ -79,7 +79,12 @@ type ShownKnowledge struct {
 	Trigger   string               `json:"trigger,omitempty"`
 }
 
-func Catalog(dataStore Repository, reads Invocation, subject string) ([]CatalogEntry, error) {
+func Catalog(
+	dataStore Repository,
+	reads Invocation,
+	subject string,
+	candidateIDs []string,
+) ([]CatalogEntry, error) {
 	subject = domain.MasterName(subject)
 	if subject == "" {
 		return nil, errors.New("knowledge catalog requires a subject")
@@ -91,9 +96,23 @@ func Catalog(dataStore Repository, reads Invocation, subject string) ([]CatalogE
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]CatalogEntry, 0, len(files))
-	ids := make([]string, 0, len(files))
+	byID := make(map[string]KnowledgeDocument, len(files))
 	for _, file := range files {
+		byID[file.Knowledge.ID] = file
+	}
+	if candidateIDs == nil {
+		candidateIDs = make([]string, 0, len(files))
+		for _, file := range files {
+			candidateIDs = append(candidateIDs, file.Knowledge.ID)
+		}
+	}
+	entries := make([]CatalogEntry, 0, len(candidateIDs))
+	ids := make([]string, 0, len(candidateIDs))
+	for _, id := range candidateIDs {
+		file, exists := byID[id]
+		if !exists {
+			continue
+		}
 		entries = append(entries, CatalogEntry{
 			ID: file.Knowledge.ID, Type: file.Knowledge.Type,
 			Subject: file.Knowledge.Subject, Statement: file.Statement,

@@ -422,7 +422,10 @@ func commandForTool(executable string, name string, arguments map[string]any) ([
 			executable, "feedstock", "context", stringValue(arguments, "feedstock_id"),
 		}, nil
 	case "knowledge_catalog":
-		args := []string{"knowledge", "catalog", "--subject", stringValue(arguments, "subject")}
+		args := []string{
+			"knowledge", "catalog", "--subject", stringValue(arguments, "subject"),
+			"--query", stringValue(arguments, "query"),
+		}
 		return append([]string{executable}, args...), nil
 	case "knowledge_show":
 		args := []string{"knowledge", "show"}

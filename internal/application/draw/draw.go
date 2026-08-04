@@ -292,6 +292,15 @@ func (service Service) RunWithOptions(
 	if err := ctx.Err(); err != nil {
 		return summary, err
 	}
+	if service.SearchIndex != nil {
+		warnings, syncErr := service.SearchIndex.Sync(ctx)
+		diagnostic.Add(&summary.Warnings, display, warnings...)
+		if syncErr != nil {
+			diagnostic.Add(&summary.Warnings, display,
+				diagnostic.FromError("search index", syncErr),
+			)
+		}
+	}
 	return summary, nil
 }
 

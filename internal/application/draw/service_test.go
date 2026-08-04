@@ -99,6 +99,7 @@ func RunWithOptions(
 	options Options,
 	runner agent.Runner,
 	progress io.Writer,
+	indexes ...SearchIndex,
 ) (Summary, error) {
 	dataStore, err := store.New(cfg.Root)
 	if err != nil {
@@ -114,7 +115,20 @@ func RunWithOptions(
 			Name: "draw",
 		},
 	}
+	if len(indexes) > 0 {
+		service.SearchIndex = indexes[0]
+	}
 	return service.RunWithOptions(ctx, options)
+}
+
+type recordingSearchIndex struct {
+	calls  int
+	failOn map[int]error
+}
+
+func (index *recordingSearchIndex) Sync(context.Context) ([]diagnostic.Warning, error) {
+	index.calls++
+	return nil, index.failOn[index.calls]
 }
 
 func settingsFromConfig(cfg config.Config) Settings {
