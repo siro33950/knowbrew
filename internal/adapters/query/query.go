@@ -18,7 +18,6 @@ import (
 	persistenceadapter "github.com/siro33950/knowbrew/internal/adapters/persistence"
 	"github.com/siro33950/knowbrew/internal/adapters/persistence/knowledgefmt"
 	"github.com/siro33950/knowbrew/internal/adapters/persistence/markdownstore"
-	"github.com/siro33950/knowbrew/internal/adapters/source/parser"
 	"github.com/siro33950/knowbrew/internal/application/diagnostic"
 	knowledgeapp "github.com/siro33950/knowbrew/internal/application/knowledge"
 	"github.com/siro33950/knowbrew/internal/domain"
@@ -100,6 +99,10 @@ type RawShowResponse struct {
 	TotalPages  int                      `json:"total_pages"`
 	HasMore     bool                     `json:"has_more"`
 	Messages    []domain.DialogueMessage `json:"messages"`
+}
+
+type RawDialogueReader interface {
+	Read(string) ([]domain.DialogueMessage, error)
 }
 
 func Search(ctx context.Context, dataStore *store.Store, options SearchOptions) (SearchResponse, error) {
@@ -914,11 +917,16 @@ func knowledgeTypeStrings(values []domain.KnowledgeType) []string {
 	return out
 }
 
-func ShowRaw(dataStore *store.Store, id string, page int) (RawShowResponse, error) {
+func ShowRaw(
+	dataStore *store.Store,
+	reader RawDialogueReader,
+	id string,
+	page int,
+) (RawShowResponse, error) {
 	if page < 1 {
 		return RawShowResponse{}, errors.New("raw show page must be at least 1")
 	}
-	feedstock, messages, err := extractRawDialogue(dataStore, id)
+	feedstock, messages, err := extractRawDialogue(dataStore, reader, id)
 	if err != nil {
 		return RawShowResponse{}, err
 	}
@@ -943,39 +951,25 @@ func ShowRaw(dataStore *store.Store, id string, page int) (RawShowResponse, erro
 
 // ExtractRawDialogue returns the same mechanically filtered dialogue used by
 // show --raw, without applying its presentation-oriented pagination.
-func ExtractRawDialogue(dataStore *store.Store, id string) ([]domain.DialogueMessage, error) {
-	_, messages, err := extractRawDialogue(dataStore, id)
+func ExtractRawDialogue(
+	dataStore *store.Store,
+	reader RawDialogueReader,
+	id string,
+) ([]domain.DialogueMessage, error) {
+	_, messages, err := extractRawDialogue(dataStore, reader, id)
 	return messages, err
 }
 
 func extractRawDialogue(
 	dataStore *store.Store,
+	reader RawDialogueReader,
 	id string,
 ) (domain.Feedstock, []domain.DialogueMessage, error) {
 	feedstock, _, err := dataStore.FindFeedstock(id)
 	if err != nil {
 		return domain.Feedstock{}, nil, err
 	}
-	if _, err := os.Stat(feedstock.Session.Path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return domain.Feedstock{}, nil, fmt.Errorf(
-				"source log for feedstock %s was not found: %s",
-				feedstock.ID,
-				feedstock.Session.Path,
-			)
-		}
-		return domain.Feedstock{}, nil, fmt.Errorf(
-			"access source log for feedstock %s at %s: %w",
-			feedstock.ID,
-			feedstock.Session.Path,
-			err,
-		)
-	}
-	logParser, err := parser.For(feedstock.Agent)
-	if err != nil {
-		return domain.Feedstock{}, nil, err
-	}
-	messages, err := logParser.ExtractTurn(feedstock.Session.Path, feedstock.TurnID)
+	messages, err := reader.Read(feedstock.ID)
 	if err != nil {
 		return domain.Feedstock{}, nil, err
 	}

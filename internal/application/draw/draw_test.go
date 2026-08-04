@@ -46,7 +46,9 @@ func (runner annotatingRunner) Run(_ context.Context, task llm.Task, _ string, _
 func TestDrawIsIdempotentWithoutPersistentSessionState(t *testing.T) {
 	root := t.TempDir()
 	dataStore, _ := store.New(root)
-	logPath := filepath.Join(t.TempDir(), "session.jsonl")
+	sourceDir := t.TempDir()
+	movedDir := filepath.Join(t.TempDir(), "backup")
+	logPath := filepath.Join(sourceDir, "session.jsonl")
 	log := `{"type":"user","sessionId":"session-id","timestamp":"2026-07-30T01:02:03Z","cwd":"/repo","gitBranch":"main","message":{"role":"user","content":"test this"}}
 {"type":"user","sessionId":"session-id","timestamp":"2026-07-30T01:02:04Z","message":{"role":"user","content":"[Request interrupted by user]"}}
 `
@@ -55,7 +57,9 @@ func TestDrawIsIdempotentWithoutPersistentSessionState(t *testing.T) {
 	}
 	cfg := config.Config{
 		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
-		LLM: config.LLM{Backend: "claude-cli"},
+		LLM: config.LLM{Backend: "claude-cli"}, Sources: []config.Source{{
+			Agent: "claude", Parser: "claude", Paths: []string{sourceDir, movedDir},
+		}},
 	}
 	runner := annotatingRunner{store: dataStore}
 	first, err := Run(context.Background(), cfg, []string{logPath}, runner, nil)
@@ -72,7 +76,6 @@ func TestDrawIsIdempotentWithoutPersistentSessionState(t *testing.T) {
 	if second.FeedstocksAcquired != 0 || second.FeedstocksAnnotated != 0 {
 		t.Fatalf("second summary = %#v", second)
 	}
-	movedDir := filepath.Join(t.TempDir(), "backup")
 	if err := os.MkdirAll(movedDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -121,17 +124,21 @@ func TestDrawSynchronizesSearchIndexAfterCompletionAndWarnsOnFailure(t *testing.
 	}
 }
 
-func TestManualDirectoryInfersParserPerFile(t *testing.T) {
-	dir := t.TempDir()
-	claudePath := filepath.Join(dir, "01234567-89ab-cdef-0123-456789abcdef.jsonl")
-	codexPath := filepath.Join(dir, "rollout-2026-07-30T01-00-00-019fb136-74f8-7283-8907-eb33a3cc74fd.jsonl")
+func TestExplicitPathsUseTheirConfiguredSources(t *testing.T) {
+	claudeDir := t.TempDir()
+	codexDir := t.TempDir()
+	claudePath := filepath.Join(claudeDir, "01234567-89ab-cdef-0123-456789abcdef.jsonl")
+	codexPath := filepath.Join(codexDir, "rollout-2026-07-30T01-00-00-019fb136-74f8-7283-8907-eb33a3cc74fd.jsonl")
 	for _, path := range []string{claudePath, codexPath} {
 		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	cfg := config.Config{}
-	files, err := collectFiles(cfg, Options{Paths: []string{dir}}, time.Now())
+	cfg := config.Config{Sources: []config.Source{
+		{Agent: "claude", Parser: "claude", Paths: []string{claudeDir}},
+		{Agent: "codex", Parser: "codex", Paths: []string{codexDir}},
+	}}
+	files, err := collectFiles(cfg, Options{Paths: []string{claudePath, codexPath}}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +175,7 @@ func TestDefaultDrawUsesOnlyLogsModifiedInLast24Hours(t *testing.T) {
 	cfg := config.Config{
 		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
 		LLM:     config.LLM{Backend: "claude-cli"},
-		Sources: []config.Source{{Agent: "claude", Parser: "claude", Path: sourceDir}},
+		Sources: []config.Source{{Agent: "claude", Parser: "claude", Paths: []string{sourceDir}}},
 	}
 
 	first, err := Run(context.Background(), cfg, nil, annotatingRunner{store: dataStore}, nil)
@@ -217,7 +224,7 @@ func TestMaxTurnsProcessesNewestUnfinishedTurnsAndReportsBacklog(t *testing.T) {
 	cfg := config.Config{
 		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
 		LLM:     config.LLM{Backend: "claude-cli"},
-		Sources: []config.Source{{Agent: "claude", Parser: "claude", Path: sourceDir}},
+		Sources: []config.Source{{Agent: "claude", Parser: "claude", Paths: []string{sourceDir}}},
 	}
 
 	first, err := RunWithOptions(
@@ -258,7 +265,8 @@ func TestMaxTurnsProcessesNewestUnfinishedTurnsAndReportsBacklog(t *testing.T) {
 func TestMaxTurnsPrioritizesPreviouslyAcquiredIncompleteFeedstock(t *testing.T) {
 	root := t.TempDir()
 	dataStore, _ := store.New(root)
-	logPath := filepath.Join(t.TempDir(), "session.jsonl")
+	sourceDir := t.TempDir()
+	logPath := filepath.Join(sourceDir, "session.jsonl")
 	log := `{"type":"user","uuid":"turn-1","sessionId":"resume","timestamp":"2026-07-29T01:02:03Z","message":{"role":"user","content":"incomplete"}}
 {"type":"user","uuid":"turn-2","sessionId":"resume","timestamp":"2026-07-30T01:02:03Z","message":{"role":"user","content":"new"}}
 {"type":"user","sessionId":"resume","timestamp":"2026-07-30T01:02:04Z","message":{"role":"user","content":"[Request interrupted by user]"}}
@@ -269,14 +277,15 @@ func TestMaxTurnsPrioritizesPreviouslyAcquiredIncompleteFeedstock(t *testing.T) 
 	incompleteID := parser.FeedstockID("claude", "resume", "turn-1")
 	if err := dataStore.WriteFeedstock(domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: incompleteID, TurnID: "turn-1",
-		Session:   domain.SessionRef{ID: "resume", Path: logPath},
+		Session:   domain.SessionRef{ID: "resume"},
 		Timestamp: time.Date(2026, 7, 29, 1, 2, 3, 0, time.UTC), Agent: "claude",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Config{
 		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
-		LLM: config.LLM{Backend: "claude-cli"},
+		LLM:     config.LLM{Backend: "claude-cli"},
+		Sources: []config.Source{{Agent: "claude", Parser: "claude", Paths: []string{sourceDir}}},
 	}
 
 	summary, err := RunWithOptions(
@@ -314,8 +323,8 @@ func TestCollectFilesCanLimitConfiguredAgentSources(t *testing.T) {
 		}
 	}
 	cfg := config.Config{Sources: []config.Source{
-		{Agent: "claude", Parser: "claude", Path: claudeDir},
-		{Agent: "codex", Parser: "codex", Path: codexDir},
+		{Agent: "claude", Parser: "claude", Paths: []string{claudeDir}},
+		{Agent: "codex", Parser: "codex", Paths: []string{codexDir}},
 	}}
 	files, err := collectFiles(cfg, Options{Sources: []string{"codex"}}, time.Now())
 	if err != nil {
@@ -348,18 +357,17 @@ func TestDrawClassifiesOnlyFeedstocksFromSelectedSessions(t *testing.T) {
 	root := t.TempDir()
 	dataStore, _ := store.New(root)
 	unrelated := domain.Feedstock{
-		Schema: domain.SchemaVersion,
-		ID:     parser.FeedstockID("claude", "unrelated-session", "unrelated-turn"),
-		TurnID: "unrelated-turn",
-		Session: domain.SessionRef{
-			ID: "unrelated-session", Path: "/logs/unrelated.jsonl",
-		},
+		Schema:    domain.SchemaVersion,
+		ID:        parser.FeedstockID("claude", "unrelated-session", "unrelated-turn"),
+		TurnID:    "unrelated-turn",
+		Session:   domain.SessionRef{ID: "unrelated-session"},
 		Timestamp: time.Now().Add(-48 * time.Hour), Agent: "claude",
 	}
 	if err := dataStore.WriteFeedstock(unrelated); err != nil {
 		t.Fatal(err)
 	}
-	logPath := filepath.Join(t.TempDir(), "selected.jsonl")
+	sourceDir := t.TempDir()
+	logPath := filepath.Join(sourceDir, "selected.jsonl")
 	if err := os.WriteFile(logPath, []byte(
 		`{"type":"user","uuid":"selected-turn","sessionId":"selected-session","timestamp":"2026-07-30T01:02:03Z","message":{"role":"user","content":"selected"}}`+"\n"+`{"type":"user","sessionId":"selected-session","timestamp":"2026-07-30T01:02:04Z","message":{"role":"user","content":"[Request interrupted by user]"}}`+"\n",
 	), 0o600); err != nil {
@@ -367,7 +375,8 @@ func TestDrawClassifiesOnlyFeedstocksFromSelectedSessions(t *testing.T) {
 	}
 	cfg := config.Config{
 		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
-		LLM: config.LLM{Backend: "claude-cli"},
+		LLM:     config.LLM{Backend: "claude-cli"},
+		Sources: []config.Source{{Agent: "claude", Parser: "claude", Paths: []string{sourceDir}}},
 	}
 
 	summary, err := Run(
@@ -401,7 +410,7 @@ func TestConcurrentDrawsWaitAndRemainIdempotent(t *testing.T) {
 	cfg := config.Config{
 		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
 		LLM:     config.LLM{Backend: "claude-cli"},
-		Sources: []config.Source{{Agent: "claude", Parser: "claude", Path: sourceDir}},
+		Sources: []config.Source{{Agent: "claude", Parser: "claude", Paths: []string{sourceDir}}},
 	}
 	start := make(chan struct{})
 	results := make(chan Summary, 2)
@@ -661,7 +670,7 @@ func TestAnnotationPromptIncludesFilteredDialogueWithoutReadInstructions(t *test
 	}); err != nil {
 		t.Fatal(err)
 	}
-	logPath := filepath.Join(t.TempDir(), "session.jsonl")
+	logPath := filepath.Join(dataStore.Root, "session.jsonl")
 	log := `{"type":"user","uuid":"turn-target","sessionId":"session","timestamp":"2026-07-30T01:00:00Z","message":{"role":"user","content":"FULL USER REQUEST"}}
 {"type":"assistant","sessionId":"session","timestamp":"2026-07-30T01:00:01Z","message":{"role":"assistant","content":[{"type":"thinking","text":"SECRET THINKING"},{"type":"text","text":"VISIBLE ASSISTANT RESPONSE"},{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"SECRET TOOL CALL"}}]}}
 {"type":"user","sessionId":"session","timestamp":"2026-07-30T01:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"SECRET TOOL OUTPUT"}]}}
@@ -674,7 +683,7 @@ func TestAnnotationPromptIncludesFilteredDialogueWithoutReadInstructions(t *test
 		Schema:    domain.SchemaVersion,
 		ID:        parser.FeedstockID("claude", "session", "turn-target"),
 		TurnID:    "turn-target",
-		Session:   domain.SessionRef{ID: "session", Path: logPath},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Date(2026, 7, 30, 1, 0, 0, 0, time.UTC),
 		Agent:     "claude", CWD: "/vault", Repo: "https://github.com/example/knowbrew.git",
 	}
@@ -834,7 +843,7 @@ func TestAnnotationPromptMarksMissingAssistantResponse(t *testing.T) {
 	if err := dataStore.EnsureLayout(); err != nil {
 		t.Fatal(err)
 	}
-	logPath := filepath.Join(t.TempDir(), "session.jsonl")
+	logPath := filepath.Join(dataStore.Root, "session.jsonl")
 	log := `{"type":"user","uuid":"turn-without-assistant","sessionId":"session","timestamp":"2026-07-30T01:00:00Z","message":{"role":"user","content":"UNANSWERED USER REQUEST"}}
 {"type":"user","sessionId":"session","timestamp":"2026-07-30T01:00:01Z","message":{"role":"user","content":"[Request interrupted by user]"}}
 `
@@ -845,7 +854,7 @@ func TestAnnotationPromptMarksMissingAssistantResponse(t *testing.T) {
 		Schema:    domain.SchemaVersion,
 		ID:        parser.FeedstockID("claude", "session", "turn-without-assistant"),
 		TurnID:    "turn-without-assistant",
-		Session:   domain.SessionRef{ID: "session", Path: logPath},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Date(2026, 7, 30, 1, 0, 0, 0, time.UTC),
 		Agent:     "claude",
 	}
@@ -987,7 +996,7 @@ func TestAnnotationPromptIncludesOnlyThreePriorTurnsWithinSession(t *testing.T) 
 	candidates = append(candidates,
 		domain.FeedstockCandidate{
 			ID: "fs-other-session", TurnID: "turn-other",
-			Session:   domain.SessionRef{ID: "other-session", Path: target.Session.Path},
+			Session:   domain.SessionRef{ID: "other-session"},
 			Timestamp: base, Agent: "claude",
 			Dialogue: []domain.DialogueMessage{{Role: "user", Content: "CROSS SESSION QUOTE"}},
 		},
@@ -1068,7 +1077,7 @@ func TestAnnotationPromptIncludesBoundedPriorDialogueOnly(t *testing.T) {
 	}
 	sessionID := "session-assistant-context"
 	base := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
-	logPath := filepath.Join(t.TempDir(), sessionID+".jsonl")
+	logPath := filepath.Join(dataStore.Root, sessionID+".jsonl")
 	previousAssistant := "PREVIOUS ASSISTANT BEGIN\n" +
 		strings.Repeat("x", annotationContextAssistantLimitBytes) +
 		"\nPREVIOUS ASSISTANT TAIL"
@@ -1108,12 +1117,10 @@ func TestAnnotationPromptIncludesBoundedPriorDialogueOnly(t *testing.T) {
 		{id: "turn-after", timestamp: base.Add(time.Minute), quote: "What next?"},
 	} {
 		feedstock := domain.Feedstock{
-			Schema: domain.SchemaVersion,
-			ID:     parser.FeedstockID("claude", sessionID, turn.id),
-			TurnID: turn.id,
-			Session: domain.SessionRef{
-				ID: sessionID, Path: logPath,
-			},
+			Schema:    domain.SchemaVersion,
+			ID:        parser.FeedstockID("claude", sessionID, turn.id),
+			TurnID:    turn.id,
+			Session:   domain.SessionRef{ID: sessionID},
 			Timestamp: turn.timestamp,
 			Agent:     "claude",
 		}
@@ -1192,7 +1199,7 @@ func writePromptTarget(
 	assistantText string,
 ) domain.Feedstock {
 	t.Helper()
-	logPath := filepath.Join(t.TempDir(), sessionID+".jsonl")
+	logPath := filepath.Join(dataStore.Root, sessionID+".jsonl")
 	log := fmt.Sprintf(
 		"{\"type\":\"user\",\"uuid\":%q,\"sessionId\":%q,\"timestamp\":%q,\"message\":{\"role\":\"user\",\"content\":%q}}\n"+
 			"{\"type\":\"assistant\",\"sessionId\":%q,\"timestamp\":%q,\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":%q}]}}\n",
@@ -1208,12 +1215,10 @@ func writePromptTarget(
 		t.Fatal(err)
 	}
 	feedstock := domain.Feedstock{
-		Schema: domain.SchemaVersion,
-		ID:     parser.FeedstockID("claude", sessionID, turnID),
-		TurnID: turnID,
-		Session: domain.SessionRef{
-			ID: sessionID, Path: logPath,
-		},
+		Schema:    domain.SchemaVersion,
+		ID:        parser.FeedstockID("claude", sessionID, turnID),
+		TurnID:    turnID,
+		Session:   domain.SessionRef{ID: sessionID},
 		Timestamp: timestamp, Agent: "claude",
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
@@ -1255,7 +1260,8 @@ func TestDrawContinuesAfterAnnotationFailureAndRetriesFeedstock(t *testing.T) {
 	}
 	cfg := config.Config{
 		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
-		LLM: config.LLM{Backend: "claude-cli"},
+		LLM:     config.LLM{Backend: "claude-cli"},
+		Sources: []config.Source{{Agent: "claude", Parser: "claude", Paths: []string{filepath.Dir(logPath)}}},
 	}
 	failedID := parser.FeedstockID("claude", "session-id", "turn-1")
 	runner := &retryingAnnotatingRunner{
@@ -1315,7 +1321,8 @@ func TestDrawReportsActualVerificationError(t *testing.T) {
 	}
 	cfg := config.Config{
 		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
-		LLM: config.LLM{Backend: "claude-cli"},
+		LLM:     config.LLM{Backend: "claude-cli"},
+		Sources: []config.Source{{Agent: "claude", Parser: "claude", Paths: []string{filepath.Dir(logPath)}}},
 	}
 	summary, err := Run(context.Background(), cfg, []string{logPath}, corruptingRunner{root: root}, nil)
 	if err != nil {
@@ -1395,6 +1402,7 @@ func TestAcquisitionPersistsUnannotatedFeedstockAndResumeClassifiesIt(t *testing
 	cfg := config.Config{
 		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
 		LLM: config.LLM{Backend: "claude-cli"}, Draw: config.Draw{Concurrency: 2},
+		Sources: []config.Source{{Agent: "claude", Parser: "claude", Paths: []string{filepath.Dir(logPath)}}},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	first, err := Run(ctx, cfg, []string{logPath}, nil, cancelOnAcquisitionWriter{cancel: cancel})
@@ -1501,6 +1509,7 @@ func TestDrawCompletesAllSummariesBeforeAssertionsAndResumesAtAssertionPhase(t *
 	cfg := config.Config{
 		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
 		LLM: config.LLM{Backend: "claude-cli"}, Draw: config.Draw{Concurrency: 3},
+		Sources: []config.Source{{Agent: "claude", Parser: "claude", Paths: []string{filepath.Dir(logPath)}}},
 	}
 	firstRunner := &phaseOrderRunner{store: dataStore}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1595,6 +1604,7 @@ func TestDrawClassifiesAllFeedstocksWithConcurrentWorkers(t *testing.T) {
 	cfg := config.Config{
 		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
 		LLM: config.LLM{Backend: "claude-cli"}, Draw: config.Draw{Concurrency: 3},
+		Sources: []config.Source{{Agent: "claude", Parser: "claude", Paths: []string{filepath.Dir(logPath)}}},
 	}
 	runner := &concurrentAnnotatingRunner{
 		store: dataStore,
@@ -1659,6 +1669,7 @@ func TestDrawNonTTYProgressUsesPhaseLinesOnly(t *testing.T) {
 	cfg := config.Config{
 		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
 		LLM: config.LLM{Backend: "claude-cli"}, Draw: config.Draw{Concurrency: 2},
+		Sources: []config.Source{{Agent: "claude", Parser: "claude", Paths: []string{filepath.Dir(logPath)}}},
 	}
 	var output bytes.Buffer
 	summary, err := Run(

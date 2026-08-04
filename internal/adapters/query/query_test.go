@@ -20,6 +20,12 @@ import (
 	"github.com/siro33950/knowbrew/internal/domain"
 )
 
+type rawReaderFunc func(string) ([]domain.DialogueMessage, error)
+
+func (reader rawReaderFunc) Read(feedstockID string) ([]domain.DialogueMessage, error) {
+	return reader(feedstockID)
+}
+
 func TestTargetedSearchVisibilityAndShow(t *testing.T) {
 	dataStore := newStore(t)
 	now := time.Date(2026, 7, 30, 1, 0, 0, 0, time.UTC)
@@ -286,25 +292,14 @@ func TestKnowledgeAndFeedstockTypeFilters(t *testing.T) {
 
 func TestShowRawPaginatesCompleteDialogueAsJSONStringValues(t *testing.T) {
 	dataStore := newStore(t)
-	logPath := filepath.Join(t.TempDir(), "session.jsonl")
 	userText := strings.Repeat("あ", 5000)
 	assistantText := strings.Repeat("response", 1800)
-	content := fmt.Sprintf(
-		"{\"type\":\"user\",\"uuid\":\"turn-raw\",\"sessionId\":\"session\",\"timestamp\":\"2026-07-30T01:00:00Z\",\"message\":{\"role\":\"user\",\"content\":%q}}\n"+
-			"{\"type\":\"assistant\",\"sessionId\":\"session\",\"timestamp\":\"2026-07-30T01:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":%q}]}}\n",
-		userText,
-		assistantText,
-	)
-	if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion,
 		ID:     "fs-raw-dialogue",
 		TurnID: "turn-raw",
 		Session: domain.SessionRef{
-			ID:   "session",
-			Path: logPath,
+			ID: "session",
 		},
 		Timestamp: time.Now().UTC(),
 		Agent:     "claude",
@@ -312,8 +307,14 @@ func TestShowRawPaginatesCompleteDialogueAsJSONStringValues(t *testing.T) {
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
 	}
+	reader := rawReaderFunc(func(string) ([]domain.DialogueMessage, error) {
+		return []domain.DialogueMessage{
+			{Role: "user", Content: userText},
+			{Role: "assistant", Content: assistantText},
+		}, nil
+	})
 
-	dialogue, err := ExtractRawDialogue(dataStore, feedstock.ID)
+	dialogue, err := ExtractRawDialogue(dataStore, reader, feedstock.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +324,7 @@ func TestShowRawPaginatesCompleteDialogueAsJSONStringValues(t *testing.T) {
 		t.Fatalf("extracted raw dialogue = %#v", dialogue)
 	}
 
-	first, err := ShowRaw(dataStore, feedstock.ID, 1)
+	first, err := ShowRaw(dataStore, reader, feedstock.ID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +334,7 @@ func TestShowRawPaginatesCompleteDialogueAsJSONStringValues(t *testing.T) {
 	}
 	var gotUser, gotAssistant strings.Builder
 	for page := 1; page <= first.TotalPages; page++ {
-		response, err := ShowRaw(dataStore, feedstock.ID, page)
+		response, err := ShowRaw(dataStore, reader, feedstock.ID, page)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -368,7 +369,7 @@ func TestShowRawPaginatesCompleteDialogueAsJSONStringValues(t *testing.T) {
 			len(assistantText),
 		)
 	}
-	if _, err := ShowRaw(dataStore, feedstock.ID, first.TotalPages+1); err == nil ||
+	if _, err := ShowRaw(dataStore, reader, feedstock.ID, first.TotalPages+1); err == nil ||
 		!strings.Contains(err.Error(), "exceeds total pages") {
 		t.Fatalf("out-of-range page error = %v", err)
 	}
@@ -377,20 +378,20 @@ func TestShowRawPaginatesCompleteDialogueAsJSONStringValues(t *testing.T) {
 func TestShowRawReportsMissingSourceLog(t *testing.T) {
 	dataStore := newStore(t)
 	feedstock := domain.Feedstock{
-		Schema: domain.SchemaVersion,
-		ID:     "fs-missing-source",
-		TurnID: "turn-missing",
-		Session: domain.SessionRef{
-			ID:   "session",
-			Path: filepath.Join(t.TempDir(), "missing.jsonl"),
-		},
+		Schema:    domain.SchemaVersion,
+		ID:        "fs-missing-source",
+		TurnID:    "turn-missing",
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(),
 		Agent:     "claude",
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
 	}
-	_, err := ShowRaw(dataStore, feedstock.ID, 1)
+	reader := rawReaderFunc(func(string) ([]domain.DialogueMessage, error) {
+		return nil, fmt.Errorf("source log was not found")
+	})
+	_, err := ShowRaw(dataStore, reader, feedstock.ID, 1)
 	if err == nil || !strings.Contains(err.Error(), "source log") ||
 		!strings.Contains(err.Error(), "was not found") {
 		t.Fatalf("error = %v", err)
@@ -497,7 +498,7 @@ func TestIncrementalFeedstockSyncUpdatesClassificationFields(t *testing.T) {
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "claude-session-t000001",
 		TurnID:    "turn-1",
-		Session:   domain.SessionRef{ID: "session", Path: "/logs/session.jsonl"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "claude", Subjects: []string{"subject"},
 		Summary: "classification-summary-keyword",
 	}
@@ -919,13 +920,10 @@ func BenchmarkIncrementalSearch3000Feedstocks(b *testing.B) {
 	base := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
 	for index := 1; index <= 3000; index++ {
 		feedstock := domain.Feedstock{
-			Schema: domain.SchemaVersion,
-			ID:     fmt.Sprintf("claude-benchmark-t%06d", index),
-			TurnID: fmt.Sprintf("turn-%06d", index),
-			Session: domain.SessionRef{
-				ID:   "benchmark",
-				Path: "/logs/benchmark.jsonl",
-			},
+			Schema:      domain.SchemaVersion,
+			ID:          fmt.Sprintf("claude-benchmark-t%06d", index),
+			TurnID:      fmt.Sprintf("turn-%06d", index),
+			Session:     domain.SessionRef{ID: "benchmark"},
 			Timestamp:   base.Add(time.Duration(index) * time.Second),
 			Agent:       "claude",
 			Subjects:    []string{"knowbrew"},
@@ -987,13 +985,10 @@ func writeFeedstock(
 ) domain.Feedstock {
 	t.Helper()
 	feedstock := domain.Feedstock{
-		Schema: domain.SchemaVersion,
-		ID:     id,
-		TurnID: "turn-" + id,
-		Session: domain.SessionRef{
-			ID:   "session",
-			Path: "/logs/session.jsonl",
-		},
+		Schema:    domain.SchemaVersion,
+		ID:        id,
+		TurnID:    "turn-" + id,
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: timestamp,
 		Agent:     "claude",
 		Types:     []domain.KnowledgeType{domain.KnowledgeType("property")},

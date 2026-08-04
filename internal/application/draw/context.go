@@ -36,7 +36,7 @@ func LoadSummaryMaterial(
 	if err != nil {
 		return SummaryMaterial{}, nil, err
 	}
-	candidates, warnings, err := sources.ParseSession(feedstock.Agent, feedstock.Session.Path)
+	candidates, warnings, err := sources.ParseSession(feedstock.Agent, feedstock.Session.ID)
 	if err != nil {
 		return SummaryMaterial{}, warnings, err
 	}
@@ -54,7 +54,7 @@ func LoadAnnotationContext(
 	if err != nil {
 		return AnnotationContext{}, nil, err
 	}
-	candidates, warnings, err := sources.ParseSession(feedstock.Agent, feedstock.Session.Path)
+	candidates, warnings, err := sources.ParseSession(feedstock.Agent, feedstock.Session.ID)
 	if err != nil {
 		return AnnotationContext{}, warnings, err
 	}

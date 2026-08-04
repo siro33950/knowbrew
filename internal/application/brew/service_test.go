@@ -12,8 +12,10 @@ import (
 	"github.com/siro33950/knowbrew/internal/adapters/persistence/markdownstore"
 	progressui "github.com/siro33950/knowbrew/internal/adapters/progress"
 	"github.com/siro33950/knowbrew/internal/adapters/runlock"
+	sourceadapter "github.com/siro33950/knowbrew/internal/adapters/source"
 	"github.com/siro33950/knowbrew/internal/application/agent"
 	"github.com/siro33950/knowbrew/internal/application/diagnostic"
+	applicationsource "github.com/siro33950/knowbrew/internal/application/source"
 	"github.com/siro33950/knowbrew/internal/domain"
 )
 
@@ -63,7 +65,7 @@ func assertionPromptForTest(
 		return "", nil, err
 	}
 	return assertionPrompt(
-		repository, dialogueadapter.Query{Store: dataStore},
+		repository, dialogueadapter.Query{Store: dataStore, Source: sourceGatewayForTest(cfg)},
 		Settings{ContextTurns: cfg.Draw.ContextTurns, Backend: cfg.LLM.Backend, Model: cfg.LLM.BrewModel},
 		feedstocks, feedstock, assertion, writingInstructions,
 	)
@@ -99,9 +101,11 @@ func runWithOptionsForTest(
 		},
 		Repository: repositoryForTest(dataStore),
 		Lifecycle:  repositoryForTest(dataStore),
-		Dialogue:   dialogueadapter.Query{Store: dataStore},
-		Runner:     runner,
-		Progress:   progressui.From(progress),
+		Dialogue: dialogueadapter.Query{
+			Store: dataStore, Source: sourceGatewayForTest(cfg),
+		},
+		Runner:   runner,
+		Progress: progressui.From(progress),
 		RunLock: runlock.FileLock{
 			Path: filepath.Join(cfg.Root, ".knowbrew", "state", "brew.lock"),
 			Name: "brew",
@@ -111,6 +115,16 @@ func runWithOptionsForTest(
 		service.SearchIndex = indexes[0]
 	}
 	return service.RunWithOptions(ctx, options)
+}
+
+func sourceGatewayForTest(cfg config.Config) sourceadapter.Gateway {
+	configured := make([]applicationsource.Configured, 0, len(cfg.Sources))
+	for _, source := range cfg.Sources {
+		configured = append(configured, applicationsource.Configured{
+			Agent: source.Agent, Parser: source.Parser, Paths: source.Paths,
+		})
+	}
+	return sourceadapter.New(configured)
 }
 
 type recordingSearchIndex struct {

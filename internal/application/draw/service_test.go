@@ -21,7 +21,8 @@ import (
 const DefaultLookback = 24 * time.Hour
 
 func collectFiles(cfg config.Config, options Options, now time.Time) ([]SourceFile, error) {
-	return (sourceadapter.Gateway{}).Collect(settingsFromConfig(cfg).Sources, options, now)
+	settings := settingsFromConfig(cfg)
+	return sourceadapter.New(settings.Sources).Collect(settings.Sources, options, now)
 }
 
 func ensureRepositorySubjectForTest(
@@ -35,13 +36,14 @@ func ensureRepositorySubjectForTest(
 }
 
 func summaryPromptForTest(
-	_ config.Config,
+	cfg config.Config,
 	dataStore *store.Store,
 	feedstockID string,
 	snapshots ...map[string][]domain.FeedstockCandidate,
 ) (string, []diagnostic.Warning, error) {
+	settings := promptSettingsForTest(cfg, dataStore.Root)
 	return summaryPrompt(
-		sourceadapter.Gateway{}, &persistenceadapter.Markdown{Store: dataStore},
+		sourceadapter.New(settings.Sources), &persistenceadapter.Markdown{Store: dataStore},
 		feedstockID, snapshots...,
 	)
 }
@@ -54,12 +56,13 @@ func annotationPromptForTest(
 	snapshots ...map[string][]domain.FeedstockCandidate,
 ) (string, []diagnostic.Warning, error) {
 	repository := &persistenceadapter.Markdown{Store: dataStore}
+	settings := promptSettingsForTest(cfg, dataStore.Root)
 	writingInstructions, err := loadWritingInstructions(repository, "common", "knowledge")
 	if err != nil {
 		return "", nil, err
 	}
 	return annotationPrompt(
-		settingsFromConfig(cfg), sourceadapter.Gateway{},
+		settings, sourceadapter.New(settings.Sources),
 		repository,
 		feedstockID, feedstocks, writingInstructions, snapshots...,
 	)
@@ -110,10 +113,11 @@ func RunWithOptions(
 	if err != nil {
 		return Summary{}, err
 	}
+	settings := settingsFromConfig(cfg)
 	service := Service{
-		Settings:   settingsFromConfig(cfg),
+		Settings:   settings,
 		Repository: &persistenceadapter.Markdown{Store: dataStore},
-		Sources:    sourceadapter.Gateway{},
+		Sources:    sourceadapter.New(settings.Sources),
 		Runner:     runner, Progress: progressui.From(progress),
 		RunLock: runlock.FileLock{
 			Path: filepath.Join(cfg.Root, ".knowbrew", "state", "draw.lock"),
@@ -124,6 +128,16 @@ func RunWithOptions(
 		service.SearchIndex = indexes[0]
 	}
 	return service.RunWithOptions(ctx, options)
+}
+
+func promptSettingsForTest(cfg config.Config, root string) Settings {
+	settings := settingsFromConfig(cfg)
+	if len(settings.Sources) == 0 {
+		settings.Sources = []ConfiguredSource{{
+			Agent: "claude", Parser: "claude", Paths: []string{root},
+		}}
+	}
+	return settings
 }
 
 type recordingSearchIndex struct {
@@ -140,7 +154,7 @@ func settingsFromConfig(cfg config.Config) Settings {
 	sources := make([]ConfiguredSource, 0, len(cfg.Sources))
 	for _, source := range cfg.Sources {
 		sources = append(sources, ConfiguredSource{
-			Agent: source.Agent, Parser: source.Parser, Path: source.Path,
+			Agent: source.Agent, Parser: source.Parser, Paths: source.Paths,
 		})
 	}
 	return Settings{

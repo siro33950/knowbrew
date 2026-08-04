@@ -113,6 +113,39 @@ func TestParsers(t *testing.T) {
 	}
 }
 
+func TestParsersReadSessionIDFromLogMetadata(t *testing.T) {
+	tests := []struct {
+		name    string
+		parser  Parser
+		content string
+		want    string
+	}{
+		{
+			name: "Claude", parser: Claude{}, want: "claude-session",
+			content: `{"type":"user","sessionId":"claude-session","timestamp":"2026-07-30T01:00:00Z","message":{"role":"user","content":"hello"}}` + "\n",
+		},
+		{
+			name: "Codex", parser: Codex{}, want: "codex-session",
+			content: `{"timestamp":"2026-07-30T01:00:00Z","type":"session_meta","payload":{"id":"codex-session"}}` + "\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "unrelated-file-name.jsonl")
+			if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := test.parser.SessionID(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("session ID = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestClaudeUsesUUIDAndSkipsSyntheticUserRecords(t *testing.T) {
 	const humanRecord = `{"type":"user","uuid":"human-turn-id","sessionId":"session-id","timestamp":"2026-07-30T01:02:03Z","message":{"role":"user","content":"actual human request"}}`
 	tests := []struct {

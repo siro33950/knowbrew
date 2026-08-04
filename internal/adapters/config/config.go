@@ -57,9 +57,10 @@ type Embedding struct {
 }
 
 type Source struct {
-	Agent  string `toml:"agent"`
-	Path   string `toml:"path"`
-	Parser string `toml:"parser"`
+	Agent      string   `toml:"agent"`
+	Paths      []string `toml:"paths,omitempty"`
+	Parser     string   `toml:"parser"`
+	LegacyPath string   `toml:"path,omitempty"`
 }
 
 type Config struct {
@@ -249,11 +250,34 @@ func (cfg *Config) Normalize() error {
 	default:
 		return fmt.Errorf("unsupported embedding model %q", cfg.Embedding.Model)
 	}
+	normalizedSources := make([]Source, 0, len(cfg.Sources))
+	sourceIndexes := make(map[string]int, len(cfg.Sources))
 	for index := range cfg.Sources {
 		source := &cfg.Sources[index]
-		source.Path, err = expandPath(source.Path)
-		if err != nil {
-			return fmt.Errorf("resolve source %d: %w", index+1, err)
+		paths := append([]string(nil), source.Paths...)
+		if strings.TrimSpace(source.LegacyPath) != "" {
+			paths = append([]string{source.LegacyPath}, paths...)
+		}
+		source.LegacyPath = ""
+		source.Paths = source.Paths[:0]
+		seenPaths := make(map[string]struct{}, len(paths))
+		for _, value := range paths {
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			path, pathErr := expandPath(value)
+			if pathErr != nil {
+				return fmt.Errorf("resolve source %d: %w", index+1, pathErr)
+			}
+			path = filepath.Clean(path)
+			if _, exists := seenPaths[path]; exists {
+				continue
+			}
+			seenPaths[path] = struct{}{}
+			source.Paths = append(source.Paths, path)
+		}
+		if len(source.Paths) == 0 {
+			return fmt.Errorf("source %d requires at least one path", index+1)
 		}
 		if source.Agent != "claude" && source.Agent != "codex" {
 			return fmt.Errorf("source %d has unsupported agent %q", index+1, source.Agent)
@@ -261,7 +285,26 @@ func (cfg *Config) Normalize() error {
 		if source.Parser == "" {
 			source.Parser = source.Agent
 		}
+		key := source.Agent + "\x00" + source.Parser
+		if existingIndex, exists := sourceIndexes[key]; exists {
+			existing := &normalizedSources[existingIndex]
+			seen := make(map[string]struct{}, len(existing.Paths)+len(source.Paths))
+			for _, path := range existing.Paths {
+				seen[path] = struct{}{}
+			}
+			for _, path := range source.Paths {
+				if _, exists := seen[path]; exists {
+					continue
+				}
+				seen[path] = struct{}{}
+				existing.Paths = append(existing.Paths, path)
+			}
+			continue
+		}
+		sourceIndexes[key] = len(normalizedSources)
+		normalizedSources = append(normalizedSources, *source)
 	}
+	cfg.Sources = normalizedSources
 	return nil
 }
 

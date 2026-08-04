@@ -43,7 +43,9 @@ session logs ──draw──▶ feedstock ──brew──▶ knowledge ──a
 
 **`draw`** reads your session logs and records one *feedstock* per turn: a short
 summary plus the atomic claims that turn established. The raw dialogue stays in
-the source log; a feedstock only points back to it.
+the source log. A feedstock stores the agent and session ID, while knowbrew
+resolves the log's current location from the configured source paths when raw
+dialogue is needed.
 
 **`brew`** reads that evidence and writes *knowledge*: claims that stay useful
 beyond the turn they came from. Each record has one type and one subject, and
@@ -245,9 +247,22 @@ model = "ruri-v3-130m-int8-onnx" # or snowflake..., qwen3..., disabled, custom
 
 [[sources]]
 agent = "claude"
-path = "/Users/example/.claude/projects"
 parser = "claude"
+paths = ["/Users/example/.claude/projects"]
+
+[[sources]]
+agent = "codex"
+parser = "codex"
+paths = [
+  "/Users/example/.codex/sessions",
+  "/Users/example/.codex/archived_sessions",
+]
 ```
+
+Each source is one logical collection and can span multiple directories.
+`init` configures both the active and archived Codex session directories.
+Feedstocks do not store these physical paths, so moving a session between the
+configured directories does not break `show --raw`, Draw resume, or Brew.
 
 Empty model values use the CLI backend's own default. `api` and `ollama` require
 all three models and read credentials from the environment:
@@ -314,8 +329,8 @@ Shared search flags: `--subject`, `--type`, `--since`, `--until`, `--limit`,
 `--agent`, and `--last N`.
 
 `draw` flags: `--max N`, `--since`, `--until`, `--source claude|codex`,
-`--verbose`. An explicit file or directory path is never time-limited unless you
-also pass `--since` or `--until`.
+`--verbose`. Explicit files and directories must be inside a configured source
+path. They are never time-limited unless you also pass `--since` or `--until`.
 
 `brew` flags: `--max N`, `--verbose`.
 

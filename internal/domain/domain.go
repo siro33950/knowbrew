@@ -23,8 +23,7 @@ const (
 )
 
 type SessionRef struct {
-	ID   string `yaml:"id" json:"id"`
-	Path string `yaml:"path" json:"path"`
+	ID string `yaml:"id" json:"id"`
 }
 
 type DialogueMessage struct {
@@ -188,8 +187,8 @@ func ValidateFeedstock(feedstock Feedstock) error {
 	if err := ValidateIdentifier(feedstock.TurnID, "source turn ID"); err != nil {
 		return err
 	}
-	if feedstock.Session.ID == "" || feedstock.Session.Path == "" {
-		return errors.New("feedstock session ID and path are required")
+	if feedstock.Session.ID == "" {
+		return errors.New("feedstock session ID is required")
 	}
 	if feedstock.Timestamp.IsZero() {
 		return errors.New("feedstock timestamp is required")

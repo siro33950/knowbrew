@@ -14,6 +14,7 @@ import (
 type Parser interface {
 	Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warning, error)
 	ExtractTurn(path, turnID string) ([]domain.DialogueMessage, error)
+	SessionID(path string) (string, error)
 }
 
 func For(name string) (Parser, error) {

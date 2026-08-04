@@ -29,6 +29,13 @@ func TestRealLLMEndToEndWhenConfigured(t *testing.T) {
 	if backend == "" {
 		backend = "claude-cli"
 	}
+	agent := os.Getenv("KNOWBREW_E2E_AGENT")
+	if agent == "" {
+		agent = "claude"
+	}
+	configuredSources := []draw.ConfiguredSource{{
+		Agent: agent, Parser: agent, Paths: []string{filepath.Dir(logPath)},
+	}}
 	root := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), ".config"))
 	cfg := config.Config{
@@ -37,6 +44,9 @@ func TestRealLLMEndToEndWhenConfigured(t *testing.T) {
 			BrewModel: os.Getenv("KNOWBREW_E2E_MODEL"),
 		},
 		Draw: config.Draw{Concurrency: config.DefaultDrawConcurrency},
+		Sources: []config.Source{{
+			Agent: agent, Parser: agent, Paths: []string{filepath.Dir(logPath)},
+		}},
 	}
 	path, err := config.Save(root, cfg)
 	if err != nil {
@@ -58,10 +68,10 @@ func TestRealLLMEndToEndWhenConfigured(t *testing.T) {
 		Settings: draw.Settings{
 			Concurrency: cfg.Draw.Concurrency, ContextTurns: cfg.Draw.ContextTurns,
 			MaxContextTurns: cfg.Draw.MaxContextTurns, Backend: cfg.LLM.Backend,
-			Model: cfg.LLM.DrawModel, ConfigPath: cfg.Path,
+			Model: cfg.LLM.DrawModel, ConfigPath: cfg.Path, Sources: configuredSources,
 		},
 		Repository: &persistenceadapter.Markdown{Store: dataStore},
-		Sources:    sourceadapter.Gateway{}, Runner: runner,
+		Sources:    sourceadapter.New(configuredSources), Runner: runner,
 		Progress: progress.From(os.Stderr),
 		RunLock: runlock.FileLock{
 			Path: filepath.Join(root, ".knowbrew", "state", "draw.lock"), Name: "draw",
@@ -85,9 +95,11 @@ func TestRealLLMEndToEndWhenConfigured(t *testing.T) {
 		},
 		Repository: &persistenceadapter.Markdown{Store: dataStore},
 		Lifecycle:  &persistenceadapter.Markdown{Store: dataStore},
-		Dialogue:   dialogueadapter.Query{Store: dataStore},
-		Runner:     runner,
-		Progress:   progress.From(os.Stderr),
+		Dialogue: dialogueadapter.Query{
+			Store: dataStore, Source: sourceadapter.New(configuredSources),
+		},
+		Runner:   runner,
+		Progress: progress.From(os.Stderr),
 		RunLock: runlock.FileLock{
 			Path: filepath.Join(root, ".knowbrew", "state", "brew.lock"), Name: "brew",
 		},

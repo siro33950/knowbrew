@@ -42,7 +42,8 @@ knowbrew init
 
 **`draw`** はセッションログを読み、1ターンにつき1件の *feedstock* を記録します。
 短い要約と、そのターンで確定した個々の主張が入ります。生の対話はソースログに
-置いたままで、feedstock はそこを指すだけです。
+置いたままです。feedstockにはエージェントとセッションIDだけを保存し、原文が必要な
+ときは設定済みソースから現在の配置場所を解決します。
 
 **`brew`** はその証拠を読み、*knowledge* を書きます。元のターンを越えて有用な
 主張です。1件につき型（type）と対象（subject）が1つずつ付き、以降の変化に応じて
@@ -233,9 +234,22 @@ model = "ruri-v3-130m-int8-onnx" # または snowflake..., qwen3..., disabled, c
 
 [[sources]]
 agent = "claude"
-path = "/Users/example/.claude/projects"
 parser = "claude"
+paths = ["/Users/example/.claude/projects"]
+
+[[sources]]
+agent = "codex"
+parser = "codex"
+paths = [
+  "/Users/example/.codex/sessions",
+  "/Users/example/.codex/archived_sessions",
+]
 ```
+
+1つのsourceは複数ディレクトリにまたがる論理的な集合です。`init`はCodexの通常
+セッションとアーカイブ済みセッションの両方を設定します。feedstockは物理パスを
+保存しないため、設定済みディレクトリ間でセッションが移動しても`show --raw`、
+Drawの再開、Brewは壊れません。
 
 モデル名が空ならCLIバックエンド自身の既定を使います。`api` と `ollama` は3つすべての
 モデル指定が必須で、認証情報は環境変数から読みます。
@@ -301,8 +315,8 @@ knowbrew index sync|rebuild|status 派生検索索引の保守
 `--agent`・`--last N`。
 
 `draw` のフラグ: `--max N`・`--since`・`--until`・`--source claude|codex`・
-`--verbose`。パスを明示した場合は、`--since` / `--until` を併用しない限り
-時間で絞り込まれません。
+`--verbose`。明示するファイルまたはディレクトリは、設定済みsourceの配下である
+必要があります。`--since` / `--until` を併用しない限り時間では絞り込まれません。
 
 `brew` のフラグ: `--max N`・`--verbose`。
 

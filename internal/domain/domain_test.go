@@ -151,7 +151,7 @@ func validFeedstockForValidation() Feedstock {
 		Schema:    SchemaVersion,
 		ID:        "fs-validation",
 		TurnID:    "turn-validation",
-		Session:   SessionRef{ID: "session-validation", Path: "/logs/session.jsonl"},
+		Session:   SessionRef{ID: "session-validation"},
 		Timestamp: time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC),
 		Agent:     "claude",
 	}

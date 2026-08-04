@@ -22,7 +22,7 @@ func TestSaveAndLoadUsesRootLocalConfigAndGlobalLocator(t *testing.T) {
 			DistillEffort: "high",
 		},
 		Draw:    Draw{ContextTurns: DefaultDrawContextTurns},
-		Sources: []Source{{Agent: "claude", Parser: "claude", Path: "~/logs"}},
+		Sources: []Source{{Agent: "claude", Parser: "claude", Paths: []string{"~/logs"}}},
 	}
 	path, err := Save(root, cfg)
 	if err != nil {
@@ -40,8 +40,8 @@ func TestSaveAndLoadUsesRootLocalConfigAndGlobalLocator(t *testing.T) {
 	if loaded.Root != absoluteRoot {
 		t.Fatalf("root = %q, want %q", loaded.Root, absoluteRoot)
 	}
-	if loaded.Sources[0].Path != filepath.Join(home, "logs") {
-		t.Fatalf("expanded source = %q", loaded.Sources[0].Path)
+	if len(loaded.Sources[0].Paths) != 1 || loaded.Sources[0].Paths[0] != filepath.Join(home, "logs") {
+		t.Fatalf("expanded source paths = %#v", loaded.Sources[0].Paths)
 	}
 	if loaded.LLM.DrawModel != "fast-model" || loaded.LLM.BrewModel != "quality-model" ||
 		loaded.LLM.DistillModel != "document-model" {
@@ -82,6 +82,36 @@ func TestEnvironmentOverridesLocator(t *testing.T) {
 	}
 	if loaded.Path != path {
 		t.Fatalf("path = %q, want %q", loaded.Path, path)
+	}
+}
+
+func TestLoadMigratesLegacySourcePathToPaths(t *testing.T) {
+	root := t.TempDir()
+	path := DefaultConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(root, "legacy-sessions")
+	contents := fmt.Sprintf(`root = ".."
+
+[llm]
+backend = "codex-cli"
+
+[[sources]]
+agent = "codex"
+parser = "codex"
+path = %q
+`, legacyPath)
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Sources) != 1 || len(loaded.Sources[0].Paths) != 1 ||
+		loaded.Sources[0].Paths[0] != legacyPath || loaded.Sources[0].LegacyPath != "" {
+		t.Fatalf("migrated sources = %#v", loaded.Sources)
 	}
 }
 

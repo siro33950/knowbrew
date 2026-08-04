@@ -66,6 +66,41 @@ type knowledgeFrontmatter struct {
 	Status        domain.Status        `yaml:"status,omitempty"`
 }
 
+type readableFeedstockFrontmatter struct {
+	Schema           int                    `yaml:"schema"`
+	ID               string                 `yaml:"id"`
+	TurnID           string                 `yaml:"turn_id"`
+	Session          readableSessionRef     `yaml:"session"`
+	Timestamp        time.Time              `yaml:"timestamp"`
+	Agent            string                 `yaml:"agent"`
+	CWD              string                 `yaml:"cwd,omitempty"`
+	Repo             string                 `yaml:"repo,omitempty"`
+	Branch           string                 `yaml:"branch,omitempty"`
+	Types            []domain.KnowledgeType `yaml:"types"`
+	Subjects         []string               `yaml:"subjects"`
+	Summary          string                 `yaml:"summary"`
+	AnnotatedAt      *time.Time             `yaml:"annotated_at,omitempty"`
+	BrewedAt         *time.Time             `yaml:"brewed_at,omitempty"`
+	BrewedAssertions []string               `yaml:"brewed_assertions,omitempty"`
+}
+
+type readableSessionRef struct {
+	ID         string `yaml:"id"`
+	LegacyPath string `yaml:"path,omitempty"`
+}
+
+func (header readableFeedstockFrontmatter) domainFeedstock() domain.Feedstock {
+	return domain.Feedstock{
+		Schema: header.Schema, ID: header.ID, TurnID: header.TurnID,
+		Session:   domain.SessionRef{ID: header.Session.ID},
+		Timestamp: header.Timestamp, Agent: header.Agent, CWD: header.CWD,
+		Repo: header.Repo, Branch: header.Branch, Types: header.Types,
+		Subjects: header.Subjects, Summary: header.Summary,
+		AnnotatedAt: header.AnnotatedAt, BrewedAt: header.BrewedAt,
+		BrewedAssertions: header.BrewedAssertions,
+	}
+}
+
 type writableKnowledgeFrontmatter struct {
 	ID            string               `yaml:"id"`
 	Created       time.Time            `yaml:"created"`
@@ -205,11 +240,12 @@ func (s *Store) ReadFeedstock(path string) (domain.Feedstock, error) {
 	if err != nil {
 		return domain.Feedstock{}, err
 	}
-	var feedstock domain.Feedstock
-	body, err := frontmatter.Decode(data, &feedstock)
+	var header readableFeedstockFrontmatter
+	body, err := frontmatter.Decode(data, &header)
 	if err != nil {
 		return domain.Feedstock{}, fmt.Errorf("read feedstock %s: %w", path, err)
 	}
+	feedstock := header.domainFeedstock()
 	feedstock.Assertions, err = decodeAssertions(body)
 	if err != nil {
 		return domain.Feedstock{}, fmt.Errorf("read feedstock %s: %w", path, err)

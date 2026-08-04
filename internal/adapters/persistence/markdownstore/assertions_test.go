@@ -30,7 +30,7 @@ func TestFeedstockAssertionsRoundTripAsGeneratedMarkdown(t *testing.T) {
 	}
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "fs-assertions", TurnID: "turn-assertions",
-		Session:   domain.SessionRef{ID: "session", Path: "/logs/session.jsonl"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Date(2026, 8, 1, 11, 0, 0, 0, time.UTC), Agent: "codex",
 		Summary: "The turn established two assertions.", AnnotatedAt: &annotatedAt,
 		Assertions: assertions,

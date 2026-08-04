@@ -466,12 +466,12 @@ func TestAssertionPromptIncludesSourceContextAndSemanticSubjectWithoutAliases(t 
 		t.Fatal(err)
 	}
 	source := filepath.Join(dataStore.Root, "session.jsonl")
-	writeClaudeDialogue(t, source, "turn-prompt", "Use model-specific defaults.", "Verified model behavior.")
+	writeClaudeDialogue(t, source, "session", "turn-prompt", "Use model-specific defaults.", "Verified model behavior.")
 	when := time.Now().UTC()
 	annotated := when
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "fs-prompt", TurnID: "turn-prompt",
-		Session: domain.SessionRef{ID: "session", Path: source}, Timestamp: when,
+		Session: domain.SessionRef{ID: "session"}, Timestamp: when,
 		Agent: "claude", Summary: "summary", AnnotatedAt: &annotated,
 		Types:      []domain.KnowledgeType{"property"},
 		Assertions: []domain.Assertion{testAssertion("as-prompt", "agent-model", "Model defaults differ.")},
@@ -555,6 +555,9 @@ func testConfig(root string) config.Config {
 		Root: root,
 		Draw: config.Draw{Concurrency: 1, ContextTurns: 3},
 		LLM:  config.LLM{Backend: "codex-cli", BrewModel: "brew-model"},
+		Sources: []config.Source{{
+			Agent: "claude", Parser: "claude", Paths: []string{root},
+		}},
 	}
 }
 
@@ -584,11 +587,14 @@ func writeAssertionFeedstock(
 	}
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: id, TurnID: "turn-" + id,
-		Session:   domain.SessionRef{ID: "session", Path: filepath.Join(dataStore.Root, id+".jsonl")},
+		Session:   domain.SessionRef{ID: id},
 		Timestamp: when, Agent: "claude", Types: types, Summary: "summary",
 		AnnotatedAt: &annotated, Assertions: assertions,
 	}
-	writeClaudeDialogue(t, feedstock.Session.Path, feedstock.TurnID, "user source", "assistant source")
+	writeClaudeDialogue(
+		t, filepath.Join(dataStore.Root, id+".jsonl"), id,
+		feedstock.TurnID, "user source", "assistant source",
+	)
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
 	}
@@ -633,15 +639,15 @@ func setInvocation(t *testing.T, dataStore *store.Store, feedstockID, assertionI
 	invocation.Cleanup(dataStore.Root, invocationID)
 }
 
-func writeClaudeDialogue(t *testing.T, path, turnID, user, assistant string) {
+func writeClaudeDialogue(t *testing.T, path, sessionID, turnID, user, assistant string) {
 	t.Helper()
 	lines := []map[string]any{
 		{
-			"type": "user", "uuid": turnID, "sessionId": "session", "timestamp": time.Now().UTC(),
+			"type": "user", "uuid": turnID, "sessionId": sessionID, "timestamp": time.Now().UTC(),
 			"message": map[string]any{"role": "user", "content": user},
 		},
 		{
-			"type": "assistant", "sessionId": "session", "timestamp": time.Now().UTC(),
+			"type": "assistant", "sessionId": sessionID, "timestamp": time.Now().UTC(),
 			"message": map[string]any{"role": "assistant", "content": []map[string]any{{"type": "text", "text": assistant}}},
 		},
 	}

@@ -223,7 +223,7 @@ func TestSearchFlagsAndHookOutputUsePlainMasterNames(t *testing.T) {
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "claude-session-t000001",
 		TurnID:    "turn-1",
-		Session:   domain.SessionRef{ID: "session", Path: "/logs/session.jsonl"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: annotatedAt, Agent: "claude",
 		Types:    []domain.KnowledgeType{domain.KnowledgeType("property")},
 		Subjects: []string{"subject"},
@@ -332,7 +332,7 @@ func TestFeedstockAnnotateAssertionFlagsDeriveMultipleTypes(t *testing.T) {
 	}
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "fs-type-flags", TurnID: "turn-type-flags",
-		Session:   domain.SessionRef{ID: "session", Path: "/log"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "claude",
 		Subjects: []string{"subject"}, Summary: "The user supplied an established property and relation.",
 	}
@@ -403,7 +403,7 @@ func TestFeedstockSummarizeAndAnnotateAreSeparateCommands(t *testing.T) {
 	dataStore, _ := store.New(rootDir)
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "fs-cli-phases", TurnID: "turn-cli-phases",
-		Session:   domain.SessionRef{ID: "session", Path: "/log"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "claude",
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
@@ -436,13 +436,14 @@ func TestFeedstockSummarizeAndAnnotateAreSeparateCommands(t *testing.T) {
 func TestFeedstockContextReadsBoundedTurnsFromSource(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n\n[draw]\nconcurrency = 1\ncontext_turns = 0\nmax_context_turns = 1\n"
+	sourceDir := t.TempDir()
+	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n\n[draw]\nconcurrency = 1\ncontext_turns = 0\nmax_context_turns = 1\n\n[[sources]]\nagent = \"claude\"\nparser = \"claude\"\npaths = [" + quoteTOML(sourceDir) + "]\n"
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(config.ConfigEnvironment, configPath)
 	sessionID := "source-context-session"
-	logPath := filepath.Join(t.TempDir(), "session.jsonl")
+	logPath := filepath.Join(sourceDir, "session.jsonl")
 	log := `{"type":"user","uuid":"turn-1","sessionId":"source-context-session","timestamp":"2026-07-30T01:00:00Z","message":{"role":"user","content":"before user"}}
 {"type":"assistant","sessionId":"source-context-session","timestamp":"2026-07-30T01:00:01Z","message":{"role":"assistant","content":"before agent"}}
 {"type":"user","uuid":"turn-2","sessionId":"source-context-session","timestamp":"2026-07-30T01:00:00Z","message":{"role":"user","content":"target user"}}
@@ -459,7 +460,7 @@ func TestFeedstockContextReadsBoundedTurnsFromSource(t *testing.T) {
 	}
 	if err := dataStore.WriteFeedstock(domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: feedstockID, TurnID: "turn-2",
-		Session:   domain.SessionRef{ID: sessionID, Path: logPath},
+		Session:   domain.SessionRef{ID: sessionID},
 		Timestamp: time.Date(2026, 7, 30, 1, 0, 0, 0, time.UTC), Agent: "claude",
 	}); err != nil {
 		t.Fatal(err)
@@ -529,7 +530,7 @@ func TestKnowledgeSubmitRequiresInvocationAndValidatesType(t *testing.T) {
 	}
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "fs-source", TurnID: "turn-source",
-		Session:   domain.SessionRef{ID: "session", Path: "/log"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "claude",
 		Types: []domain.KnowledgeType{"property"}, Summary: "The user supplied a reusable property.",
 		AnnotatedAt: func() *time.Time { value := time.Now().UTC(); return &value }(),
@@ -586,7 +587,7 @@ func TestKnowledgeSubmitCreatesIDBasedPendingKnowledgeWithSubject(t *testing.T) 
 	annotatedAt := time.Now().UTC()
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "fs-subject-flag", TurnID: "turn-subject-flag",
-		Session:   domain.SessionRef{ID: "session", Path: "/log"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: annotatedAt, Agent: "claude",
 		Types:       []domain.KnowledgeType{domain.KnowledgeType("property")},
 		Summary:     "The user supplied a reusable fact.",

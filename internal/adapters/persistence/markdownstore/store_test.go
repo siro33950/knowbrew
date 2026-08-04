@@ -1039,12 +1039,72 @@ func TestFindFeedstockUsesSentinelForMissingFeedstock(t *testing.T) {
 	}
 }
 
+func TestFeedstockIgnoresLegacySessionPathAndDoesNotWriteIt(t *testing.T) {
+	dataStore, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(t.TempDir(), "legacy.md")
+	legacy := `---
+schema: 5
+id: fs-legacy-path
+turn_id: turn-legacy
+session:
+  id: session-legacy
+  path: /old/machine/session.jsonl
+timestamp: 2026-07-30T01:00:00Z
+agent: claude
+types:
+  - property
+subjects:
+  - subject
+summary: A legacy Feedstock remains readable.
+annotated_at: 2026-07-30T01:01:00Z
+---
+
+## Assertions
+
+### as-legacy
+
+- Type: [[property]]
+- Subject: [[subject]]
+
+Legacy physical paths are ignored.
+`
+	if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feedstock, err := dataStore.ReadFeedstock(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if feedstock.Session.ID != "session-legacy" {
+		t.Fatalf("session = %#v", feedstock.Session)
+	}
+
+	fresh := validFeedstock()
+	if err := dataStore.WriteFeedstock(fresh); err != nil {
+		t.Fatal(err)
+	}
+	path, err := dataStore.FeedstockPath(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "path:") {
+		t.Fatalf("new Feedstock persisted a physical source path:\n%s", data)
+	}
+}
+
 func validFeedstock() domain.Feedstock {
 	annotatedAt := time.Date(2026, 7, 30, 1, 1, 0, 0, time.UTC)
 	return domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "claude-session-t000001",
 		TurnID:    "turn-1",
-		Session:   domain.SessionRef{ID: "session", Path: "/logs/session.jsonl"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Date(2026, 7, 30, 1, 0, 0, 0, time.UTC),
 		Agent:     "claude",
 		Types:     []domain.KnowledgeType{"property"},

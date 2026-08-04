@@ -24,7 +24,7 @@ func TestAnnotateUpdatesOnlyClassificationAndDerivesSubjectsFromAssertions(t *te
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "codex-session-t000001",
 		TurnID:    "turn-1",
-		Session:   domain.SessionRef{ID: "session", Path: "/log"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "codex", CWD: "/work/subject",
 		Repo: "https://example.com/subject.git", Branch: "main",
 		Subjects: []string{"subject"}, Summary: "The user requested table-driven tests.",
@@ -99,7 +99,7 @@ func TestAnnotateAllowsNoSubject(t *testing.T) {
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "codex-session-t000001",
 		TurnID:    "turn-1",
-		Session:   domain.SessionRef{ID: "session", Path: "/log"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "codex", Summary: "The user asked a one-off question.",
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
@@ -132,7 +132,7 @@ func TestAnnotateAllowsSameAtomicStatementForDifferentSubjects(t *testing.T) {
 	}
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "fs-multi-subject", TurnID: "turn-multi-subject",
-		Session:   domain.SessionRef{ID: "session", Path: "/log"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "codex", Summary: "Two subjects share one established relation.",
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
@@ -163,7 +163,7 @@ func TestAnnotateRejectsUnknownSubjectWithoutCreatingMaster(t *testing.T) {
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "codex-session-t000001",
 		TurnID:    "turn-1",
-		Session:   domain.SessionRef{ID: "session", Path: "/log"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "codex", Summary: "The user discussed an unknown subject.",
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
@@ -193,7 +193,7 @@ func TestAnnotateRejectsAlreadyAnnotatedFeedstock(t *testing.T) {
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "codex-session-t000001",
 		TurnID:    "turn-1",
-		Session:   domain.SessionRef{ID: "session", Path: "/log"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "codex",
 		Subjects: []string{"subject"}, Summary: "The user requested tests.",
 	}
@@ -215,7 +215,7 @@ func TestAnnotateNormalizesWikilinksBeforeMasterValidation(t *testing.T) {
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "codex-session-t000001",
 		TurnID:    "turn-1",
-		Session:   domain.SessionRef{ID: "session", Path: "/log"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "codex",
 		Subjects: []string{"subject"}, Summary: "The existing vocabulary was used.",
 	}
@@ -252,7 +252,7 @@ func TestAnnotateRejectsUnknownKnowledgeType(t *testing.T) {
 	dataStore, _ := store.New(t.TempDir())
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "codex-session-t000001", TurnID: "turn-1",
-		Session:   domain.SessionRef{ID: "session", Path: "/log"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "codex", Summary: "summary",
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
@@ -284,7 +284,7 @@ func TestSummaryAndAnnotationUseSeparateStateTransitions(t *testing.T) {
 	dataStore, _ := store.New(t.TempDir())
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "fs-separated-phases", TurnID: "turn-separated-phases",
-		Session:   domain.SessionRef{ID: "session", Path: "/log"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "codex", CWD: "/work", Repo: "repo",
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {

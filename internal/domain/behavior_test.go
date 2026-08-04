@@ -213,7 +213,7 @@ func TestReconcileKnowledgeLifecycleFollowsHumanStatusChanges(t *testing.T) {
 func validFeedstock(id string, timestamp time.Time) Feedstock {
 	return Feedstock{
 		Schema: SchemaVersion, ID: id, TurnID: "turn-" + id,
-		Session:   SessionRef{ID: "session-" + id, Path: "/sessions/" + id + ".jsonl"},
+		Session:   SessionRef{ID: "session-" + id},
 		Timestamp: timestamp, Agent: "codex",
 	}
 }

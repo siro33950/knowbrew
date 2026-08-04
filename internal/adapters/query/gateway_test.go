@@ -130,7 +130,7 @@ func TestVectorIndexUsesOnlyKnowledgeClaimAndFeedstockSummary(t *testing.T) {
 	now := time.Now().UTC()
 	hidden := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "a-hidden-feedstock", TurnID: "turn-hidden",
-		Session:   domain.SessionRef{ID: "session", Path: "/logs/session.jsonl"},
+		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: now, Agent: "claude", Summary: "weather forecast",
 		Types: []domain.KnowledgeType{"property"}, Subjects: []string{"subject"},
 		Assertions: []domain.Assertion{{

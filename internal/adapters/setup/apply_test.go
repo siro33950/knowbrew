@@ -187,7 +187,8 @@ func TestApplyReinitPreservesUnaskedSettingsCustomSourcesAndData(t *testing.T) {
 	cfg.Draw.Concurrency = 1
 	cfg.Draw.ContextTurns = 0
 	cfg.Draw.MaxContextTurns = 12
-	custom := config.Source{Agent: "codex", Parser: "codex", Path: filepath.Join(home, "archived-sessions")}
+	customPath := filepath.Join(home, "archived-sessions")
+	custom := config.Source{Agent: "codex", Parser: "codex", Paths: []string{customPath}}
 	cfg.Sources = append(cfg.Sources, custom)
 	if _, err := config.Save(root, cfg); err != nil {
 		t.Fatal(err)
@@ -230,13 +231,10 @@ func TestApplyReinitPreservesUnaskedSettingsCustomSourcesAndData(t *testing.T) {
 	if updated.Draw.Concurrency != 1 || updated.Draw.ContextTurns != 0 || updated.Draw.MaxContextTurns != 12 {
 		t.Fatalf("reinitialized draw settings = %#v", updated.Draw)
 	}
-	if len(updated.Sources) != 2 ||
-		!slices.ContainsFunc(updated.Sources, func(source config.Source) bool {
-			return source.Agent == "codex" && source.Path == filepath.Join(home, ".codex", "sessions")
-		}) ||
-		!slices.ContainsFunc(updated.Sources, func(source config.Source) bool {
-			return source.Path == custom.Path
-		}) {
+	if len(updated.Sources) != 1 || updated.Sources[0].Agent != "codex" ||
+		!slices.Contains(updated.Sources[0].Paths, filepath.Join(home, ".codex", "sessions")) ||
+		!slices.Contains(updated.Sources[0].Paths, filepath.Join(home, ".codex", "archived_sessions")) ||
+		!slices.Contains(updated.Sources[0].Paths, customPath) {
 		t.Fatalf("reinitialized sources = %#v", updated.Sources)
 	}
 	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "keep exactly" {
@@ -297,7 +295,8 @@ path = "` + customPath + `"
 		updated.Draw.MaxContextTurns != config.DefaultDrawMaxContextTurns {
 		t.Fatalf("missing defaults were not filled: llm=%#v draw=%#v", updated.LLM, updated.Draw)
 	}
-	if len(updated.Sources) != 1 || updated.Sources[0].Path != customPath {
+	if len(updated.Sources) != 1 || len(updated.Sources[0].Paths) != 1 ||
+		updated.Sources[0].Paths[0] != customPath {
 		t.Fatalf("custom source was not preserved: %#v", updated.Sources)
 	}
 }

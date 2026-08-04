@@ -121,9 +121,11 @@ func newDrawCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			settings := drawSettings(cfg)
+			sourceGateway := sourceadapter.New(settings.Sources)
 			service := draw.Service{
-				Settings: drawSettings(cfg), Repository: repositoryFor(dataStore),
-				Sources: sourceadapter.Gateway{}, Runner: runner, Progress: display,
+				Settings: settings, Repository: repositoryFor(dataStore),
+				Sources: sourceGateway, Runner: runner, Progress: display,
 				RunLock: runlock.FileLock{
 					Path: filepath.Join(cfg.Root, ".knowbrew", "state", "draw.lock"),
 					Name: "draw",
@@ -147,17 +149,22 @@ func newDrawCommand() *cobra.Command {
 }
 
 func drawSettings(cfg config.Config) draw.Settings {
-	sources := make([]draw.ConfiguredSource, 0, len(cfg.Sources))
-	for _, source := range cfg.Sources {
-		sources = append(sources, draw.ConfiguredSource{
-			Agent: source.Agent, Parser: source.Parser, Path: source.Path,
-		})
-	}
+	sources := configuredSources(cfg)
 	return draw.Settings{
 		Concurrency: cfg.Draw.Concurrency, ContextTurns: cfg.Draw.ContextTurns,
 		MaxContextTurns: cfg.Draw.MaxContextTurns, Backend: cfg.LLM.Backend,
 		Model: cfg.LLM.DrawModel, ConfigPath: cfg.Path, Sources: sources,
 	}
+}
+
+func configuredSources(cfg config.Config) []draw.ConfiguredSource {
+	sources := make([]draw.ConfiguredSource, 0, len(cfg.Sources))
+	for _, source := range cfg.Sources {
+		sources = append(sources, draw.ConfiguredSource{
+			Agent: source.Agent, Parser: source.Parser, Paths: source.Paths,
+		})
+	}
+	return sources
 }
 
 func parseDrawBoundary(value string, now time.Time) (time.Time, error) {
@@ -226,6 +233,7 @@ func newBrewCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			sourceGateway := sourceadapter.New(configuredSources(cfg))
 			service := brew.Service{
 				Settings: brew.Settings{
 					ContextTurns: cfg.Draw.ContextTurns,
@@ -234,9 +242,11 @@ func newBrewCommand() *cobra.Command {
 				},
 				Repository: repository,
 				Lifecycle:  repository,
-				Dialogue:   dialogueadapter.Query{Store: repository.Store},
-				Runner:     runner,
-				Progress:   display,
+				Dialogue: dialogueadapter.Query{
+					Store: repository.Store, Source: sourceGateway,
+				},
+				Runner:   runner,
+				Progress: display,
 				RunLock: runlock.FileLock{
 					Path: filepath.Join(cfg.Root, ".knowbrew", "state", "brew.lock"),
 					Name: "brew",
@@ -344,7 +354,9 @@ func newShowCommand() *cobra.Command {
 				return err
 			}
 			if raw {
-				response, err := query.ShowRaw(dataStore, ids[0], page)
+				sourceGateway := sourceadapter.New(configuredSources(cfg))
+				reader := dialogueadapter.Query{Store: dataStore, Source: sourceGateway}
+				response, err := query.ShowRaw(dataStore, reader, ids[0], page)
 				if err != nil {
 					return err
 				}
@@ -538,7 +550,7 @@ func newFeedstockCommand() *cobra.Command {
 				return err
 			}
 			turnContext, warnings, err := draw.LoadAnnotationContext(
-				sourceadapter.Gateway{},
+				sourceadapter.New(configuredSources(cfg)),
 				repositoryFor(dataStore),
 				args[0],
 				cfg.Draw.MaxContextTurns,

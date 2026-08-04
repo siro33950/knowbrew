@@ -11,7 +11,7 @@ import (
 type Configured struct {
 	Agent  string
 	Parser string
-	Path   string
+	Paths  []string
 }
 
 type File struct {

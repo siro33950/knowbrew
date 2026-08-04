@@ -70,7 +70,7 @@ func RunInteractive() error {
 	slices.Sort(names)
 	for _, name := range names {
 		source := available[name]
-		options = append(options, huh.NewOption(name+" — "+source.Path, name))
+		options = append(options, huh.NewOption(name+" — "+strings.Join(source.Paths, ", "), name))
 		defaults = append(defaults, name)
 	}
 	backend := "claude-cli"
@@ -352,11 +352,23 @@ func detectedSources() map[string]config.Source {
 		return map[string]config.Source{}
 	}
 	candidates := map[string]config.Source{
-		"claude": {Agent: "claude", Parser: "claude", Path: filepath.Join(home, ".claude", "projects")},
-		"codex":  {Agent: "codex", Parser: "codex", Path: filepath.Join(home, ".codex", "sessions")},
+		"claude": {
+			Agent: "claude", Parser: "claude",
+			Paths: []string{filepath.Join(home, ".claude", "projects")},
+		},
+		"codex": {
+			Agent: "codex", Parser: "codex",
+			Paths: []string{
+				filepath.Join(home, ".codex", "sessions"),
+				filepath.Join(home, ".codex", "archived_sessions"),
+			},
+		},
 	}
 	for name, candidate := range candidates {
-		if info, err := os.Stat(candidate.Path); err != nil || !info.IsDir() {
+		if !slices.ContainsFunc(candidate.Paths, func(path string) bool {
+			info, err := os.Stat(path)
+			return err == nil && info.IsDir()
+		}) {
 			delete(candidates, name)
 		}
 	}
@@ -370,7 +382,7 @@ func selectedDetectedSources(
 	var names []string
 	for name, candidate := range detected {
 		if slices.ContainsFunc(existing, func(source config.Source) bool {
-			return sameSource(source, candidate)
+			return sharesManagedPath(source, candidate)
 		}) {
 			names = append(names, name)
 		}
@@ -384,57 +396,85 @@ func mergeSelectedSources(
 	selected []config.Source,
 	detected map[string]config.Source,
 ) []config.Source {
-	result := make([]config.Source, 0, len(existing)+len(selected))
-	used := make([]bool, len(selected))
+	managed := make(map[string]map[string]struct{}, len(detected))
+	for _, source := range detected {
+		managed[sourceKey(source)] = pathSet(source.Paths)
+	}
+	custom := make(map[string]config.Source)
+	var customOrder []string
 	for _, source := range existing {
-		isDetected := false
-		for _, candidate := range detected {
-			if sameSource(source, candidate) {
-				isDetected = true
-				break
-			}
+		key := sourceKey(source)
+		entry, exists := custom[key]
+		if !exists {
+			entry = config.Source{Agent: source.Agent, Parser: effectiveParser(source)}
+			customOrder = append(customOrder, key)
 		}
-		if !isDetected {
-			result = appendUniqueSource(result, source)
+		for _, path := range source.Paths {
+			if _, isManaged := managed[key][filepath.Clean(path)]; isManaged {
+				continue
+			}
+			entry.Paths = appendUniquePath(entry.Paths, path)
+		}
+		custom[key] = entry
+	}
+
+	result := make([]config.Source, 0, len(selected)+len(custom))
+	for _, source := range selected {
+		key := sourceKey(source)
+		entry := source
+		for _, path := range custom[key].Paths {
+			entry.Paths = appendUniquePath(entry.Paths, path)
+		}
+		result = append(result, entry)
+		delete(custom, key)
+	}
+	for _, key := range customOrder {
+		entry, exists := custom[key]
+		if !exists || len(entry.Paths) == 0 {
 			continue
 		}
-		for index, candidate := range selected {
-			if sameSource(source, candidate) {
-				result = appendUniqueSource(result, candidate)
-				used[index] = true
-				break
-			}
-		}
-	}
-	for index, source := range selected {
-		if !used[index] {
-			result = appendUniqueSource(result, source)
-		}
+		result = append(result, entry)
+		delete(custom, key)
 	}
 	return result
 }
 
-func appendUniqueSource(values []config.Source, candidate config.Source) []config.Source {
-	if slices.ContainsFunc(values, func(value config.Source) bool {
-		return sameSource(value, candidate)
-	}) {
-		return values
+func sharesManagedPath(source, managed config.Source) bool {
+	if sourceKey(source) != sourceKey(managed) {
+		return false
 	}
-	return append(values, candidate)
+	wanted := pathSet(managed.Paths)
+	return slices.ContainsFunc(source.Paths, func(path string) bool {
+		_, exists := wanted[filepath.Clean(path)]
+		return exists
+	})
 }
 
-func sameSource(left, right config.Source) bool {
-	leftParser := left.Parser
-	if leftParser == "" {
-		leftParser = left.Agent
+func sourceKey(source config.Source) string {
+	return source.Agent + "\x00" + effectiveParser(source)
+}
+
+func effectiveParser(source config.Source) string {
+	if source.Parser != "" {
+		return source.Parser
 	}
-	rightParser := right.Parser
-	if rightParser == "" {
-		rightParser = right.Agent
+	return source.Agent
+}
+
+func pathSet(paths []string) map[string]struct{} {
+	values := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		values[filepath.Clean(path)] = struct{}{}
 	}
-	return left.Agent == right.Agent &&
-		leftParser == rightParser &&
-		filepath.Clean(left.Path) == filepath.Clean(right.Path)
+	return values
+}
+
+func appendUniquePath(paths []string, candidate string) []string {
+	candidate = filepath.Clean(candidate)
+	if slices.Contains(paths, candidate) {
+		return paths
+	}
+	return append(paths, candidate)
 }
 
 func integrationInstalled(instructionsPath, hookPath string) bool {

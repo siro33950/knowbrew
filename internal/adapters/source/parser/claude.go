@@ -40,6 +40,30 @@ type claudeBlock struct {
 	Text string `json:"text"`
 }
 
+func (Claude) SessionID(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open Claude log %s: %w", path, err)
+	}
+	defer func() { _ = file.Close() }()
+	fallback := sessionIDFromPath(path)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
+	for scanner.Scan() {
+		var record claudeRecord
+		if json.Unmarshal(scanner.Bytes(), &record) != nil {
+			continue
+		}
+		if record.SessionID != "" {
+			return record.SessionID, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scan Claude log %s: %w", path, err)
+	}
+	return fallback, nil
+}
+
 func (Claude) Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warning, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -112,7 +136,7 @@ func (Claude) Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warn
 			current = &domain.FeedstockCandidate{
 				ID:        FeedstockID("claude", sessionID, turnID),
 				TurnID:    turnID,
-				Session:   domain.SessionRef{ID: sessionID, Path: path},
+				Session:   domain.SessionRef{ID: sessionID},
 				Timestamp: timestamp,
 				Agent:     "claude",
 				CWD:       record.CWD,

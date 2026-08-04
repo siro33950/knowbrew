@@ -45,6 +45,38 @@ type codexContentBlock struct {
 	Text string `json:"text"`
 }
 
+func (Codex) SessionID(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open Codex log %s: %w", path, err)
+	}
+	defer func() { _ = file.Close() }()
+	fallback := sessionIDFromPath(path)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
+	for scanner.Scan() {
+		var record codexRecord
+		if json.Unmarshal(scanner.Bytes(), &record) != nil || record.Type != "session_meta" {
+			continue
+		}
+		var payload codexPayload
+		if json.Unmarshal(record.Payload, &payload) != nil {
+			continue
+		}
+		if payload.ID != "" {
+			return payload.ID, nil
+		}
+		if payload.SessionID != "" {
+			return payload.SessionID, nil
+		}
+		return fallback, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scan Codex log %s: %w", path, err)
+	}
+	return fallback, nil
+}
+
 func (Codex) Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warning, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -164,7 +196,7 @@ func (Codex) Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warni
 				current = &domain.FeedstockCandidate{
 					ID:        FeedstockID("codex", sessionID, turnID),
 					TurnID:    turnID,
-					Session:   domain.SessionRef{ID: sessionID, Path: path},
+					Session:   domain.SessionRef{ID: sessionID},
 					Timestamp: timestamp,
 					Agent:     "codex",
 					CWD:       sessionCWD,
