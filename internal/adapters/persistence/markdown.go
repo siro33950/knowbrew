@@ -81,6 +81,39 @@ func (repository *Markdown) KnowledgeTypes() ([]domain.MasterEntry, error) {
 	return repository.Store.KnowledgeTypes()
 }
 
+func (repository *Markdown) ReadWritingGuide(name string) (string, bool, error) {
+	return repository.Store.ReadWritingGuide(name)
+}
+
+func (repository *Markdown) LoadTemplates() (
+	[]domain.DocumentTemplate,
+	[]diagnostic.Warning,
+	error,
+) {
+	return repository.Store.LoadTemplates()
+}
+
+func (repository *Markdown) ReadDistilledDocument(
+	template domain.DocumentTemplate,
+	subject string,
+) (domain.DistilledDocument, bool, error) {
+	return repository.Store.ReadDistilledDocument(template, subject)
+}
+
+func (repository *Markdown) WriteDistilledDocument(
+	template domain.DocumentTemplate,
+	document domain.DistilledDocument,
+) error {
+	return repository.Store.WriteDistilledDocument(template, document)
+}
+
+func (repository *Markdown) DeleteDistilledDocument(
+	template domain.DocumentTemplate,
+	subject string,
+) (bool, error) {
+	return repository.Store.DeleteDistilledDocument(template, subject)
+}
+
 func (repository *Markdown) ListKnowledge() (
 	[]storage.KnowledgeDocument,
 	[]diagnostic.Warning,

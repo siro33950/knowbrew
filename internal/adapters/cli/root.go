@@ -27,6 +27,7 @@ import (
 	sourceadapter "github.com/siro33950/knowbrew/internal/adapters/source"
 	"github.com/siro33950/knowbrew/internal/application/brew"
 	"github.com/siro33950/knowbrew/internal/application/diagnostic"
+	"github.com/siro33950/knowbrew/internal/application/distill"
 	"github.com/siro33950/knowbrew/internal/application/draw"
 	knowledgeapp "github.com/siro33950/knowbrew/internal/application/knowledge"
 	searchapp "github.com/siro33950/knowbrew/internal/application/search"
@@ -55,6 +56,7 @@ func newRootCommand() *cobra.Command {
 		newInitCommand(),
 		newDrawCommand(),
 		newBrewCommand(),
+		newDistillCommand(),
 		newShowCommand(),
 		newFeedstockCommand(),
 		newKnowledgeCommand(),
@@ -237,6 +239,53 @@ func newBrewCommand() *cobra.Command {
 		},
 	}
 	command.Flags().BoolVar(&verbose, "verbose", false, "Stream agent output and per-record progress")
+	return command
+}
+
+func newDistillCommand() *cobra.Command {
+	var verbose bool
+	var subject, template string
+	command := &cobra.Command{
+		Use:   "distill",
+		Short: "Regenerate Subject documents from approved current Knowledge",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			display := progressDisplay(verbose)
+			cfg, runner, err := loadRunner(verbose)
+			if err != nil {
+				return err
+			}
+			repository, err := persistenceadapter.New(cfg.Root)
+			if err != nil {
+				return err
+			}
+			service := distill.Service{
+				Settings: distill.Settings{
+					Backend: cfg.LLM.Backend,
+					Model:   cfg.LLM.DistillModel,
+				},
+				Repository: repository,
+				Lifecycle:  repository,
+				Runner:     runner,
+				Progress:   display,
+				RunLock: runlock.FileLock{
+					Path: filepath.Join(cfg.Root, ".knowbrew", "state", "distill.lock"),
+					Name: "distill",
+				},
+			}
+			summary, err := service.Run(command.Context(), distill.Options{
+				Subject: subject, Template: template,
+			})
+			if err != nil {
+				display.Abort()
+				return err
+			}
+			return writeJSON(os.Stdout, summary)
+		},
+	}
+	command.Flags().StringVar(&subject, "subject", "", "Limit distillation to one Subject")
+	command.Flags().StringVar(&template, "template", "", "Limit distillation to one assigned Template")
+	command.Flags().BoolVar(&verbose, "verbose", false, "Stream agent output and per-document progress")
 	return command
 }
 

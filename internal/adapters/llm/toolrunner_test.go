@@ -89,6 +89,19 @@ func TestToolSchemasExposeOnlyReadOperations(t *testing.T) {
 	if !reflect.DeepEqual(brew, []string{"knowledge_catalog", "knowledge_show"}) {
 		t.Fatalf("brew schemas = %#v", brew)
 	}
+	for _, task := range []Task{TaskDistillSelect, TaskDistillGenerate} {
+		if schemas := schemaNames(toolSchemas(task, testKnowledgeTypes)); len(schemas) != 0 {
+			t.Fatalf("%s schemas = %#v, want no tools", task, schemas)
+		}
+		encoded, err := json.Marshal(resultSchema(task, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(encoded), `"knowledge_references"`) ||
+			strings.Contains(string(encoded), `"knowledge_ids"`) {
+			t.Fatalf("%s result schema exposes the wrong reference field: %s", task, encoded)
+		}
+	}
 	for _, forbidden := range []string{"knowledge_propose", "knowledge_search", "feedstock_search", "show"} {
 		if containsString(brew, forbidden) {
 			t.Fatalf("brew schemas expose %q: %#v", forbidden, brew)
@@ -180,16 +193,20 @@ func TestToolRunnerUsesTaskSpecificAPIModelAndEffort(t *testing.T) {
 	})
 	runner := NewToolRunner(config.Config{LLM: config.LLM{
 		Backend: "api", DrawModel: "draw-fast", BrewModel: "brew-quality",
-		DrawEffort: "low", BrewEffort: "high",
+		DistillModel: "distill-quality", DrawEffort: "low", BrewEffort: "high",
+		DistillEffort: "max",
 	}}, "/bin/knowbrew", t.TempDir(), nil)
 	runner.Client = &http.Client{Transport: transport}
-	for _, task := range []Task{TaskSummarize, TaskAnnotate, TaskBrew} {
+	for _, task := range []Task{
+		TaskSummarize, TaskAnnotate, TaskBrew, TaskDistillSelect, TaskDistillGenerate,
+	} {
 		if _, _, err := runner.complete(context.Background(), task, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if !reflect.DeepEqual(models, []string{"draw-fast", "draw-fast", "brew-quality"}) ||
-		!reflect.DeepEqual(efforts, []string{"low", "low", "high"}) {
+	if !reflect.DeepEqual(models, []string{
+		"draw-fast", "draw-fast", "brew-quality", "distill-quality", "distill-quality",
+	}) || !reflect.DeepEqual(efforts, []string{"low", "low", "high", "max", "max"}) {
 		t.Fatalf("models = %#v, efforts = %#v", models, efforts)
 	}
 }

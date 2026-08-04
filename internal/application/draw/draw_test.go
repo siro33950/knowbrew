@@ -660,6 +660,67 @@ func TestAnnotationPromptIncludesFilteredDialogueWithoutReadInstructions(t *test
 	}
 }
 
+func TestWritingGuidesApplyOnlyToAssertionExtraction(t *testing.T) {
+	dataStore, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	writingDirectory := filepath.Join(dataStore.Root, "masters", "writing")
+	for name, content := range map[string]string{
+		"common.md":    "COMMON WRITING RULE",
+		"knowledge.md": "KNOWLEDGE WRITING RULE",
+		"document.md":  "DOCUMENT WRITING RULE",
+	} {
+		if err := os.WriteFile(filepath.Join(writingDirectory, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := writePromptTarget(
+		t,
+		dataStore,
+		"session-writing",
+		"turn-writing",
+		time.Now().UTC(),
+		"Use precise terminology.",
+		"Done.",
+	)
+	feedstocks, _, err := dataStore.ListFeedstocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Path: "/configured/config.toml"}
+	assertionText, _, err := annotationPromptForTest(cfg, dataStore, target.ID, feedstocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"COMMON WRITING RULE", "KNOWLEDGE WRITING RULE"} {
+		if !strings.Contains(assertionText, required) {
+			t.Fatalf("assertion prompt does not contain %q:\n%s", required, assertionText)
+		}
+	}
+	if strings.Contains(assertionText, "DOCUMENT WRITING RULE") {
+		t.Fatalf("assertion prompt contains document-only rules:\n%s", assertionText)
+	}
+	if strings.Contains(assertionText, "Never prefix it with Absolute: or Default:") {
+		t.Fatalf("assertion prompt retained externalized strength wording:\n%s", assertionText)
+	}
+
+	summaryText, _, err := summaryPromptForTest(cfg, dataStore, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"COMMON WRITING RULE", "KNOWLEDGE WRITING RULE", "DOCUMENT WRITING RULE",
+	} {
+		if strings.Contains(summaryText, forbidden) {
+			t.Fatalf("summary prompt contains writing guide %q:\n%s", forbidden, summaryText)
+		}
+	}
+}
+
 func TestAnnotationPromptMarksMissingAssistantResponse(t *testing.T) {
 	dataStore, err := store.New(t.TempDir())
 	if err != nil {

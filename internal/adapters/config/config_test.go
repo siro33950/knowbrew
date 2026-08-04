@@ -18,7 +18,8 @@ func TestSaveAndLoadUsesRootLocalConfigAndGlobalLocator(t *testing.T) {
 	cfg := Config{
 		LLM: LLM{
 			Backend: "claude-cli", DrawModel: "fast-model", BrewModel: "quality-model",
-			DrawEffort: "low", BrewEffort: "max",
+			DistillModel: "document-model", DrawEffort: "low", BrewEffort: "max",
+			DistillEffort: "high",
 		},
 		Draw:    Draw{ContextTurns: DefaultDrawContextTurns},
 		Sources: []Source{{Agent: "claude", Parser: "claude", Path: "~/logs"}},
@@ -42,10 +43,12 @@ func TestSaveAndLoadUsesRootLocalConfigAndGlobalLocator(t *testing.T) {
 	if loaded.Sources[0].Path != filepath.Join(home, "logs") {
 		t.Fatalf("expanded source = %q", loaded.Sources[0].Path)
 	}
-	if loaded.LLM.DrawModel != "fast-model" || loaded.LLM.BrewModel != "quality-model" {
+	if loaded.LLM.DrawModel != "fast-model" || loaded.LLM.BrewModel != "quality-model" ||
+		loaded.LLM.DistillModel != "document-model" {
 		t.Fatalf("LLM models = %#v", loaded.LLM)
 	}
-	if loaded.LLM.DrawEffort != "low" || loaded.LLM.BrewEffort != "max" {
+	if loaded.LLM.DrawEffort != "low" || loaded.LLM.BrewEffort != "max" ||
+		loaded.LLM.DistillEffort != "high" {
 		t.Fatalf("LLM efforts = %#v", loaded.LLM)
 	}
 	if loaded.Draw.Concurrency != DefaultDrawConcurrency {
@@ -160,7 +163,7 @@ func TestLoadRejectsLegacyModelWithMigrationGuidance(t *testing.T) {
 	}
 	t.Setenv(ConfigEnvironment, path)
 	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "migrate it to draw_model and brew_model") {
+	if err == nil || !strings.Contains(err.Error(), "migrate it to draw_model, brew_model, and distill_model") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -182,6 +185,9 @@ func TestLoadAllowsExistingConfigWithoutEffortKeys(t *testing.T) {
 	}
 	if loaded.LLM.DrawEffort != "" || loaded.LLM.BrewEffort != "" {
 		t.Fatalf("missing effort keys should remain empty: %#v", loaded.LLM)
+	}
+	if loaded.LLM.DistillModel != "" || loaded.LLM.DistillEffort != DefaultDistillEffort {
+		t.Fatalf("missing distill keys should use migration defaults: %#v", loaded.LLM)
 	}
 	if loaded.Embedding.Model != "" {
 		t.Fatalf("missing embedding config should keep full-text compatibility: %#v", loaded.Embedding)
@@ -222,7 +228,7 @@ func TestAPILLMRequiresBothTaskModels(t *testing.T) {
 		Path: filepath.Join(t.TempDir(), ".knowbrew", "config.toml"),
 		LLM:  LLM{Backend: "api", DrawModel: "fast"},
 	}
-	if err := cfg.Normalize(); err == nil || !strings.Contains(err.Error(), "both draw_model and brew_model") {
+	if err := cfg.Normalize(); err == nil || !strings.Contains(err.Error(), "draw_model, brew_model, and distill_model") {
 		t.Fatalf("error = %v", err)
 	}
 }

@@ -21,6 +21,7 @@ type Repository interface {
 	LoadMasters(string) ([]domain.MasterEntry, []diagnostic.Warning, error)
 	EnsureMaster(string, domain.MasterEntry) (bool, error)
 	KnowledgeTypes() ([]domain.MasterEntry, error)
+	ReadWritingGuide(string) (string, bool, error)
 }
 
 type InvocationGuard interface {

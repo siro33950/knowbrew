@@ -33,6 +33,7 @@ type Choices struct {
 	Backend        string
 	DrawModel      string
 	BrewModel      string
+	DistillModel   string
 	EmbeddingModel string
 	SourceNames    []string
 	InstallClaude  bool
@@ -75,6 +76,7 @@ func RunInteractive() error {
 	backend := "claude-cli"
 	drawModel := ""
 	brewModel := ""
+	distillModel := ""
 	embeddingModel := config.DefaultEmbeddingModel
 	selected := defaults
 	installClaude := true
@@ -84,6 +86,7 @@ func RunInteractive() error {
 		backend = existing.LLM.Backend
 		drawModel = existing.LLM.DrawModel
 		brewModel = existing.LLM.BrewModel
+		distillModel = existing.LLM.DistillModel
 		embeddingModel = existing.Embedding.Model
 		selected = selectedDetectedSources(existing.Sources, available)
 		home, err := os.UserHomeDir()
@@ -166,6 +169,16 @@ func RunInteractive() error {
 				}
 				return nil
 			}),
+		huh.NewInput().
+			Title("Distill model").
+			Description("Synthesizes approved Knowledge into documents; prefer a high-quality model. Leave empty for the CLI default.").
+			Value(&distillModel).
+			Validate(func(value string) error {
+				if (backend == "api" || backend == "ollama") && strings.TrimSpace(value) == "" {
+					return errors.New("a distill model is required for API and Ollama")
+				}
+				return nil
+			}),
 		huh.NewSelect[string]().
 			Title("Select semantic search").
 			Description("Downloads and manages the selected local embedding model. Existing configurations can choose disabled.").
@@ -191,6 +204,7 @@ func RunInteractive() error {
 	}
 	return Apply(Choices{
 		Root: root, Backend: backend, DrawModel: drawModel, BrewModel: brewModel,
+		DistillModel:   distillModel,
 		EmbeddingModel: embeddingModel, SourceNames: selected,
 		InstallClaude: installClaude, InstallCodex: installCodex,
 	})
@@ -219,7 +233,8 @@ func Apply(choices Choices) error {
 		Root: root,
 		LLM: config.LLM{
 			Backend: choices.Backend, DrawModel: choices.DrawModel, BrewModel: choices.BrewModel,
-			DrawEffort: config.DefaultDrawEffort,
+			DistillModel: choices.DistillModel, DrawEffort: config.DefaultDrawEffort,
+			DistillEffort: config.DefaultDistillEffort,
 		},
 		Draw: config.Draw{
 			Concurrency:     config.DefaultDrawConcurrency,
@@ -240,6 +255,7 @@ func Apply(choices Choices) error {
 		cfg.LLM.Backend = choices.Backend
 		cfg.LLM.DrawModel = choices.DrawModel
 		cfg.LLM.BrewModel = choices.BrewModel
+		cfg.LLM.DistillModel = choices.DistillModel
 		cfg.Embedding.Model = embeddingModel
 		if embeddingModel == config.EmbeddingCustom && existing.Embedding.Model == config.EmbeddingCustom {
 			cfg.Embedding.Path = existing.Embedding.Path
@@ -251,8 +267,9 @@ func Apply(choices Choices) error {
 		return statErr
 	}
 	if choices.Backend == "api" || choices.Backend == "ollama" {
-		if strings.TrimSpace(choices.DrawModel) == "" || strings.TrimSpace(choices.BrewModel) == "" {
-			return errors.New("API and Ollama backends require both draw and brew models")
+		if strings.TrimSpace(choices.DrawModel) == "" || strings.TrimSpace(choices.BrewModel) == "" ||
+			strings.TrimSpace(choices.DistillModel) == "" {
+			return errors.New("API and Ollama backends require draw, brew, and distill models")
 		}
 	}
 	cfg.Path = configPath
@@ -264,6 +281,12 @@ func Apply(choices Choices) error {
 		return err
 	}
 	if err := dataStore.EnsureLayout(); err != nil {
+		return err
+	}
+	if err := dataStore.EnsureDefaultTemplates(); err != nil {
+		return err
+	}
+	if err := dataStore.EnsureDefaultWritingGuides(); err != nil {
 		return err
 	}
 	if cfg.Embedding.Model != config.EmbeddingCustom {

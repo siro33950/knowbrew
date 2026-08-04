@@ -34,12 +34,11 @@ knowbrew init
 
 ## How it works
 
-Three steps, following a brewing metaphor:
+The flow follows a brewing metaphor:
 
 ```text
-session logs  ──draw──▶  feedstock  ──brew──▶  knowledge  ──▶  you approve
-(untouched)              (what happened,       (what is worth
-                          one per turn)         remembering)
+session logs ──draw──▶ feedstock ──brew──▶ knowledge ──approve──▶ distill ──▶ documents
+(untouched)             (what happened)       (durable claims)               (derived views)
 ```
 
 **`draw`** reads your session logs and records one *feedstock* per turn: a short
@@ -53,6 +52,11 @@ can later be corrected, replaced, or merged as your project evolves.
 **You approve.** New knowledge starts with an unchecked `approved` property.
 Check it in Obsidian, or change it to `approved: true` in Markdown. Only then
 can your agent see it.
+
+**`distill`** regenerates readable Subject documents from approved, current
+knowledge. Each document follows a Template assigned by its Subject and records
+the exact Knowledge IDs it used. Knowledge remains the source of truth; files
+under `documents/` are reproducible derived views.
 
 ## Getting started
 
@@ -72,6 +76,8 @@ Then build your knowledge base:
 ```sh
 knowbrew draw    # session logs → feedstock
 knowbrew brew    # feedstock → pending knowledge
+# review and approve Knowledge, then:
+knowbrew distill # approved Knowledge → Subject documents
 ```
 
 Both are idempotent and safe to re-run — they only fill in what is missing, so
@@ -127,7 +133,7 @@ Your agent uses these same commands. `init` writes usage instructions into your
 
 ### Token usage
 
-While `draw` or `brew` runs, the progress line shows cumulative input and output
+While `draw`, `brew`, or `distill` runs, the progress line shows cumulative input and output
 tokens (`in ... / out ...`), and the final JSON includes a `usage` object with
 the backend, model, and per-class token counts. Multiply those by your
 provider's current rates to get the cost. knowbrew ships no price table because
@@ -164,14 +170,35 @@ Subjects are stable target names stored as master notes under
 `masters/subjects/`. knowbrew adds one automatically only when it can derive it
 from a Git repository, recording the remote and working directory as aliases.
 
-A subject note may contain `definition`, `includes`, and `excludes`. Those
-fields decide what belongs to the subject; a name alone is the fallback when
-they are absent, and an exclusion overrides a name match.
+A subject note may contain `definition`, `includes`, `excludes`, and `documents`.
+The `documents` property declares which documents should be generated for that
+Subject. Each value is a wikilink to the corresponding definition under
+`masters/templates/`; an empty list excludes that Subject from distillation.
+The other fields decide what belongs to the subject; a name alone is the
+fallback when they are absent, and an exclusion overrides a name match.
 
 Only you can create subjects — knowbrew never invents one. An unknown
 `--subject` is an error, and there is no `--new-subject` flag. Create, rename,
 merge, or delete subject notes directly in your vault. Claims that match no
 subject are kept aside, so editing a subject later can make them eligible.
+
+## Distilled documents
+
+`init` creates four starter Template masters: `concept`, `reference`,
+`decisions`, and `glossary`. A Template describes the document's purpose,
+readers, scope, completion criteria, output filename, and Markdown structure.
+Declare the documents to generate in a Subject note:
+
+```yaml
+documents:
+  - "[[concept]]"
+  - "[[reference]]"
+```
+
+`knowbrew distill` checks every approved, current Knowledge record for each
+requested Subject document, then writes
+`documents/<subject>/<template-output>`. It removes outputs that no longer have
+any valid supporting Knowledge. Use `--subject` or `--template` to limit a run.
 
 ## Configuration
 
@@ -184,8 +211,10 @@ root = ".."
 backend = "claude-cli"    # or codex-cli, api, ollama
 draw_model = ""           # per-turn classification: prefer a fast model
 brew_model = ""           # knowledge decisions: prefer a strong model
+distill_model = ""        # document synthesis: prefer a strong model
 draw_effort = "low"       # repeated classification: low is the init default
 brew_effort = ""          # empty uses the backend or user default
+distill_effort = "high"   # document selection and synthesis
 timeout = "5m"
 
 [draw]
@@ -204,7 +233,7 @@ parser = "claude"
 ```
 
 Empty model values use the CLI backend's own default. `api` and `ollama` require
-both models and read credentials from the environment:
+all three models and read credentials from the environment:
 
 ```sh
 export KNOWBREW_API_URL=https://api.example.com/v1/chat/completions
@@ -254,6 +283,7 @@ Prebuilt binaries are on
 knowbrew init                      interactive setup
 knowbrew draw [flags] [path...]    session logs → feedstock
 knowbrew brew [--verbose]          feedstock → pending knowledge
+knowbrew distill [flags]           approved knowledge → Subject documents
 knowbrew knowledge [keywords...]   search knowledge (alias: kn)
 knowbrew knowledge show <id...>    inspect knowledge in any lifecycle state
 knowbrew feedstock [keywords...]   search or replay feedstock
@@ -269,6 +299,8 @@ Shared search flags: `--subject`, `--type`, `--since`, `--until`, `--limit`,
 `draw` flags: `--all`, `--since`, `--until`, `--source claude|codex`,
 `--verbose`. An explicit file or directory path is never time-limited unless you
 also pass `--since` or `--until`.
+
+`distill` flags: `--subject`, `--template`, `--verbose`.
 
 Some subcommands exist only for the LLM backend to call and are not meant for
 direct use.

@@ -32,6 +32,7 @@ type masterFrontmatter struct {
 	Includes   []string `yaml:"includes,omitempty"`
 	Excludes   []string `yaml:"excludes,omitempty"`
 	Aliases    []string `yaml:"aliases,omitempty"`
+	Documents  []string `yaml:"documents,omitempty"`
 }
 
 type legacyMasterFrontmatter struct {
@@ -42,6 +43,7 @@ type legacyMasterFrontmatter struct {
 	Excludes   []string `yaml:"excludes,omitempty"`
 	Status     any      `yaml:"status,omitempty"`
 	Aliases    []string `yaml:"aliases,omitempty"`
+	Documents  []string `yaml:"documents,omitempty"`
 	Created    any      `yaml:"created,omitempty"`
 	Updated    any      `yaml:"updated,omitempty"`
 }
@@ -93,8 +95,11 @@ func (s *Store) EnsureLayout() error {
 	for _, dir := range []string{
 		"feedstocks",
 		"knowledge",
+		"documents",
 		filepath.Join("masters", "subjects"),
+		filepath.Join("masters", "templates"),
 		filepath.Join("masters", "types"),
+		filepath.Join("masters", "writing"),
 		filepath.Join(".knowbrew", "state", "runs"),
 		filepath.Join(".knowbrew", "state", "transactions"),
 	} {
@@ -107,6 +112,24 @@ func (s *Store) EnsureLayout() error {
 		}
 	}
 	return s.ensureDefaultTypes()
+}
+
+func (s *Store) ReadWritingGuide(name string) (string, bool, error) {
+	if err := domain.ValidateIdentifier(name, "writing guide name"); err != nil {
+		return "", false, err
+	}
+	path, err := fsutil.ResolveWithin(s.Root, "masters", "writing", name+".md")
+	if err != nil {
+		return "", false, err
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read writing guide %s: %w", path, err)
+	}
+	return string(data), true, nil
 }
 
 func (s *Store) WithLock(ctx context.Context, fn func() error) error {
@@ -713,6 +736,7 @@ func (s *Store) EnsureMaster(kind string, entry domain.MasterEntry) (bool, error
 	entry.Aliases = domain.UniqueSorted(entry.Aliases)
 	entry.Includes = normalizeScopeEntries(entry.Includes)
 	entry.Excludes = normalizeScopeEntries(entry.Excludes)
+	entry.Documents = domain.NormalizeMasterNames(entry.Documents)
 	var validateErr error
 	if kind == "types" {
 		validateErr = domain.ValidateTypeMaster(entry)
@@ -741,11 +765,12 @@ func (s *Store) EnsureMaster(kind string, entry domain.MasterEntry) (bool, error
 		Example:    entry.Example,
 		Includes:   entry.Includes,
 		Excludes:   entry.Excludes,
+		Documents:  entry.Documents,
 	}
 	if kind == "subjects" {
 		header.Aliases = entry.Aliases
 	}
-	data, err := frontmatter.Encode(header, "")
+	data, err := encodeWithWikilinks(header, "", "documents")
 	if err != nil {
 		return false, err
 	}
@@ -781,17 +806,19 @@ func (s *Store) AddSubjectAliases(name string, aliases []string) (bool, error) {
 		Includes:   normalizeScopeEntries(header.Includes),
 		Excludes:   normalizeScopeEntries(header.Excludes),
 		Aliases:    merged,
+		Documents:  domain.NormalizeMasterNames(header.Documents),
 	}
 	if err := domain.ValidateMaster(entry); err != nil {
 		return false, err
 	}
-	encoded, err := frontmatter.Encode(masterFrontmatter{
+	encoded, err := encodeWithWikilinks(masterFrontmatter{
 		Definition: entry.Definition,
 		Example:    entry.Example,
 		Includes:   entry.Includes,
 		Excludes:   entry.Excludes,
 		Aliases:    entry.Aliases,
-	}, body)
+		Documents:  entry.Documents,
+	}, body, "documents")
 	if err != nil {
 		return false, err
 	}
@@ -835,6 +862,7 @@ func (s *Store) LoadMasters(kind string) ([]domain.MasterEntry, []diagnostic.War
 			Example:    header.Example,
 			Includes:   normalizeScopeEntries(header.Includes),
 			Excludes:   normalizeScopeEntries(header.Excludes),
+			Documents:  domain.NormalizeMasterNames(header.Documents),
 		}
 		if kind == "subjects" {
 			master.Aliases = domain.UniqueSorted(header.Aliases)

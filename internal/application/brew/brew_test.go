@@ -448,6 +448,16 @@ func TestApplyRejectsStaleCatalogWithoutChangingFeedstock(t *testing.T) {
 
 func TestAssertionPromptIncludesSourceContextAndSemanticSubjectWithoutAliases(t *testing.T) {
 	dataStore := newBrewStore(t)
+	writingDirectory := filepath.Join(dataStore.Root, "masters", "writing")
+	for name, content := range map[string]string{
+		"common.md":    "COMMON WRITING RULE",
+		"knowledge.md": "KNOWLEDGE WRITING RULE",
+		"document.md":  "DOCUMENT WRITING RULE",
+	} {
+		if err := os.WriteFile(filepath.Join(writingDirectory, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{
 		Name: "agent-model", Definition: "Model-specific agent behavior.",
 		Includes: []string{"model behavior"}, Excludes: []string{"prompt architecture"},
@@ -475,6 +485,7 @@ func TestAssertionPromptIncludesSourceContextAndSemanticSubjectWithoutAliases(t 
 	}
 	for _, required := range []string{
 		"Use model-specific defaults.", "Verified model behavior.",
+		"COMMON WRITING RULE", "KNOWLEDGE WRITING RULE",
 		`"definition": "Model-specific agent behavior."`,
 		`"includes"`, `"excludes"`, "Source verification", "Type qualification",
 		"knowledge_type_master as the sole authority", "Do not apply a separate hard-coded category",
@@ -485,8 +496,6 @@ func TestAssertionPromptIncludesSourceContextAndSemanticSubjectWithoutAliases(t 
 		"A Knowledge unit answers one independently maintainable question",
 		"peer item on the same mapping axis",
 		"choose new even when it is closely related",
-		"short lead sentence followed by a Markdown bullet list",
-		"never serialize peer items into one sentence by chaining conjunctions",
 		"do not use it to repeat the statement, mapping, or source history",
 	} {
 		if !strings.Contains(prompt, required) {
@@ -496,7 +505,16 @@ func TestAssertionPromptIncludesSourceContextAndSemanticSubjectWithoutAliases(t 
 	if strings.Contains(prompt, "/private/machine/path") {
 		t.Fatalf("machine alias leaked into semantic prompt:\n%s", prompt)
 	}
-	for _, forbidden := range []string{"applies_when", "task-local progress", "a workflow"} {
+	if strings.Contains(prompt, "DOCUMENT WRITING RULE") {
+		t.Fatalf("brew prompt contains document-only writing rules:\n%s", prompt)
+	}
+	for _, forbidden := range []string{
+		"applies_when", "task-local progress", "a workflow",
+		"Use concise natural prose for a single proposition",
+		"short lead sentence followed by a Markdown bullet list",
+		"never serialize peer items into one sentence by chaining conjunctions",
+		"Do not put headings inside statement",
+	} {
 		if strings.Contains(prompt, forbidden) {
 			t.Fatalf("prompt contains obsolete qualification %q:\n%s", forbidden, prompt)
 		}

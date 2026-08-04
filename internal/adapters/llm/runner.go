@@ -22,9 +22,11 @@ import (
 var ErrTimeout = errors.New("LLM backend timed out")
 
 const (
-	TaskSummarize = agent.TaskSummarize
-	TaskAnnotate  = agent.TaskAnnotate
-	TaskBrew      = agent.TaskBrew
+	TaskSummarize       = agent.TaskSummarize
+	TaskAnnotate        = agent.TaskAnnotate
+	TaskBrew            = agent.TaskBrew
+	TaskDistillSelect   = agent.TaskDistillSelect
+	TaskDistillGenerate = agent.TaskDistillGenerate
 
 	diagnosticMaxLines = 20
 	diagnosticMaxRunes = 2000
@@ -106,7 +108,7 @@ func (runner *CommandRunner) Run(
 		return RunResult{}, err
 	}
 	defer func() { _ = os.Remove(resultPath) }()
-	if task != TaskSummarize {
+	if task == TaskAnnotate || task == TaskBrew {
 		prompt = fmt.Sprintf("%s\n\nUse this exact knowbrew executable only for the permitted read operations: %s", prompt, runner.Executable)
 	}
 	switch runner.Config.LLM.Backend {
@@ -138,8 +140,12 @@ func (runner *CommandRunner) Run(
 		if strings.TrimSpace(effort) != "" {
 			args = append(args, "-c", "model_reasoning_effort="+effort)
 		}
+		sandbox := "workspace-write"
+		if task == TaskDistillSelect || task == TaskDistillGenerate {
+			sandbox = "read-only"
+		}
 		args = append(args,
-			"--sandbox", "workspace-write", "--ephemeral",
+			"--sandbox", sandbox, "--ephemeral",
 			"--skip-git-repo-check", "--json", "-C", runner.WorkDir,
 			"--output-schema", schemaPath, "--output-last-message", resultPath,
 		)
@@ -239,6 +245,8 @@ func modelForTask(cfg config.Config, task Task) (string, error) {
 		return strings.TrimSpace(cfg.LLM.DrawModel), nil
 	case TaskBrew:
 		return strings.TrimSpace(cfg.LLM.BrewModel), nil
+	case TaskDistillSelect, TaskDistillGenerate:
+		return strings.TrimSpace(cfg.LLM.DistillModel), nil
 	default:
 		return "", fmt.Errorf("unsupported LLM task %q", task)
 	}
@@ -250,6 +258,8 @@ func effortForTask(cfg config.Config, task Task) (string, error) {
 		return cfg.LLM.DrawEffort, nil
 	case TaskBrew:
 		return cfg.LLM.BrewEffort, nil
+	case TaskDistillSelect, TaskDistillGenerate:
+		return cfg.LLM.DistillEffort, nil
 	default:
 		return "", fmt.Errorf("unsupported LLM task %q", task)
 	}
@@ -341,7 +351,7 @@ func claudeAllowedTools(executable string, task Task) []string {
 	pattern := func(command string) string {
 		return "Bash(" + executable + " " + command + ")"
 	}
-	if task == TaskSummarize {
+	if task == TaskSummarize || task == TaskDistillSelect || task == TaskDistillGenerate {
 		return nil
 	}
 	if task == TaskAnnotate {

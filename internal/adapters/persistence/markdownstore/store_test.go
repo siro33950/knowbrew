@@ -656,6 +656,99 @@ func TestDefaultTypeMastersAreGeneratedOnlyWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestDefaultTemplateMastersAreGeneratedOnlyWhenEmpty(t *testing.T) {
+	dataStore, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+
+	templateDir := filepath.Join(dataStore.Root, "masters", "templates")
+	entries, err := os.ReadDir(templateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("layout generated templates outside init: %#v", entries)
+	}
+	if err := dataStore.EnsureDefaultTemplates(); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		"concept.md": {
+			"description:", "output: concept.md", "purpose:", "readers:",
+			"covers:", "excludes:", "completion:", "# {{subject}}", "## {{central concepts heading}}",
+		},
+		"decisions.md": {
+			"description:", "output: decisions.md", "purpose:", "readers:",
+			"covers:", "excludes:", "completion:", "## {{decision area}}", "**{{rationale label}}:**",
+		},
+		"glossary.md": {
+			"description:", "output: glossary.md", "purpose:", "readers:",
+			"covers:", "excludes:", "completion:", "## {{term}}", "**{{distinction label}}:**", "**{{related terms label}}:**",
+		},
+		"reference.md": {
+			"description:", "output: reference.md", "purpose:", "readers:",
+			"covers:", "excludes:", "completion:", "## {{reference area}}", "### {{reference item}}",
+		},
+	}
+	entries, err = os.ReadDir(templateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != len(want) {
+		t.Fatalf("default template count = %d, want %d", len(entries), len(want))
+	}
+	for _, entry := range entries {
+		required, ok := want[entry.Name()]
+		if entry.IsDir() || !ok {
+			t.Fatalf("unexpected default template = %#v", entry)
+		}
+		data, err := os.ReadFile(filepath.Join(templateDir, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, value := range required {
+			if !strings.Contains(string(data), value) {
+				t.Fatalf("template %s does not contain %q:\n%s", entry.Name(), value, data)
+			}
+		}
+	}
+
+	custom := []byte("---\ndescription: Custom concept template.\n---\n\n# Custom\n")
+	for _, entry := range entries {
+		path := filepath.Join(templateDir, entry.Name())
+		if entry.Name() == "concept.md" {
+			if err := os.WriteFile(path, custom, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := dataStore.EnsureDefaultTemplates(); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = os.ReadDir(templateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "concept.md" {
+		t.Fatalf("templates after leaving one master = %#v", entries)
+	}
+	data, err := os.ReadFile(filepath.Join(templateDir, "concept.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != string(custom) {
+		t.Fatalf("custom template was changed:\n%s", data)
+	}
+}
+
 func TestKnowledgeTypeValidationUsesMasterFiles(t *testing.T) {
 	dataStore, err := New(t.TempDir())
 	if err != nil {

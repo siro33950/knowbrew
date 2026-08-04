@@ -57,10 +57,15 @@ func assertionPromptForTest(
 	feedstock domain.Feedstock,
 	assertion domain.Assertion,
 ) (string, []diagnostic.Warning, error) {
+	repository := repositoryForTest(dataStore)
+	writingInstructions, err := loadWritingInstructions(repository, "common", "knowledge")
+	if err != nil {
+		return "", nil, err
+	}
 	return assertionPrompt(
-		repositoryForTest(dataStore), dialogueadapter.Query{Store: dataStore},
+		repository, dialogueadapter.Query{Store: dataStore},
 		Settings{ContextTurns: cfg.Draw.ContextTurns, Backend: cfg.LLM.Backend, Model: cfg.LLM.BrewModel},
-		feedstocks, feedstock, assertion,
+		feedstocks, feedstock, assertion, writingInstructions,
 	)
 }
 

@@ -85,6 +85,7 @@ type MasterEntry struct {
 	Includes   []string `json:"includes,omitempty"`
 	Excludes   []string `json:"excludes,omitempty"`
 	Aliases    []string `json:"aliases,omitempty"`
+	Documents  []string `json:"documents,omitempty"`
 }
 
 type SemanticSubject struct {
@@ -342,6 +343,11 @@ func ValidateMaster(entry MasterEntry) error {
 		}
 		if strings.ContainsAny(value, "\r\n") {
 			return errors.New("master scope entries must be one line")
+		}
+	}
+	for _, value := range entry.Documents {
+		if err := ValidateIdentifier(MasterName(value), "template name"); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -17,22 +17,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func TestCommandSurfaceDoesNotExposeDistill(t *testing.T) {
+func TestCommandSurfaceExposesDistill(t *testing.T) {
 	root := newRootCommand()
 	got := map[string]bool{}
 	for _, command := range root.Commands() {
 		got[command.Name()] = true
 	}
-	for _, name := range []string{"init", "draw", "brew", "show", "feedstock", "knowledge", "index"} {
+	for _, name := range []string{"init", "draw", "brew", "distill", "show", "feedstock", "knowledge", "index"} {
 		if !got[name] {
 			t.Errorf("missing command %q", name)
 		}
 	}
 	if got["search"] {
 		t.Fatal("legacy mixed search command must not be exposed")
-	}
-	if got["distill"] {
-		t.Fatal("reserved distill command must not be implemented")
 	}
 	if got["completion"] {
 		t.Fatal("unexpected default completion command")
@@ -94,9 +91,18 @@ func TestSearchModeAndIndexCommands(t *testing.T) {
 }
 
 func TestDrawAndBrewExposeVerboseFlag(t *testing.T) {
-	for _, command := range []*cobra.Command{newDrawCommand(), newBrewCommand()} {
+	for _, command := range []*cobra.Command{newDrawCommand(), newBrewCommand(), newDistillCommand()} {
 		if command.Flags().Lookup("verbose") == nil {
 			t.Fatalf("%s has no --verbose flag", command.Name())
+		}
+	}
+}
+
+func TestDistillExposesDocumentFilters(t *testing.T) {
+	command := newDistillCommand()
+	for _, name := range []string{"subject", "template", "verbose"} {
+		if command.Flags().Lookup(name) == nil {
+			t.Fatalf("distill has no --%s flag", name)
 		}
 	}
 }

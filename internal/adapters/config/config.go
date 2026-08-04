@@ -25,6 +25,7 @@ const (
 	DefaultDrawContextTurns        = 3
 	DefaultDrawMaxContextTurns     = 20
 	DefaultDrawEffort              = "low"
+	DefaultDistillEffort           = "high"
 	DefaultEmbeddingModel          = EmbeddingRuri
 	EmbeddingDisabled              = "disabled"
 	EmbeddingRuri                  = "ruri-v3-130m-int8-onnx"
@@ -34,12 +35,14 @@ const (
 )
 
 type LLM struct {
-	Backend    string `toml:"backend"`
-	DrawModel  string `toml:"draw_model"`
-	BrewModel  string `toml:"brew_model"`
-	DrawEffort string `toml:"draw_effort"`
-	BrewEffort string `toml:"brew_effort"`
-	Timeout    string `toml:"timeout,omitempty"`
+	Backend       string `toml:"backend"`
+	DrawModel     string `toml:"draw_model"`
+	BrewModel     string `toml:"brew_model"`
+	DistillModel  string `toml:"distill_model"`
+	DrawEffort    string `toml:"draw_effort"`
+	BrewEffort    string `toml:"brew_effort"`
+	DistillEffort string `toml:"distill_effort"`
+	Timeout       string `toml:"timeout,omitempty"`
 }
 
 type Draw struct {
@@ -72,6 +75,8 @@ type Config struct {
 	drawMaxContextSet   bool   `toml:"-"`
 	drawEffortSet       bool   `toml:"-"`
 	brewEffortSet       bool   `toml:"-"`
+	distillModelSet     bool   `toml:"-"`
+	distillEffortSet    bool   `toml:"-"`
 	embeddingModelSet   bool   `toml:"-"`
 }
 
@@ -134,7 +139,7 @@ func LoadPath(path string) (Config, error) {
 	}
 	if metadata.IsDefined("llm", "model") {
 		return Config{}, fmt.Errorf(
-			"invalid configuration %s: [llm] model is no longer supported; migrate it to draw_model and brew_model",
+			"invalid configuration %s: [llm] model is no longer supported; migrate it to draw_model, brew_model, and distill_model",
 			path,
 		)
 	}
@@ -144,7 +149,15 @@ func LoadPath(path string) (Config, error) {
 	cfg.drawMaxContextSet = metadata.IsDefined("draw", "max_context_turns")
 	cfg.drawEffortSet = metadata.IsDefined("llm", "draw_effort")
 	cfg.brewEffortSet = metadata.IsDefined("llm", "brew_effort")
+	cfg.distillModelSet = metadata.IsDefined("llm", "distill_model")
+	cfg.distillEffortSet = metadata.IsDefined("llm", "distill_effort")
 	cfg.embeddingModelSet = metadata.IsDefined("embedding", "model")
+	if !cfg.distillModelSet {
+		cfg.LLM.DistillModel = cfg.LLM.BrewModel
+	}
+	if !cfg.distillEffortSet {
+		cfg.LLM.DistillEffort = DefaultDistillEffort
+	}
 	if err := cfg.Normalize(); err != nil {
 		return Config{}, fmt.Errorf("invalid configuration %s: %w", path, err)
 	}
@@ -159,6 +172,12 @@ func (cfg *Config) FillInitDefaults() {
 	}
 	if !cfg.brewEffortSet {
 		cfg.LLM.BrewEffort = ""
+	}
+	if !cfg.distillModelSet {
+		cfg.LLM.DistillModel = cfg.LLM.BrewModel
+	}
+	if !cfg.distillEffortSet {
+		cfg.LLM.DistillEffort = DefaultDistillEffort
 	}
 	if !cfg.embeddingModelSet {
 		cfg.Embedding.Model = DefaultEmbeddingModel
@@ -187,8 +206,9 @@ func (cfg *Config) Normalize() error {
 		return fmt.Errorf("unsupported LLM backend %q", cfg.LLM.Backend)
 	}
 	if (cfg.LLM.Backend == "api" || cfg.LLM.Backend == "ollama") &&
-		(strings.TrimSpace(cfg.LLM.DrawModel) == "" || strings.TrimSpace(cfg.LLM.BrewModel) == "") {
-		return errors.New("API and Ollama backends require both draw_model and brew_model")
+		(strings.TrimSpace(cfg.LLM.DrawModel) == "" || strings.TrimSpace(cfg.LLM.BrewModel) == "" ||
+			strings.TrimSpace(cfg.LLM.DistillModel) == "") {
+		return errors.New("API and Ollama backends require draw_model, brew_model, and distill_model")
 	}
 	if cfg.Draw.Concurrency == 0 && !cfg.drawConcurrencySet {
 		cfg.Draw.Concurrency = DefaultDrawConcurrency

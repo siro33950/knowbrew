@@ -33,12 +33,11 @@ knowbrew init
 
 ## 仕組み
 
-酒造のメタファーによる3ステップです。
+酒造のメタファーに沿って処理します。
 
 ```text
-セッションログ ──draw──▶ feedstock ──brew──▶ knowledge ──▶ あなたが承認
-(手を加えない)           (何が起きたか        (記憶する価値が
-                          1ターン1件)          あること)
+セッションログ ─draw─▶ feedstock ─brew─▶ knowledge ─承認─▶ distill ─▶ documents
+(手を加えない)          (何が起きたか)       (持続する主張)             (派生文書)
 ```
 
 **`draw`** はセッションログを読み、1ターンにつき1件の *feedstock* を記録します。
@@ -52,6 +51,10 @@ knowbrew init
 **承認するのはあなた** — 新しい knowledge は `approved` が未チェックの状態で
 作られます。Obsidian でチェックするか、Markdown を `approved: true` に書き換えて
 ください。そこで初めてエージェントから見えるようになります。
+
+**`distill`** は、承認済みかつ現行のknowledgeからsubjectごとの読み物を再生成します。
+各文書はsubjectに割り当てたTemplateに従い、実際に利用したKnowledge IDを記録します。
+正本はknowledgeであり、`documents/` 配下は再生成できる派生物です。
 
 ## はじめかた
 
@@ -71,6 +74,8 @@ knowbrew init
 ```sh
 knowbrew draw    # セッションログ → feedstock
 knowbrew brew    # feedstock → 未承認のknowledge
+# knowledgeを確認・承認した後:
+knowbrew distill # 承認済みknowledge → subject文書
 ```
 
 どちらも冪等で、何度実行しても安全です。欠けているものだけを埋めるので、実行が
@@ -121,7 +126,7 @@ knowbrew show <feedstock-id> --raw                # 元の対話そのもの
 
 ### トークン使用量
 
-`draw` / `brew` の実行中、進捗行に入力・出力トークンの累計が表示されます
+`draw` / `brew` / `distill` の実行中、進捗行に入力・出力トークンの累計が表示されます
 （`in ... / out ...`）。最終JSONの `usage` オブジェクトには、バックエンド・
 モデル・種別ごとのトークン数が入ります。利用中のプロバイダの単価を掛ければ
 コストが出せます。プロバイダの価格はCLIとは独立に変わるため、knowbrew は
@@ -157,14 +162,34 @@ subject は `masters/subjects/` 配下のマスターノートとして保存さ
 場合のみで、リモートURLと作業ディレクトリをそのマスターのエイリアスとして記録
 します。
 
-subject ノートには `definition`・`includes`・`excludes` を書けます。これらが
-その subject の境界を決めます。いずれも無い場合は名前だけが手がかりになり、
-`excludes` に該当すれば名前が一致しても除外されます。
+subject ノートには `definition`・`includes`・`excludes`・`documents` を書けます。
+`documents` は、そのsubjectについて生成すべき文書を宣言するリストです。各値は
+`masters/templates/` 配下の対応する定義へのwikilinkで、空ならそのsubjectは蒸留対象外です。
+その他の項目がsubjectの境界を決めます。いずれも
+無い場合は名前だけが手がかりになり、`excludes` に該当すれば名前が一致しても
+除外されます。
 
 subject を作れるのはあなただけです。knowbrew が勝手に作ることはありません。
 未知の `--subject` はエラーで、`--new-subject` のようなフラグもありません。
 作成・改名・統合・削除は Vault 上で直接行ってください。どの subject にも
 該当しなかった主張は保留されるので、後から subject を整えれば対象になります。
+
+## 蒸留文書
+
+`init` は `concept`・`reference`・`decisions`・`glossary` の4つのTemplateマスターを
+作成します。Templateは文書の目的・読者・対象範囲・完成条件・出力ファイル名・
+Markdown構造を定義します。subjectノートで生成対象を次のように宣言します。
+
+```yaml
+documents:
+  - "[[concept]]"
+  - "[[reference]]"
+```
+
+`knowbrew distill` は、subjectに宣言された各文書について承認済みかつ現行の
+Knowledgeを全件確認し、`documents/<subject>/<template-output>` を書きます。有効な
+根拠Knowledgeがなくなった既存文書は削除します。`--subject` / `--template` で
+実行対象を絞れます。
 
 ## 設定
 
@@ -177,8 +202,10 @@ root = ".."
 backend = "claude-cli"    # または codex-cli, api, ollama
 draw_model = ""           # ターンごとの分類: 速いモデルが向く
 brew_model = ""           # 知識の判断: 強いモデルが向く
+distill_model = ""        # 文書の蒸留: 強いモデルが向く
 draw_effort = "low"       # 反復する分類処理: initの既定は low
 brew_effort = ""          # 空ならバックエンド/ユーザーの既定に従う
+distill_effort = "high"   # 文書の選別・生成
 timeout = "5m"
 
 [draw]
@@ -196,7 +223,7 @@ path = "/Users/example/.claude/projects"
 parser = "claude"
 ```
 
-モデル名が空ならCLIバックエンド自身の既定を使います。`api` と `ollama` は両方の
+モデル名が空ならCLIバックエンド自身の既定を使います。`api` と `ollama` は3つすべての
 モデル指定が必須で、認証情報は環境変数から読みます。
 
 ```sh
@@ -246,6 +273,7 @@ go install github.com/siro33950/knowbrew/cmd/knowbrew@latest
 knowbrew init                      対話セットアップ
 knowbrew draw [flags] [path...]    セッションログ → feedstock
 knowbrew brew [--verbose]          feedstock → 未承認のknowledge
+knowbrew distill [flags]           承認済みknowledge → subject文書
 knowbrew knowledge [keywords...]   knowledgeを検索（別名: kn）
 knowbrew knowledge show <id...>    任意の状態のknowledgeを表示
 knowbrew feedstock [keywords...]   feedstockを検索・再生
@@ -261,6 +289,8 @@ knowbrew index sync|rebuild|status 派生検索索引の保守
 `draw` のフラグ: `--all`・`--since`・`--until`・`--source claude|codex`・
 `--verbose`。パスを明示した場合は、`--since` / `--until` を併用しない限り
 時間で絞り込まれません。
+
+`distill` のフラグ: `--subject`・`--template`・`--verbose`。
 
 LLMバックエンドが呼び出すためだけのサブコマンドもあり、それらは直接実行する
 用途を想定していません。

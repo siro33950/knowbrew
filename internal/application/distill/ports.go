@@ -1,8 +1,7 @@
-package brew
+package distill
 
 import (
 	"context"
-	"time"
 
 	"github.com/siro33950/knowbrew/internal/application/agent"
 	"github.com/siro33950/knowbrew/internal/application/diagnostic"
@@ -11,48 +10,30 @@ import (
 	"github.com/siro33950/knowbrew/internal/domain"
 )
 
-type KnowledgeDocument = storage.KnowledgeDocument
-type Transaction = storage.Transaction
-
 type Repository interface {
 	EnsureLayout() error
 	WithLock(context.Context, func() error) error
-	ListFeedstocks() ([]domain.Feedstock, []diagnostic.Warning, error)
-	GetFeedstock(string) (domain.Feedstock, error)
-	WriteBrewedFeedstock(domain.Feedstock, time.Time) error
 	LoadMasters(string) ([]domain.MasterEntry, []diagnostic.Warning, error)
-	KnowledgeTypes() ([]domain.MasterEntry, error)
-	ListKnowledge() ([]KnowledgeDocument, []diagnostic.Warning, error)
-	FindKnowledge(string) (KnowledgeDocument, error)
-	Transaction(context.Context, func(Transaction) error) error
+	LoadTemplates() ([]domain.DocumentTemplate, []diagnostic.Warning, error)
+	ListKnowledge() ([]storage.KnowledgeDocument, []diagnostic.Warning, error)
+	ReadDistilledDocument(domain.DocumentTemplate, string) (domain.DistilledDocument, bool, error)
+	WriteDistilledDocument(domain.DocumentTemplate, domain.DistilledDocument) error
+	DeleteDistilledDocument(domain.DocumentTemplate, string) (bool, error)
 	ReadWritingGuide(string) (string, bool, error)
 }
 
 type Settings struct {
-	ContextTurns int
-	Backend      string
-	Model        string
+	Backend string
+	Model   string
 }
 
-type DialogueReader interface {
-	Read(string) ([]domain.DialogueMessage, error)
-}
-
-type Invocation interface {
-	ValidateFeedstock(string) error
-	ValidateAssertion(string) error
-	IsAssertionInvocation() bool
-	RecordCatalog(string, []string, string) error
-	RecordInspected([]string) error
-	ReadState() (agent.ReadState, error)
+type Options struct {
+	Subject  string
+	Template string
 }
 
 type RunLock interface {
 	Lock(context.Context) (func() error, error)
-}
-
-type SearchIndex interface {
-	Sync(context.Context) ([]diagnostic.Warning, error)
 }
 
 type Progress interface {
@@ -65,14 +46,12 @@ type Progress interface {
 }
 
 type Service struct {
-	Settings    Settings
-	Repository  Repository
-	Lifecycle   knowledgeapp.Repository
-	Dialogue    DialogueReader
-	Runner      agent.Runner
-	Progress    Progress
-	RunLock     RunLock
-	SearchIndex SearchIndex
+	Settings   Settings
+	Repository Repository
+	Lifecycle  knowledgeapp.Repository
+	Runner     agent.Runner
+	Progress   Progress
+	RunLock    RunLock
 }
 
 type silentProgress struct{}

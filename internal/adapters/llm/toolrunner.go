@@ -286,11 +286,17 @@ func toolSystemPrompt(task Task) string {
 	if task == TaskAnnotate {
 		return "Extract zero or more atomic assertions from the target user input and prior turns supplied in the user prompt. If an unresolved reference affects a possible assertion, feedstock_context may be called once for bounded earlier context. Return only the required structured result. Every assertion must contain an explicit subject string; use an empty string when none applies."
 	}
+	if task == TaskDistillSelect {
+		return "Select only supplied invocation-local Knowledge references that can support the supplied document Template. Return only the required structured result. Never call tools or edit files."
+	}
+	if task == TaskDistillGenerate {
+		return "Generate one complete Markdown body from only the supplied Knowledge and return the exact invocation-local references used. Return only the required structured result. Never call tools or edit files."
+	}
 	return "Verify exactly one assertion against its supplied source, load its subject catalog, inspect every plausible Knowledge record in full, then return exactly one semantic resolution. The parent process handles time, lifecycle, and writes. Never edit files directly."
 }
 
 func toolSchemas(task Task, typeNames []string) []map[string]any {
-	if task == TaskSummarize {
+	if task == TaskSummarize || task == TaskDistillSelect || task == TaskDistillGenerate {
 		return nil
 	}
 	if task == TaskAnnotate {
@@ -322,7 +328,7 @@ func toolSchemas(task Task, typeNames []string) []map[string]any {
 }
 
 func toolAllowed(task Task, name string) bool {
-	if task == TaskSummarize {
+	if task == TaskSummarize || task == TaskDistillSelect || task == TaskDistillGenerate {
 		return false
 	}
 	if task == TaskAnnotate {

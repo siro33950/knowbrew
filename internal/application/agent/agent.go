@@ -12,9 +12,11 @@ import (
 type Task string
 
 const (
-	TaskSummarize Task = "summarize"
-	TaskAnnotate  Task = "annotate"
-	TaskBrew      Task = "brew"
+	TaskSummarize       Task = "summarize"
+	TaskAnnotate        Task = "annotate"
+	TaskBrew            Task = "brew"
+	TaskDistillSelect   Task = "distill_select"
+	TaskDistillGenerate Task = "distill_generate"
 )
 
 type ReadState struct {

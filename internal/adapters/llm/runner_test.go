@@ -372,6 +372,15 @@ func TestClaudeSummarizePermissionsExposeNoTools(t *testing.T) {
 	}
 }
 
+func TestClaudeDistillPermissionsExposeNoTools(t *testing.T) {
+	for _, task := range []Task{TaskDistillSelect, TaskDistillGenerate} {
+		permissions := strings.Join(claudeAllowedTools("/bin/knowbrew", task), "\n")
+		if permissions != "" {
+			t.Fatalf("%s permissions = %q, want no tools", task, permissions)
+		}
+	}
+}
+
 func TestClaudeCommandRunnerUsesTaskSpecificModelAndEffortArguments(t *testing.T) {
 	binDir := t.TempDir()
 	capturePath := filepath.Join(t.TempDir(), "arguments.txt")
@@ -387,7 +396,8 @@ exit 9
 			Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
 			LLM: config.LLM{
 				Backend: "claude-cli", DrawModel: "draw-fast", BrewModel: "brew-quality",
-				DrawEffort: "low", BrewEffort: "max", Timeout: "5s",
+				DistillModel: "distill-quality", DrawEffort: "low", BrewEffort: "max",
+				DistillEffort: "high", Timeout: "5s",
 			},
 		},
 		Executable: filepath.Join(root, "knowbrew"),
@@ -401,6 +411,8 @@ exit 9
 		{task: TaskSummarize, wantModel: "draw-fast", wantEffort: "low"},
 		{task: TaskAnnotate, wantModel: "draw-fast", wantEffort: "low"},
 		{task: TaskBrew, wantModel: "brew-quality", wantEffort: "max"},
+		{task: TaskDistillSelect, wantModel: "distill-quality", wantEffort: "high"},
+		{task: TaskDistillGenerate, wantModel: "distill-quality", wantEffort: "high"},
 	} {
 		if _, err := runner.Run(context.Background(), test.task, "claude-session-t000001", "prompt"); err == nil {
 			t.Fatal("expected the capture backend to exit unsuccessfully")
@@ -443,7 +455,8 @@ exit 9
 			Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
 			LLM: config.LLM{
 				Backend: "codex-cli", DrawModel: "draw-fast", BrewModel: "brew-quality",
-				DrawEffort: "low", BrewEffort: "high", Timeout: "5s",
+				DistillModel: "distill-quality", DrawEffort: "low", BrewEffort: "high",
+				DistillEffort: "max", Timeout: "5s",
 			},
 		},
 		Executable: filepath.Join(root, "knowbrew"),
@@ -457,6 +470,8 @@ exit 9
 		{task: TaskSummarize, wantModel: "draw-fast", wantEffort: "low"},
 		{task: TaskAnnotate, wantModel: "draw-fast", wantEffort: "low"},
 		{task: TaskBrew, wantModel: "brew-quality", wantEffort: "high"},
+		{task: TaskDistillSelect, wantModel: "distill-quality", wantEffort: "max"},
+		{task: TaskDistillGenerate, wantModel: "distill-quality", wantEffort: "max"},
 	} {
 		if _, err := runner.Run(context.Background(), test.task, "codex-session-t000001", "prompt"); err == nil {
 			t.Fatal("expected the capture backend to exit unsuccessfully")
@@ -474,6 +489,13 @@ exit 9
 		}
 		if !containsArgumentPair(args, "--model", test.wantModel) {
 			t.Fatalf("%s arguments = %#v, want --model %s", test.task, args, test.wantModel)
+		}
+		wantSandbox := "workspace-write"
+		if test.task == TaskDistillSelect || test.task == TaskDistillGenerate {
+			wantSandbox = "read-only"
+		}
+		if !containsArgumentPair(args, "--sandbox", wantSandbox) {
+			t.Fatalf("%s arguments = %#v, want --sandbox %s", test.task, args, wantSandbox)
 		}
 		if len(args) < 3 || args[0] != "exec" || args[1] != "-c" ||
 			args[2] != "model_reasoning_effort="+test.wantEffort {

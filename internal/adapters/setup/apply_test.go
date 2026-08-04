@@ -19,6 +19,7 @@ func TestApplyCreatesRootLocalConfigAndUserLocator(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
 	if err := Apply(Choices{
 		Root: root, Backend: "claude-cli", DrawModel: "fast-model", BrewModel: "quality-model",
+		DistillModel:   "document-model",
 		EmbeddingModel: config.EmbeddingDisabled,
 		InstallClaude:  false, InstallCodex: false,
 	}); err != nil {
@@ -38,10 +39,12 @@ func TestApplyCreatesRootLocalConfigAndUserLocator(t *testing.T) {
 	if loaded.Root != absoluteRoot {
 		t.Fatalf("root = %q, want %q", loaded.Root, absoluteRoot)
 	}
-	if loaded.LLM.DrawModel != "fast-model" || loaded.LLM.BrewModel != "quality-model" {
+	if loaded.LLM.DrawModel != "fast-model" || loaded.LLM.BrewModel != "quality-model" ||
+		loaded.LLM.DistillModel != "document-model" {
 		t.Fatalf("LLM models = %#v", loaded.LLM)
 	}
-	if loaded.LLM.DrawEffort != config.DefaultDrawEffort || loaded.LLM.BrewEffort != "" {
+	if loaded.LLM.DrawEffort != config.DefaultDrawEffort || loaded.LLM.BrewEffort != "" ||
+		loaded.LLM.DistillEffort != config.DefaultDistillEffort {
 		t.Fatalf("LLM efforts = %#v", loaded.LLM)
 	}
 	if loaded.Draw.Concurrency != config.DefaultDrawConcurrency {
@@ -63,6 +66,7 @@ func TestApplyCreatesRootLocalConfigAndUserLocator(t *testing.T) {
 	for _, required := range []string{
 		`draw_effort = "low"`,
 		`brew_effort = ""`,
+		`distill_effort = "high"`,
 		`context_turns = 3`,
 		`max_context_turns = 20`,
 		`model = "disabled"`,
@@ -82,6 +86,73 @@ func TestApplyCreatesRootLocalConfigAndUserLocator(t *testing.T) {
 	if len(warnings) != 0 || len(types) != 8 {
 		t.Fatalf("init type masters = %#v, warnings = %#v", types, warnings)
 	}
+	templates, err := os.ReadDir(filepath.Join(root, "masters", "templates"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(templates) != 4 {
+		t.Fatalf("init template masters = %#v", templates)
+	}
+	wantTemplates := []string{"concept.md", "decisions.md", "glossary.md", "reference.md"}
+	for index, entry := range templates {
+		if entry.IsDir() || entry.Name() != wantTemplates[index] {
+			t.Fatalf("init template master %d = %#v, want %q", index, entry, wantTemplates[index])
+		}
+	}
+	decisionTemplate, err := os.ReadFile(filepath.Join(root, "masters", "templates", "decisions.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"# {{subject decisions title}}",
+		"## {{decision area}}",
+		"**{{rationale label}}:** {{decision rationale}}",
+		"Include this entire line only when rationale is grounded in Knowledge.",
+	} {
+		if !strings.Contains(string(decisionTemplate), required) {
+			t.Fatalf("default decisions template does not contain %q:\n%s", required, decisionTemplate)
+		}
+	}
+	for _, forbidden := range []string{"## Superseded decisions", "{{superseded decision}}"} {
+		if strings.Contains(string(decisionTemplate), forbidden) {
+			t.Fatalf("default decisions template contains %q:\n%s", forbidden, decisionTemplate)
+		}
+	}
+	writingGuides := map[string][]string{
+		"common.md": {
+			"# Common Writing Rules",
+			"## Accuracy",
+			"Assert only what the available evidence establishes.",
+			"## Structure",
+			"## Reader effort",
+			"## Presentation and style",
+			"Write in the language and style required by the user's configuration.",
+		},
+		"knowledge.md": {
+			"# Assertion and Knowledge Writing Rules",
+			"## Statement phrasing",
+			"## Compound Knowledge statements",
+			"## Rationale phrasing",
+		},
+		"document.md": {
+			"# Distilled Document Writing Rules",
+			"## Information order",
+			"When the Template does not prescribe an order",
+			"## Headings",
+			"## Presentation formats",
+		},
+	}
+	for name, requiredValues := range writingGuides {
+		writingRules, err := os.ReadFile(filepath.Join(root, "masters", "writing", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, required := range requiredValues {
+			if !strings.Contains(string(writingRules), required) {
+				t.Fatalf("default %s does not contain %q:\n%s", name, required, writingRules)
+			}
+		}
+	}
 }
 
 func TestApplyReinitPreservesUnaskedSettingsCustomSourcesAndData(t *testing.T) {
@@ -100,6 +171,7 @@ func TestApplyReinitPreservesUnaskedSettingsCustomSourcesAndData(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
 	if err := Apply(Choices{
 		Root: root, Backend: "codex-cli", DrawModel: "old-draw", BrewModel: "old-brew",
+		DistillModel:   "old-distill",
 		EmbeddingModel: config.EmbeddingDisabled,
 		SourceNames:    []string{"claude", "codex"}, InstallClaude: false, InstallCodex: false,
 	}); err != nil {
@@ -124,9 +196,22 @@ func TestApplyReinitPreservesUnaskedSettingsCustomSourcesAndData(t *testing.T) {
 	if err := os.WriteFile(sentinel, []byte("keep exactly"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writingRulesPath := filepath.Join(root, "masters", "writing", "common.md")
+	if err := os.WriteFile(writingRulesPath, []byte("# My writing rules\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	knowledgeRulesPath := filepath.Join(root, "masters", "writing", "knowledge.md")
+	if err := os.WriteFile(knowledgeRulesPath, []byte("# My Knowledge rules\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	documentRulesPath := filepath.Join(root, "masters", "writing", "document.md")
+	if err := os.Remove(documentRulesPath); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := Apply(Choices{
 		Root: root, Backend: "codex-cli", DrawModel: "new-draw", BrewModel: "new-brew",
+		DistillModel:   "new-distill",
 		EmbeddingModel: config.EmbeddingDisabled,
 		SourceNames:    []string{"codex"}, InstallClaude: false, InstallCodex: false,
 	}); err != nil {
@@ -137,6 +222,7 @@ func TestApplyReinitPreservesUnaskedSettingsCustomSourcesAndData(t *testing.T) {
 		t.Fatal(err)
 	}
 	if updated.LLM.DrawModel != "new-draw" || updated.LLM.BrewModel != "new-brew" ||
+		updated.LLM.DistillModel != "new-distill" ||
 		updated.LLM.DrawEffort != "medium" || updated.LLM.BrewEffort != "high" ||
 		updated.LLM.Timeout != "9m" {
 		t.Fatalf("reinitialized LLM settings = %#v", updated.LLM)
@@ -155,6 +241,16 @@ func TestApplyReinitPreservesUnaskedSettingsCustomSourcesAndData(t *testing.T) {
 	}
 	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "keep exactly" {
 		t.Fatalf("reinit changed data: %q, %v", data, err)
+	}
+	if data, err := os.ReadFile(writingRulesPath); err != nil || string(data) != "# My writing rules\n" {
+		t.Fatalf("reinit changed common writing rules: %q, %v", data, err)
+	}
+	if data, err := os.ReadFile(knowledgeRulesPath); err != nil || string(data) != "# My Knowledge rules\n" {
+		t.Fatalf("reinit changed Knowledge writing rules: %q, %v", data, err)
+	}
+	if data, err := os.ReadFile(documentRulesPath); err != nil ||
+		!strings.Contains(string(data), "# Distilled Document Writing Rules") {
+		t.Fatalf("reinit did not restore default document writing rules: %q, %v", data, err)
 	}
 }
 

@@ -53,10 +53,15 @@ func annotationPromptForTest(
 	feedstocks []domain.Feedstock,
 	snapshots ...map[string][]domain.FeedstockCandidate,
 ) (string, []diagnostic.Warning, error) {
+	repository := &persistenceadapter.Markdown{Store: dataStore}
+	writingInstructions, err := loadWritingInstructions(repository, "common", "knowledge")
+	if err != nil {
+		return "", nil, err
+	}
 	return annotationPrompt(
 		settingsFromConfig(cfg), sourceadapter.Gateway{},
-		&persistenceadapter.Markdown{Store: dataStore},
-		feedstockID, feedstocks, snapshots...,
+		repository,
+		feedstockID, feedstocks, writingInstructions, snapshots...,
 	)
 }
 
