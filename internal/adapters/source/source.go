@@ -26,14 +26,11 @@ func (Gateway) Collect(
 	options applicationsource.Selection,
 	now time.Time,
 ) ([]applicationsource.File, error) {
-	if options.All && len(options.Paths) > 0 {
-		return nil, errors.New("--all cannot be used with explicit paths")
-	}
 	if len(options.Sources) > 0 && len(options.Paths) > 0 {
 		return nil, errors.New("--source cannot be used with explicit paths")
 	}
-	if options.All && (options.ModifiedSince != nil || options.ModifiedUntil != nil) {
-		return nil, errors.New("--all cannot be used with --since or --until")
+	if options.MaxTurns < 0 {
+		return nil, errors.New("--max must be greater than zero")
 	}
 	if options.ModifiedSince != nil && options.ModifiedUntil != nil &&
 		options.ModifiedSince.After(*options.ModifiedUntil) {
@@ -75,7 +72,7 @@ func (Gateway) Collect(
 		}
 	}
 	since := options.ModifiedSince
-	if !options.All && since == nil && options.ModifiedUntil == nil && len(options.Paths) == 0 {
+	if options.MaxTurns == 0 && since == nil && options.ModifiedUntil == nil && len(options.Paths) == 0 {
 		defaultSince := now.Add(-defaultLookback)
 		since = &defaultSince
 	}

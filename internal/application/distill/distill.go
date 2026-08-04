@@ -17,16 +17,18 @@ import (
 const selectionBatchSize = 50
 
 type Summary struct {
-	DocumentsPlanned  int                  `json:"documents_planned"`
-	DocumentsCreated  int                  `json:"documents_created"`
-	DocumentsUpdated  int                  `json:"documents_updated"`
-	DocumentsDeleted  int                  `json:"documents_deleted"`
-	DocumentsFailed   int                  `json:"documents_failed"`
-	KnowledgeSelected int                  `json:"knowledge_selected"`
-	KnowledgeUsed     int                  `json:"knowledge_used"`
-	Usage             agent.UsageReport    `json:"usage"`
-	Failures          []Failure            `json:"failures,omitempty"`
-	Warnings          []diagnostic.Warning `json:"warnings,omitempty"`
+	DocumentsAvailable int                  `json:"documents_available"`
+	DocumentsSelected  int                  `json:"documents_selected"`
+	DocumentsPlanned   int                  `json:"documents_planned"`
+	DocumentsCreated   int                  `json:"documents_created"`
+	DocumentsUpdated   int                  `json:"documents_updated"`
+	DocumentsDeleted   int                  `json:"documents_deleted"`
+	DocumentsFailed    int                  `json:"documents_failed"`
+	KnowledgeSelected  int                  `json:"knowledge_selected"`
+	KnowledgeUsed      int                  `json:"knowledge_used"`
+	Usage              agent.UsageReport    `json:"usage"`
+	Failures           []Failure            `json:"failures,omitempty"`
+	Warnings           []diagnostic.Warning `json:"warnings,omitempty"`
 }
 
 type Failure struct {
@@ -56,6 +58,9 @@ type documentJob struct {
 
 func (service Service) Run(ctx context.Context, options Options) (Summary, error) {
 	display := service.progress()
+	if options.Max < 0 {
+		return Summary{}, errors.New("maximum documents must be greater than zero")
+	}
 	if service.Repository == nil {
 		return Summary{}, errors.New("distill repository is required")
 	}
@@ -85,11 +90,17 @@ func (service Service) Run(ctx context.Context, options Options) (Summary, error
 	if err != nil {
 		return summary, err
 	}
-	jobs, warnings, err := service.jobs(options)
+	available, warnings, err := service.jobs(options)
 	diagnostic.Add(&summary.Warnings, display, warnings...)
 	if err != nil {
 		return summary, err
 	}
+	summary.DocumentsAvailable = len(available)
+	jobs, err := service.selectJobs(available, options.Max)
+	if err != nil {
+		return summary, err
+	}
+	summary.DocumentsSelected = len(jobs)
 	summary.DocumentsPlanned = len(jobs)
 
 	var selectionUsage agent.Usage
@@ -148,6 +159,11 @@ func (service Service) Run(ctx context.Context, options Options) (Summary, error
 				job.failed = true
 			}
 		}
+		if options.Max > 0 {
+			if err := service.Cursor.Save(cursorPosition(*job)); err != nil {
+				return summary, fmt.Errorf("save distill cursor: %w", err)
+			}
+		}
 		display.Update(fmt.Sprintf(
 			"Generating documents · %d/%d documents · %s",
 			index+1, len(jobs), agent.FormatUsage(generationUsage),
@@ -161,6 +177,49 @@ func (service Service) Run(ctx context.Context, options Options) (Summary, error
 		len(jobs), len(jobs), agent.FormatUsage(generationUsage),
 	))
 	return summary, nil
+}
+
+func (service Service) selectJobs(jobs []documentJob, maximum int) ([]documentJob, error) {
+	if maximum == 0 || len(jobs) == 0 {
+		return jobs, nil
+	}
+	if service.Cursor == nil {
+		return nil, errors.New("distill cursor is required when maximum documents is set")
+	}
+	position, exists, err := service.Cursor.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load distill cursor: %w", err)
+	}
+	start := 0
+	if exists {
+		start = len(jobs)
+		for index, job := range jobs {
+			if compareJobPosition(job, position) > 0 {
+				start = index
+				break
+			}
+		}
+		if start == len(jobs) {
+			start = 0
+		}
+	}
+	count := min(maximum, len(jobs))
+	selected := make([]documentJob, 0, count)
+	for offset := 0; offset < count; offset++ {
+		selected = append(selected, jobs[(start+offset)%len(jobs)])
+	}
+	return selected, nil
+}
+
+func compareJobPosition(job documentJob, position CursorPosition) int {
+	if compared := strings.Compare(job.subject, position.Subject); compared != 0 {
+		return compared
+	}
+	return strings.Compare(job.template.Name, position.Template)
+}
+
+func cursorPosition(job documentJob) CursorPosition {
+	return CursorPosition{Subject: job.subject, Template: job.template.Name}
 }
 
 func (service Service) jobs(options Options) ([]documentJob, []diagnostic.Warning, error) {

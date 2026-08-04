@@ -18,6 +18,8 @@ import (
 type Summary struct {
 	FeedstocksProcessed int                  `json:"feedstocks_processed"`
 	FeedstocksFailed    int                  `json:"feedstocks_failed"`
+	AssertionsSelected  int                  `json:"assertions_selected"`
+	AssertionsPending   int                  `json:"assertions_pending"`
 	AssertionsProcessed int                  `json:"assertions_processed"`
 	AssertionsRejected  int                  `json:"assertions_rejected"`
 	Created             int                  `json:"knowledge_created"`
@@ -41,7 +43,14 @@ type pendingAssertion struct {
 }
 
 func (service Service) Run(ctx context.Context) (Summary, error) {
+	return service.RunWithOptions(ctx, Options{})
+}
+
+func (service Service) RunWithOptions(ctx context.Context, options Options) (Summary, error) {
 	display := service.progress()
+	if options.Max < 0 {
+		return Summary{}, errors.New("maximum assertions must be greater than zero")
+	}
 	dataStore := service.Repository
 	if dataStore == nil {
 		return Summary{}, errors.New("brew repository is required")
@@ -89,7 +98,12 @@ func (service Service) Run(ctx context.Context) (Summary, error) {
 		return summary, err
 	}
 	slices.SortFunc(feedstocks, compareFeedstocks)
-	pending := collectPendingAssertions(feedstocks)
+	allPending := collectPendingAssertions(feedstocks)
+	pending := allPending
+	if options.Max > 0 && len(pending) > options.Max {
+		pending = pending[:options.Max]
+	}
+	summary.AssertionsSelected = len(pending)
 	if len(pending) > 0 && service.Runner == nil {
 		return summary, errors.New("brew runner is required for unresolved assertions")
 	}
@@ -241,6 +255,7 @@ func (service Service) Run(ctx context.Context) (Summary, error) {
 		display.Verbosef("Brewed %s/%s", item.Feedstock.ID, item.Assertion.ID)
 		advance()
 	}
+	summary.AssertionsPending = len(allPending) - summary.AssertionsProcessed
 	summary.Usage = agent.NewUsageReport(service.Settings.Backend, service.Settings.Model, usage)
 	if service.SearchIndex != nil {
 		indexWarnings, syncErr := service.SearchIndex.Sync(ctx)

@@ -80,13 +80,30 @@ knowbrew brew    # feedstock → pending knowledge
 knowbrew distill # approved Knowledge → Subject documents
 ```
 
-Both are idempotent and safe to re-run — they only fill in what is missing, so
-overlapping runs never duplicate anything. Run them from a hook, from cron, or
-by hand.
+The commands are safe to re-run: Draw and Brew resume unfinished work, while
+Distill regenerates derived documents. Run them from a hook, from cron, or by
+hand.
 
 With no arguments, `draw` looks at configured session files modified in the last
-24 hours. Use `--since 7d` (or an RFC3339 timestamp) to widen the window, or
-`--all` to scan everything you have.
+24 hours. Use `--since 7d` (or an RFC3339 timestamp) to widen the window.
+`--max N` safely works through historical data: it selects at most N
+unfinished turns across all configured history, resumes already acquired turns
+first, and then proceeds from newer turns to older ones. Repeating it from cron
+eventually consumes the backlog without an unbounded LLM run:
+
+```sh
+knowbrew draw --max 100
+knowbrew brew --max 100
+knowbrew distill --max 2
+```
+
+The draw summary reports `turns_selected` for the current run and
+`turns_pending` for the unfinished turns remaining in its source scope.
+For Brew, `--max` counts unresolved Assertions; mechanical NOOP processing does
+not consume the limit. For Distill, it counts Subject documents. Bounded
+Distill runs continue from the next Subject and Template on the following run,
+so repeated invocations rotate through all assigned documents even though each
+document remains regenerable.
 
 Review what was created, and promote what you want your agent to use:
 
@@ -282,7 +299,7 @@ Prebuilt binaries are on
 ```text
 knowbrew init                      interactive setup
 knowbrew draw [flags] [path...]    session logs → feedstock
-knowbrew brew [--verbose]          feedstock → pending knowledge
+knowbrew brew [flags]              feedstock → pending knowledge
 knowbrew distill [flags]           approved knowledge → Subject documents
 knowbrew knowledge [keywords...]   search knowledge (alias: kn)
 knowbrew knowledge show <id...>    inspect knowledge in any lifecycle state
@@ -296,11 +313,13 @@ Shared search flags: `--subject`, `--type`, `--since`, `--until`, `--limit`,
 `--include-retired`, and `--trigger always`. `feedstock` adds `--session`,
 `--agent`, and `--last N`.
 
-`draw` flags: `--all`, `--since`, `--until`, `--source claude|codex`,
+`draw` flags: `--max N`, `--since`, `--until`, `--source claude|codex`,
 `--verbose`. An explicit file or directory path is never time-limited unless you
 also pass `--since` or `--until`.
 
-`distill` flags: `--subject`, `--template`, `--verbose`.
+`brew` flags: `--max N`, `--verbose`.
+
+`distill` flags: `--max N`, `--subject`, `--template`, `--verbose`.
 
 Some subcommands exist only for the LLM backend to call and are not meant for
 direct use.

@@ -78,12 +78,26 @@ knowbrew brew    # feedstock → 未承認のknowledge
 knowbrew distill # 承認済みknowledge → subject文書
 ```
 
-どちらも冪等で、何度実行しても安全です。欠けているものだけを埋めるので、実行が
-重なっても重複しません。フック・cron・手動、どこから走らせても構いません。
+各コマンドは何度実行しても安全です。DrawとBrewは未完了の処理を再開し、Distillは
+派生文書を再生成します。フック・cron・手動、どこから走らせても構いません。
 
 引数なしの `draw` は、直近24時間に更新された設定済みセッションファイルを対象に
-します。`--since 7d`（またはRFC3339タイムスタンプ）で範囲を広げ、`--all` で
-すべての履歴を対象にできます。
+します。`--since 7d`（またはRFC3339タイムスタンプ）で範囲を広げられます。
+`--max N` は、設定済みの全履歴から未完了ターンを最大N件だけ選びます。
+取得済みの未完了ターンを先に再開し、その後は新しいターンから古いターンへ進むため、
+cronなどで繰り返せばLLM処理量を制限したまま過去データを消化できます。
+
+```sh
+knowbrew draw --max 100
+knowbrew brew --max 100
+knowbrew distill --max 2
+```
+
+drawのサマリには、今回の対象数を`turns_selected`、対象範囲に残る未完了数を
+`turns_pending`として出力します。
+Brewの`--max`は未処理Assertionを数え、機械NOOPは上限を消費しません。Distillでは
+Subject文書を数えます。上限付きDistillは次回、次のSubjectとTemplateから続行するため、
+各文書が再生成可能なままでも、繰り返し実行すれば割り当て済み文書を順番に処理できます。
 
 作られたものを確認し、エージェントに使わせたいものを承認します。
 
@@ -272,7 +286,7 @@ go install github.com/siro33950/knowbrew/cmd/knowbrew@latest
 ```text
 knowbrew init                      対話セットアップ
 knowbrew draw [flags] [path...]    セッションログ → feedstock
-knowbrew brew [--verbose]          feedstock → 未承認のknowledge
+knowbrew brew [flags]              feedstock → 未承認のknowledge
 knowbrew distill [flags]           承認済みknowledge → subject文書
 knowbrew knowledge [keywords...]   knowledgeを検索（別名: kn）
 knowbrew knowledge show <id...>    任意の状態のknowledgeを表示
@@ -286,11 +300,13 @@ knowbrew index sync|rebuild|status 派生検索索引の保守
 `--include-retired`・`--trigger always`。`feedstock` にはさらに `--session`・
 `--agent`・`--last N`。
 
-`draw` のフラグ: `--all`・`--since`・`--until`・`--source claude|codex`・
+`draw` のフラグ: `--max N`・`--since`・`--until`・`--source claude|codex`・
 `--verbose`。パスを明示した場合は、`--since` / `--until` を併用しない限り
 時間で絞り込まれません。
 
-`distill` のフラグ: `--subject`・`--template`・`--verbose`。
+`brew` のフラグ: `--max N`・`--verbose`。
+
+`distill` のフラグ: `--max N`・`--subject`・`--template`・`--verbose`。
 
 LLMバックエンドが呼び出すためだけのサブコマンドもあり、それらは直接実行する
 用途を想定していません。

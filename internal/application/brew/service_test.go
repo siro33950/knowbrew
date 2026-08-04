@@ -76,6 +76,17 @@ func runForTest(
 	progress io.Writer,
 	indexes ...SearchIndex,
 ) (Summary, error) {
+	return runWithOptionsForTest(ctx, cfg, runner, progress, Options{}, indexes...)
+}
+
+func runWithOptionsForTest(
+	ctx context.Context,
+	cfg config.Config,
+	runner agent.Runner,
+	progress io.Writer,
+	options Options,
+	indexes ...SearchIndex,
+) (Summary, error) {
 	dataStore, err := store.New(cfg.Root)
 	if err != nil {
 		return Summary{}, err
@@ -99,7 +110,7 @@ func runForTest(
 	if len(indexes) > 0 {
 		service.SearchIndex = indexes[0]
 	}
-	return service.Run(ctx)
+	return service.RunWithOptions(ctx, options)
 }
 
 type recordingSearchIndex struct {

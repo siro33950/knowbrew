@@ -185,7 +185,7 @@ func TestDefaultDrawUsesOnlyLogsModifiedInLast24Hours(t *testing.T) {
 	second, err := RunWithOptions(
 		context.Background(),
 		cfg,
-		Options{All: true},
+		Options{MaxTurns: 1},
 		annotatingRunner{store: dataStore},
 		nil,
 	)
@@ -193,7 +193,113 @@ func TestDefaultDrawUsesOnlyLogsModifiedInLast24Hours(t *testing.T) {
 		t.Fatal(err)
 	}
 	if second.FeedstocksAcquired != 1 || second.FeedstocksAnnotated != 1 {
-		t.Fatalf("--all summary = %#v", second)
+		t.Fatalf("--max summary = %#v", second)
+	}
+}
+
+func TestMaxTurnsProcessesNewestUnfinishedTurnsAndReportsBacklog(t *testing.T) {
+	root := t.TempDir()
+	dataStore, _ := store.New(root)
+	sourceDir := t.TempDir()
+	logPath := filepath.Join(sourceDir, "session.jsonl")
+	log := `{"type":"user","uuid":"turn-1","sessionId":"backfill","timestamp":"2026-07-28T01:02:03Z","message":{"role":"user","content":"oldest"}}
+{"type":"user","uuid":"turn-2","sessionId":"backfill","timestamp":"2026-07-29T01:02:03Z","message":{"role":"user","content":"middle"}}
+{"type":"user","uuid":"turn-3","sessionId":"backfill","timestamp":"2026-07-30T01:02:03Z","message":{"role":"user","content":"newest"}}
+{"type":"user","sessionId":"backfill","timestamp":"2026-07-30T01:02:04Z","message":{"role":"user","content":"[Request interrupted by user]"}}
+`
+	if err := os.WriteFile(logPath, []byte(log), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-DefaultLookback - time.Hour)
+	if err := os.Chtimes(logPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{
+		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
+		LLM:     config.LLM{Backend: "claude-cli"},
+		Sources: []config.Source{{Agent: "claude", Parser: "claude", Path: sourceDir}},
+	}
+
+	first, err := RunWithOptions(
+		context.Background(), cfg, Options{MaxTurns: 2},
+		annotatingRunner{store: dataStore}, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.TurnsSelected != 2 || first.TurnsPending != 1 ||
+		first.FeedstocksAcquired != 2 || first.FeedstocksAnnotated != 2 {
+		t.Fatalf("first summary = %#v", first)
+	}
+	for _, turnID := range []string{"turn-2", "turn-3"} {
+		id := parser.FeedstockID("claude", "backfill", turnID)
+		if _, _, err := dataStore.FindFeedstock(id); err != nil {
+			t.Fatalf("newest selected turn %s was not processed: %v", turnID, err)
+		}
+	}
+	oldestID := parser.FeedstockID("claude", "backfill", "turn-1")
+	if _, _, err := dataStore.FindFeedstock(oldestID); err == nil {
+		t.Fatal("oldest turn exceeded --max")
+	}
+
+	second, err := RunWithOptions(
+		context.Background(), cfg, Options{MaxTurns: 2},
+		annotatingRunner{store: dataStore}, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.TurnsSelected != 1 || second.TurnsPending != 0 ||
+		second.FeedstocksAcquired != 1 || second.FeedstocksAnnotated != 1 {
+		t.Fatalf("second summary = %#v", second)
+	}
+}
+
+func TestMaxTurnsPrioritizesPreviouslyAcquiredIncompleteFeedstock(t *testing.T) {
+	root := t.TempDir()
+	dataStore, _ := store.New(root)
+	logPath := filepath.Join(t.TempDir(), "session.jsonl")
+	log := `{"type":"user","uuid":"turn-1","sessionId":"resume","timestamp":"2026-07-29T01:02:03Z","message":{"role":"user","content":"incomplete"}}
+{"type":"user","uuid":"turn-2","sessionId":"resume","timestamp":"2026-07-30T01:02:03Z","message":{"role":"user","content":"new"}}
+{"type":"user","sessionId":"resume","timestamp":"2026-07-30T01:02:04Z","message":{"role":"user","content":"[Request interrupted by user]"}}
+`
+	if err := os.WriteFile(logPath, []byte(log), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	incompleteID := parser.FeedstockID("claude", "resume", "turn-1")
+	if err := dataStore.WriteFeedstock(domain.Feedstock{
+		Schema: domain.SchemaVersion, ID: incompleteID, TurnID: "turn-1",
+		Session:   domain.SessionRef{ID: "resume", Path: logPath},
+		Timestamp: time.Date(2026, 7, 29, 1, 2, 3, 0, time.UTC), Agent: "claude",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{
+		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
+		LLM: config.LLM{Backend: "claude-cli"},
+	}
+
+	summary, err := RunWithOptions(
+		context.Background(), cfg, Options{Paths: []string{logPath}, MaxTurns: 1},
+		annotatingRunner{store: dataStore}, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TurnsSelected != 1 || summary.TurnsPending != 1 ||
+		summary.FeedstocksAcquired != 0 || summary.FeedstocksAnnotated != 1 {
+		t.Fatalf("summary = %#v", summary)
+	}
+	completed, _, err := dataStore.FindFeedstock(incompleteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.AnnotatedAt == nil {
+		t.Fatal("previously acquired incomplete feedstock was not resumed first")
+	}
+	newID := parser.FeedstockID("claude", "resume", "turn-2")
+	if _, _, err := dataStore.FindFeedstock(newID); err == nil {
+		t.Fatal("new turn displaced a previously acquired incomplete feedstock")
 	}
 }
 
@@ -227,10 +333,9 @@ func TestCollectFilesRejectsConflictingOrInvalidScopeOptions(t *testing.T) {
 	}
 	now := time.Now()
 	tests := []Options{
-		{Paths: []string{path}, All: true},
 		{Paths: []string{path}, Sources: []string{"claude"}},
 		{Sources: []string{"other"}},
-		{All: true, ModifiedSince: &now},
+		{MaxTurns: -1},
 	}
 	for _, options := range tests {
 		if _, err := collectFiles(config.Config{}, options, now); err == nil {
@@ -772,7 +877,9 @@ func TestAnnotationPromptMarksMissingAssistantResponse(t *testing.T) {
 
 func TestSummaryUsesMastersAddedJSONName(t *testing.T) {
 	data, err := json.Marshal(Summary{
-		MastersAdded: 2,
+		TurnsSelected: 3,
+		TurnsPending:  7,
+		MastersAdded:  2,
 		Usage: llm.NewUsageReport("api", "priced-model", llm.Usage{
 			InputTokens:           100,
 			CachedInputTokens:     30,
@@ -783,7 +890,9 @@ func TestSummaryUsesMastersAddedJSONName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `"masters_added":2`) ||
+	if !strings.Contains(string(data), `"turns_selected":3`) ||
+		!strings.Contains(string(data), `"turns_pending":7`) ||
+		!strings.Contains(string(data), `"masters_added":2`) ||
 		strings.Contains(string(data), "masters_pending_added") {
 		t.Fatalf("summary JSON = %s", data)
 	}

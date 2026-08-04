@@ -28,6 +28,8 @@ const annotationContextAssistantLimitBytes = 4_000
 const annotationContextAssistantTruncatedMarker = "\n[adjacent assistant response truncated]\n"
 
 type Summary struct {
+	TurnsSelected             int                  `json:"turns_selected"`
+	TurnsPending              int                  `json:"turns_pending"`
 	FeedstocksAcquired        int                  `json:"feedstocks_acquired"`
 	FeedstocksSummarized      int                  `json:"feedstocks_summarized"`
 	FeedstocksAnnotated       int                  `json:"feedstocks_annotated"`
@@ -106,18 +108,18 @@ func (service Service) RunWithOptions(
 		return Summary{}, err
 	}
 	diagnostic.Add(&summary.Warnings, display, warnings...)
-	existingIDs := make(map[string]struct{}, len(existingFeedstocks))
+	existingByID := make(map[string]domain.Feedstock, len(existingFeedstocks))
 	for _, feedstock := range existingFeedstocks {
-		existingIDs[feedstock.ID] = struct{}{}
+		existingByID[feedstock.ID] = feedstock
 	}
 	files, err := service.Sources.Collect(service.Settings.Sources, options, time.Now())
 	if err != nil {
 		return Summary{}, err
 	}
-	selectedIDs := make(map[string]struct{})
+	var allCandidates []domain.FeedstockCandidate
+	candidateIDs := make(map[string]struct{})
 	sourceCandidates := make(map[string][]domain.FeedstockCandidate)
 	display.Start(fmt.Sprintf("Acquiring · 0/%d sources · 0 feedstocks", len(files)))
-	repositoryCache := map[string]string{}
 	sourcesProcessed := 0
 	updateAcquisition := func() {
 		sourcesProcessed++
@@ -130,13 +132,13 @@ func (service Service) RunWithOptions(
 	}
 	for _, input := range files {
 		display.Verbosef("Acquiring %s", input.Path)
-		candidates, warnings, err := service.Sources.Parse(input)
+		parsedCandidates, warnings, err := service.Sources.Parse(input)
 		if err != nil {
 			return summary, err
 		}
 		diagnostic.Add(&summary.Warnings, display, warnings...)
-		for index := range candidates {
-			candidate := &candidates[index]
+		for index := range parsedCandidates {
+			candidate := parsedCandidates[index]
 			if strings.HasPrefix(candidate.TurnID, "record-") {
 				dialogue, extractErr := service.Sources.ExtractTurn(input, candidate.TurnID)
 				if extractErr != nil || !slices.Equal(dialogue, candidate.Dialogue) {
@@ -150,36 +152,52 @@ func (service Service) RunWithOptions(
 					continue
 				}
 			}
-			selectedIDs[candidate.ID] = struct{}{}
-			if _, exists := existingIDs[candidate.ID]; exists {
+			sourceCandidates[candidate.ID] = parsedCandidates
+			if _, duplicate := candidateIDs[candidate.ID]; duplicate {
 				continue
 			}
-			cacheKey := candidate.Repo + "\x1f" + candidate.CWD
-			if cachedRepo, ok := repositoryCache[cacheKey]; ok {
-				candidate.Repo = cachedRepo
-			} else if _, warnings, err := ensureRepositorySubject(
-				ctx, dataStore, service.Sources, candidate,
-			); err != nil {
-				diagnostic.Add(&summary.Warnings, display, warnings...)
-				return summary, err
-			} else {
-				diagnostic.Add(&summary.Warnings, display, warnings...)
-				repositoryCache[cacheKey] = candidate.Repo
-			}
-			feedstock := feedstockFromCandidate(*candidate)
-			if err := dataStore.WithLock(ctx, func() error {
-				return dataStore.WriteFeedstock(feedstock)
-			}); err != nil {
-				return summary, fmt.Errorf("write unannotated feedstock %s: %w", candidate.ID, err)
-			}
-			summary.FeedstocksAcquired++
-			existingIDs[candidate.ID] = struct{}{}
-		}
-		for _, candidate := range candidates {
-			sourceCandidates[candidate.ID] = candidates
+			candidateIDs[candidate.ID] = struct{}{}
+			allCandidates = append(allCandidates, candidate)
 		}
 		updateAcquisition()
 	}
+	selected := selectUnfinishedCandidates(allCandidates, existingByID, options.MaxTurns)
+	selectedIDs := make(map[string]struct{}, len(selected))
+	repositoryCache := map[string]string{}
+	for index := range selected {
+		candidate := &selected[index]
+		selectedIDs[candidate.ID] = struct{}{}
+		if _, exists := existingByID[candidate.ID]; exists {
+			continue
+		}
+		cacheKey := candidate.Repo + "\x1f" + candidate.CWD
+		if cachedRepo, ok := repositoryCache[cacheKey]; ok {
+			candidate.Repo = cachedRepo
+		} else if _, warnings, err := ensureRepositorySubject(
+			ctx, dataStore, service.Sources, candidate,
+		); err != nil {
+			diagnostic.Add(&summary.Warnings, display, warnings...)
+			return summary, err
+		} else {
+			diagnostic.Add(&summary.Warnings, display, warnings...)
+			repositoryCache[cacheKey] = candidate.Repo
+		}
+		feedstock := feedstockFromCandidate(*candidate)
+		if err := dataStore.WithLock(ctx, func() error {
+			return dataStore.WriteFeedstock(feedstock)
+		}); err != nil {
+			return summary, fmt.Errorf("write unannotated feedstock %s: %w", candidate.ID, err)
+		}
+		summary.FeedstocksAcquired++
+		existingByID[candidate.ID] = feedstock
+		display.Update(fmt.Sprintf(
+			"Acquiring · %d/%d sources · %d feedstocks",
+			sourcesProcessed,
+			len(files),
+			summary.FeedstocksAcquired,
+		))
+	}
+	summary.TurnsSelected = len(selected)
 	display.Complete(fmt.Sprintf(
 		"Acquisition complete · %d feedstocks from %d sources",
 		summary.FeedstocksAcquired,
@@ -309,7 +327,59 @@ func (service Service) RunWithOptions(
 			)
 		}
 	}
+	feedstocks, warnings, err = dataStore.ListFeedstocks()
+	diagnostic.Add(&summary.Warnings, display, warnings...)
+	if err != nil {
+		return summary, err
+	}
+	summary.TurnsPending = countPendingTurns(allCandidates, feedstocks)
 	return summary, nil
+}
+
+func selectUnfinishedCandidates(
+	candidates []domain.FeedstockCandidate,
+	existing map[string]domain.Feedstock,
+	limit int,
+) []domain.FeedstockCandidate {
+	resumable := make([]domain.FeedstockCandidate, 0)
+	unacquired := make([]domain.FeedstockCandidate, 0)
+	for _, candidate := range candidates {
+		feedstock, exists := existing[candidate.ID]
+		switch {
+		case exists && feedstock.AnnotatedAt == nil:
+			resumable = append(resumable, candidate)
+		case !exists:
+			unacquired = append(unacquired, candidate)
+		}
+	}
+	newestFirst := func(left, right domain.FeedstockCandidate) int {
+		if compared := right.Timestamp.Compare(left.Timestamp); compared != 0 {
+			return compared
+		}
+		return strings.Compare(left.ID, right.ID)
+	}
+	slices.SortFunc(resumable, newestFirst)
+	slices.SortFunc(unacquired, newestFirst)
+	selected := append(resumable, unacquired...)
+	if limit > 0 && len(selected) > limit {
+		selected = selected[:limit]
+	}
+	return selected
+}
+
+func countPendingTurns(candidates []domain.FeedstockCandidate, feedstocks []domain.Feedstock) int {
+	existing := make(map[string]domain.Feedstock, len(feedstocks))
+	for _, feedstock := range feedstocks {
+		existing[feedstock.ID] = feedstock
+	}
+	pending := 0
+	for _, candidate := range candidates {
+		feedstock, exists := existing[candidate.ID]
+		if !exists || feedstock.AnnotatedAt == nil {
+			pending++
+		}
+	}
+	return pending
 }
 
 func withKnowledgeTypes(ctx context.Context, dataStore Repository) (context.Context, error) {

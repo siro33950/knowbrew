@@ -719,6 +719,49 @@ func TestRunProcessesAssertionsOnceAndReportsAssertionProgress(t *testing.T) {
 	}
 }
 
+func TestRunMaxProcessesBoundedAssertionsAndReportsBacklog(t *testing.T) {
+	dataStore := newBrewStore(t)
+	oldest := writeAssertionFeedstock(t, dataStore, "fs-max-old", time.Now().Add(-time.Hour).UTC(), []domain.Assertion{
+		testAssertion("as-max-old", "knowbrew", "Brew limits work by assertion."),
+	})
+	newest := writeAssertionFeedstock(t, dataStore, "fs-max-new", time.Now().UTC(), []domain.Assertion{
+		testAssertion("as-max-new", "knowbrew", "A later assertion remains pending."),
+	})
+	cfg := testConfig(dataStore.Root)
+	first, err := runWithOptionsForTest(
+		context.Background(), cfg,
+		resolvingRunner{store: dataStore}, nil, Options{Max: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.AssertionsSelected != 1 || first.AssertionsProcessed != 1 || first.AssertionsPending != 1 {
+		t.Fatalf("first summary = %#v", first)
+	}
+	oldestAfter, _, err := dataStore.FindFeedstock(oldest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newestAfter, _, err := dataStore.FindFeedstock(newest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldestAfter.BrewedAt == nil || newestAfter.BrewedAt != nil {
+		t.Fatalf("oldest brewed_at = %v, newest brewed_at = %v", oldestAfter.BrewedAt, newestAfter.BrewedAt)
+	}
+
+	second, err := runWithOptionsForTest(
+		context.Background(), cfg,
+		resolvingRunner{store: dataStore}, nil, Options{Max: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.AssertionsSelected != 1 || second.AssertionsProcessed != 1 || second.AssertionsPending != 0 {
+		t.Fatalf("second summary = %#v", second)
+	}
+}
+
 func TestRunRequiresPreBrewIndexSyncAndTreatsPostSyncAsWarning(t *testing.T) {
 	t.Run("pre-sync failure stops brew", func(t *testing.T) {
 		dataStore := newBrewStore(t)

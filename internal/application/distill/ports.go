@@ -30,6 +30,17 @@ type Settings struct {
 type Options struct {
 	Subject  string
 	Template string
+	Max      int
+}
+
+type CursorPosition struct {
+	Subject  string `json:"subject"`
+	Template string `json:"template"`
+}
+
+type Cursor interface {
+	Load() (CursorPosition, bool, error)
+	Save(CursorPosition) error
 }
 
 type RunLock interface {
@@ -52,6 +63,7 @@ type Service struct {
 	Runner     agent.Runner
 	Progress   Progress
 	RunLock    RunLock
+	Cursor     Cursor
 }
 
 type silentProgress struct{}

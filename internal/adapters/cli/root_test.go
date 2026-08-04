@@ -100,18 +100,46 @@ func TestDrawAndBrewExposeVerboseFlag(t *testing.T) {
 
 func TestDistillExposesDocumentFilters(t *testing.T) {
 	command := newDistillCommand()
-	for _, name := range []string{"subject", "template", "verbose"} {
+	for _, name := range []string{"subject", "template", "max", "verbose"} {
 		if command.Flags().Lookup(name) == nil {
 			t.Fatalf("distill has no --%s flag", name)
 		}
 	}
 }
 
+func TestDrawBrewAndDistillExposeCommonMaxFlag(t *testing.T) {
+	for _, command := range []*cobra.Command{newDrawCommand(), newBrewCommand(), newDistillCommand()} {
+		if command.Flags().Lookup("max") == nil {
+			t.Fatalf("%s has no --max flag", command.Name())
+		}
+	}
+}
+
 func TestDrawExposesBoundedSourceSelectionFlags(t *testing.T) {
 	command := newDrawCommand()
-	for _, name := range []string{"all", "source", "since", "until"} {
+	for _, name := range []string{"max", "source", "since", "until"} {
 		if command.Flags().Lookup(name) == nil {
 			t.Fatalf("draw has no --%s flag", name)
+		}
+	}
+	if command.Flags().Lookup("all") != nil {
+		t.Fatal("draw still exposes unsafe --all flag")
+	}
+	if command.Flags().Lookup("max-turns") != nil {
+		t.Fatal("draw still exposes legacy --max-turns flag")
+	}
+}
+
+func TestCommandsRejectNonPositiveMax(t *testing.T) {
+	commands := []string{"draw", "brew", "distill"}
+	for _, value := range []string{"0", "-1"} {
+		for _, name := range commands {
+			command := newRootCommand()
+			command.SetArgs([]string{name, "--max", value})
+			err := command.Execute()
+			if err == nil || err.Error() != "--max must be greater than zero" {
+				t.Fatalf("%s --max %s error = %v", name, value, err)
+			}
 		}
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/siro33950/knowbrew/internal/adapters/progress"
 	"github.com/siro33950/knowbrew/internal/adapters/query"
 	"github.com/siro33950/knowbrew/internal/adapters/runlock"
+	"github.com/siro33950/knowbrew/internal/adapters/runstate"
 	"github.com/siro33950/knowbrew/internal/adapters/setup"
 	sourceadapter "github.com/siro33950/knowbrew/internal/adapters/source"
 	"github.com/siro33950/knowbrew/internal/application/brew"
@@ -79,7 +80,7 @@ func newInitCommand() *cobra.Command {
 func newDrawCommand() *cobra.Command {
 	var (
 		verbose bool
-		all     bool
+		maximum int
 		sources []string
 		since   string
 		until   string
@@ -90,7 +91,13 @@ func newDrawCommand() *cobra.Command {
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(command *cobra.Command, paths []string) error {
 			now := time.Now()
-			options := draw.Options{Paths: paths, All: all, Sources: sources}
+			options := draw.Options{Paths: paths, Sources: sources}
+			if command.Flags().Changed("max") {
+				if maximum < 1 {
+					return errors.New("--max must be greater than zero")
+				}
+				options.MaxTurns = maximum
+			}
 			if command.Flags().Changed("since") {
 				value, err := parseDrawBoundary(since, now)
 				if err != nil {
@@ -132,7 +139,7 @@ func newDrawCommand() *cobra.Command {
 		},
 	}
 	command.Flags().BoolVar(&verbose, "verbose", false, "Stream agent output and per-record progress")
-	command.Flags().BoolVar(&all, "all", false, "Scan all configured session logs")
+	command.Flags().IntVar(&maximum, "max", 0, "Process at most N unfinished turns across all history")
 	command.Flags().StringSliceVar(&sources, "source", nil, "Limit configured sources to claude or codex")
 	command.Flags().StringVar(&since, "since", "", "Use logs modified since a duration ago or timestamp")
 	command.Flags().StringVar(&until, "until", "", "Use logs modified until a duration ago or timestamp")
@@ -190,12 +197,22 @@ func parseDrawBoundary(value string, now time.Time) (time.Time, error) {
 }
 
 func newBrewCommand() *cobra.Command {
-	var verbose bool
+	var (
+		verbose bool
+		maximum int
+	)
 	command := &cobra.Command{
 		Use:   "brew",
 		Short: "Brew unresolved subjectful assertions into pending knowledge",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
+			options := brew.Options{}
+			if command.Flags().Changed("max") {
+				if maximum < 1 {
+					return errors.New("--max must be greater than zero")
+				}
+				options.Max = maximum
+			}
 			display := progressDisplay(verbose)
 			cfg, runner, err := loadRunner(verbose)
 			if err != nil {
@@ -226,7 +243,7 @@ func newBrewCommand() *cobra.Command {
 				},
 				SearchIndex: index,
 			}
-			summary, err := service.Run(command.Context())
+			summary, err := service.RunWithOptions(command.Context(), options)
 			closeErr := index.Close()
 			if err != nil {
 				display.Abort()
@@ -238,6 +255,7 @@ func newBrewCommand() *cobra.Command {
 			return writeJSON(os.Stdout, summary)
 		},
 	}
+	command.Flags().IntVar(&maximum, "max", 0, "Process at most N unresolved assertions")
 	command.Flags().BoolVar(&verbose, "verbose", false, "Stream agent output and per-record progress")
 	return command
 }
@@ -245,11 +263,15 @@ func newBrewCommand() *cobra.Command {
 func newDistillCommand() *cobra.Command {
 	var verbose bool
 	var subject, template string
+	var maximum int
 	command := &cobra.Command{
 		Use:   "distill",
 		Short: "Regenerate Subject documents from approved current Knowledge",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
+			if command.Flags().Changed("max") && maximum < 1 {
+				return errors.New("--max must be greater than zero")
+			}
 			display := progressDisplay(verbose)
 			cfg, runner, err := loadRunner(verbose)
 			if err != nil {
@@ -272,9 +294,12 @@ func newDistillCommand() *cobra.Command {
 					Path: filepath.Join(cfg.Root, ".knowbrew", "state", "distill.lock"),
 					Name: "distill",
 				},
+				Cursor: runstate.DistillCursor{
+					Path: filepath.Join(cfg.Root, ".knowbrew", "state", "distill-cursor.json"),
+				},
 			}
 			summary, err := service.Run(command.Context(), distill.Options{
-				Subject: subject, Template: template,
+				Subject: subject, Template: template, Max: maximum,
 			})
 			if err != nil {
 				display.Abort()
@@ -285,6 +310,7 @@ func newDistillCommand() *cobra.Command {
 	}
 	command.Flags().StringVar(&subject, "subject", "", "Limit distillation to one Subject")
 	command.Flags().StringVar(&template, "template", "", "Limit distillation to one assigned Template")
+	command.Flags().IntVar(&maximum, "max", 0, "Process at most N Subject documents")
 	command.Flags().BoolVar(&verbose, "verbose", false, "Stream agent output and per-document progress")
 	return command
 }

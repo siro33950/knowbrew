@@ -22,7 +22,7 @@ type File struct {
 
 type Selection struct {
 	Paths         []string
-	All           bool
+	MaxTurns      int
 	Sources       []string
 	ModifiedSince *time.Time
 	ModifiedUntil *time.Time

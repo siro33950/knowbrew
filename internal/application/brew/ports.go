@@ -34,6 +34,10 @@ type Settings struct {
 	Model        string
 }
 
+type Options struct {
+	Max int
+}
+
 type DialogueReader interface {
 	Read(string) ([]domain.DialogueMessage, error)
 }

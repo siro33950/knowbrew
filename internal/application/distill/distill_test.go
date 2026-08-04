@@ -124,6 +124,23 @@ func (fakeRunLock) Lock(context.Context) (func() error, error) {
 	return func() error { return nil }, nil
 }
 
+type fakeCursor struct {
+	position CursorPosition
+	exists   bool
+	saves    []CursorPosition
+}
+
+func (cursor *fakeCursor) Load() (CursorPosition, bool, error) {
+	return cursor.position, cursor.exists, nil
+}
+
+func (cursor *fakeCursor) Save(position CursorPosition) error {
+	cursor.position = position
+	cursor.exists = true
+	cursor.saves = append(cursor.saves, position)
+	return nil
+}
+
 type runnerCall struct {
 	task   agent.Task
 	prompt string
@@ -251,6 +268,105 @@ func TestRunSeparatesSelectionAndGenerationAndPersistsOnlyUsedKnowledge(t *testi
 	}
 	if summary.DocumentsUpdated != 1 || summary.KnowledgeSelected != 1 || summary.KnowledgeUsed != 1 {
 		t.Fatalf("summary = %#v", summary)
+	}
+}
+
+func TestRunMaxContinuesFromCursorAcrossDocuments(t *testing.T) {
+	concept := testTemplate()
+	reference := testTemplate()
+	reference.Name = "reference"
+	reference.Output = "reference.md"
+	repository := &fakeRepository{
+		subjects: []domain.MasterEntry{{
+			Name: "knowbrew", Documents: []string{"concept", "reference"},
+		}},
+		templates: []domain.DocumentTemplate{concept, reference},
+		knowledge: []storage.KnowledgeDocument{
+			testKnowledge("kn-0000000000000001", "knowbrew", "Evidence.", true),
+		},
+	}
+	runner := &fakeRunner{outputs: map[agent.Task][]json.RawMessage{
+		agent.TaskDistillSelect: {
+			json.RawMessage(`{"knowledge_references":["K001"]}`),
+			json.RawMessage(`{"knowledge_references":["K001"]}`),
+		},
+		agent.TaskDistillGenerate: {
+			json.RawMessage(`{"body":"# Concept","knowledge_references":["K001"]}`),
+			json.RawMessage(`{"body":"# Reference","knowledge_references":["K001"]}`),
+		},
+	}}
+	cursor := &fakeCursor{}
+	service := Service{
+		Repository: repository, Lifecycle: repository, Runner: runner,
+		RunLock: fakeRunLock{}, Cursor: cursor,
+	}
+
+	first, err := service.Run(context.Background(), Options{Max: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.DocumentsAvailable != 2 || first.DocumentsSelected != 1 ||
+		first.DocumentsPlanned != 1 || len(repository.writes) != 1 ||
+		repository.writes[0].Template != "concept" {
+		t.Fatalf("first summary = %#v, writes = %#v", first, repository.writes)
+	}
+	if cursor.position != (CursorPosition{Subject: "knowbrew", Template: "concept"}) {
+		t.Fatalf("first cursor = %#v", cursor.position)
+	}
+
+	second, err := service.Run(context.Background(), Options{Max: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.DocumentsAvailable != 2 || second.DocumentsSelected != 1 ||
+		len(repository.writes) != 2 || repository.writes[1].Template != "reference" {
+		t.Fatalf("second summary = %#v, writes = %#v", second, repository.writes)
+	}
+	if cursor.position != (CursorPosition{Subject: "knowbrew", Template: "reference"}) {
+		t.Fatalf("second cursor = %#v", cursor.position)
+	}
+}
+
+func TestRunMaxAdvancesCursorPastFailedDocument(t *testing.T) {
+	template := testTemplate()
+	repository := &fakeRepository{
+		subjects: []domain.MasterEntry{
+			{Name: "broken", Documents: []string{"missing"}},
+			{Name: "knowbrew", Documents: []string{"concept"}},
+		},
+		templates: []domain.DocumentTemplate{template},
+		knowledge: []storage.KnowledgeDocument{
+			testKnowledge("kn-0000000000000001", "knowbrew", "Evidence.", true),
+		},
+	}
+	runner := &fakeRunner{outputs: map[agent.Task][]json.RawMessage{
+		agent.TaskDistillSelect: {
+			json.RawMessage(`{"knowledge_references":["K001"]}`),
+		},
+		agent.TaskDistillGenerate: {
+			json.RawMessage(`{"body":"# Concept","knowledge_references":["K001"]}`),
+		},
+	}}
+	cursor := &fakeCursor{}
+	service := Service{
+		Repository: repository, Lifecycle: repository, Runner: runner,
+		RunLock: fakeRunLock{}, Cursor: cursor,
+	}
+
+	first, err := service.Run(context.Background(), Options{Max: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.DocumentsFailed != 1 || cursor.position.Subject != "broken" {
+		t.Fatalf("first summary = %#v, cursor = %#v", first, cursor.position)
+	}
+	second, err := service.Run(context.Background(), Options{Max: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.DocumentsCreated != 1 || len(repository.writes) != 1 ||
+		repository.writes[0].Subject != "knowbrew" {
+		t.Fatalf("second summary = %#v, writes = %#v", second, repository.writes)
 	}
 }
 
