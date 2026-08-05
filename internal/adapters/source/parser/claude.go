@@ -1,11 +1,9 @@
 package parser
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -14,6 +12,13 @@ import (
 )
 
 type Claude struct{}
+
+type claudeParserState struct {
+	Sequence        int64                   `json:"sequence"`
+	OwnerSessionID  string                  `json:"owner_session_id"`
+	OwnerIdentified bool                    `json:"owner_identified"`
+	Assembler       turnAssemblerCheckpoint `json:"assembler"`
+}
 
 type claudeRecord struct {
 	Type                      string        `json:"type"`
@@ -40,211 +45,234 @@ type claudeBlock struct {
 	Text string `json:"text"`
 }
 
+var ignoredClaudeRecordTypes = map[string]struct{}{
+	"attachment": {}, "custom-title": {}, "file-history-snapshot": {},
+	"last-prompt": {}, "mode": {}, "permission-mode": {}, "pr-link": {},
+	"progress": {}, "queue-operation": {}, "result": {}, "started": {},
+	"system": {},
+}
+
+var knownClaudeBlockTypes = map[string]struct{}{
+	"fallback": {}, "image": {}, "text": {}, "thinking": {},
+	"tool_result": {}, "tool_use": {},
+}
+
 func (Claude) SessionID(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("open Claude log %s: %w", path, err)
-	}
-	defer func() { _ = file.Close() }()
 	fallback := sessionIDFromPath(path)
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
-	for scanner.Scan() {
+	found := ""
+	err := scanSnapshot(path, func(_ int, raw []byte) (bool, error) {
 		var record claudeRecord
-		if json.Unmarshal(scanner.Bytes(), &record) != nil {
-			continue
+		if err := json.Unmarshal(raw, &record); err != nil {
+			return false, fmt.Errorf("decode Claude record: %w", err)
 		}
 		if record.SessionID != "" {
-			return record.SessionID, nil
+			found = record.SessionID
+			return false, nil
 		}
-	}
-	if err := scanner.Err(); err != nil {
+		return true, nil
+	})
+	if err != nil {
 		return "", fmt.Errorf("scan Claude log %s: %w", path, err)
+	}
+	if found != "" {
+		return found, nil
 	}
 	return fallback, nil
 }
 
 func (Claude) Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warning, error) {
-	file, err := os.Open(path)
+	return parseClaude(path, false)
+}
+
+func (Claude) ParseIncremental(
+	path string,
+	checkpoint *Checkpoint,
+) (IncrementalResult, []diagnostic.Warning, error) {
+	position := scanPosition{}
+	sequence := int64(0)
+	ownerSessionID := sessionIDFromPath(path)
+	ownerIdentified := false
+	assembler := newTurnAssemblerWithSequence("claude", sessionIDFromPath(path), &sequence)
+	if checkpoint != nil {
+		position = scanPosition{
+			Offset: checkpoint.Offset, Line: checkpoint.Line, SnapshotSize: checkpoint.SnapshotSize,
+		}
+		var state claudeParserState
+		if err := json.Unmarshal(checkpoint.State, &state); err != nil {
+			return IncrementalResult{}, nil, fmt.Errorf("restore Claude parser checkpoint: %w", err)
+		}
+		sequence = state.Sequence
+		ownerSessionID = state.OwnerSessionID
+		ownerIdentified = state.OwnerIdentified
+		assembler = restoreTurnAssembler(state.Assembler, &sequence)
+	}
+	end, err := scanSnapshotFrom(path, position, MaxJSONLRecordBytes, func(_ int, raw []byte) (bool, error) {
+		events, err := decodeClaudeRecord(raw)
+		if err != nil {
+			return false, err
+		}
+		for _, event := range events {
+			if !ownerIdentified && event.Kind == eventUserMessage && event.SessionID != "" {
+				ownerSessionID = event.SessionID
+				ownerIdentified = true
+			}
+			if err := assembler.Apply(event); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("open Claude log %s: %w", path, err)
+		return IncrementalResult{}, nil, fmt.Errorf("parse Claude log %s: %w", path, err)
 	}
-	defer func() { _ = file.Close() }()
+	assembler.FlushCompleted()
+	state, err := json.Marshal(claudeParserState{
+		Sequence: sequence, OwnerSessionID: ownerSessionID,
+		OwnerIdentified: ownerIdentified, Assembler: assembler.checkpoint(),
+	})
+	if err != nil {
+		return IncrementalResult{}, nil, fmt.Errorf("save Claude parser checkpoint: %w", err)
+	}
+	candidates := assembler.Drain()
+	setSourceOwner(candidates, ownerSessionID)
+	return IncrementalResult{
+		Candidates: candidates,
+		Checkpoint: Checkpoint{
+			Offset: end.Offset, Line: end.Line, SnapshotSize: end.SnapshotSize, State: state,
+		},
+	}, nil, nil
+}
 
-	sessionID := sessionIDFromPath(path)
-	var candidates []domain.FeedstockCandidate
-	var warnings []diagnostic.Warning
-	var current *domain.FeedstockCandidate
-	var currentComplete bool
-
-	flush := func() {
-		if current == nil {
-			return
+func parseClaude(
+	path string,
+	includeOpen bool,
+) ([]domain.FeedstockCandidate, []diagnostic.Warning, error) {
+	assembler := newTurnAssembler("claude", sessionIDFromPath(path))
+	ownerSessionID := sessionIDFromPath(path)
+	ownerIdentified := false
+	err := scanSnapshot(path, func(_ int, raw []byte) (bool, error) {
+		events, err := decodeClaudeRecord(raw)
+		if err != nil {
+			return false, err
 		}
-		if currentComplete {
-			candidates = append(candidates, *current)
+		for _, event := range events {
+			if !ownerIdentified && event.Kind == eventUserMessage && event.SessionID != "" {
+				ownerSessionID = event.SessionID
+				ownerIdentified = true
+			}
+			if err := assembler.Apply(event); err != nil {
+				return false, err
+			}
 		}
-		current = nil
-		currentComplete = false
+		return true, nil
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse Claude log %s: %w", path, err)
 	}
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
-	line := 0
-	for scanner.Scan() {
-		line++
-		var record claudeRecord
-		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
-			warnings = append(warnings, diagnostic.FromError(
-				fmt.Sprintf("%s:%d", path, line),
-				fmt.Errorf("decode Claude record: %w", err),
-			))
-			continue
-		}
-		if record.SessionID != "" {
-			sessionID = record.SessionID
-		}
-		if current != nil && isClaudeSyntheticQuoteRecord(record) {
-			currentComplete = true
-			continue
-		}
-		if isClaudeHumanMessage(record) {
-			quote, err := claudeText(record.Message.Content)
-			if err != nil {
-				warnings = append(warnings, diagnostic.FromError(
-					fmt.Sprintf("%s:%d", path, line),
-					fmt.Errorf("decode user content: %w", err),
-				))
-				continue
-			}
-			if strings.TrimSpace(quote) == "" || isClaudeSyntheticQuote(quote) {
-				continue
-			}
-			if current != nil {
-				currentComplete = true
-			}
-			flush()
-			timestamp, err := time.Parse(time.RFC3339Nano, record.Timestamp)
-			if err != nil {
-				warnings = append(warnings, diagnostic.FromError(
-					fmt.Sprintf("%s:%d", path, line),
-					fmt.Errorf("parse timestamp: %w", err),
-				))
-				continue
-			}
-			turnID := sourceTurnID(record.UUID, scanner.Bytes())
-			current = &domain.FeedstockCandidate{
-				ID:        FeedstockID("claude", sessionID, turnID),
-				TurnID:    turnID,
-				Session:   domain.SessionRef{ID: sessionID},
-				Timestamp: timestamp,
-				Agent:     "claude",
-				CWD:       record.CWD,
-				Branch:    record.GitBranch,
-				Dialogue:  []domain.DialogueMessage{{Role: "user", Content: quote}},
-			}
-			continue
-		}
-		if current == nil || record.IsSidechain {
-			continue
-		}
-		if record.CWD != "" {
-			current.CWD = record.CWD
-		}
-		if record.GitBranch != "" {
-			current.Branch = record.GitBranch
-		}
-		if record.Type == "assistant" && record.Message.Role == "assistant" {
-			text, decodeErr := claudeText(record.Message.Content)
-			if decodeErr == nil && strings.TrimSpace(text) != "" {
-				message := domain.DialogueMessage{Role: "assistant", Content: text}
-				if len(current.Dialogue) == 1 {
-					current.Dialogue = append(current.Dialogue, message)
-				} else {
-					current.Dialogue[1] = message
-				}
-			}
-			if record.Message.StopReason == "end_turn" {
-				currentComplete = true
-			}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, warnings, fmt.Errorf("scan Claude log %s: %w", path, err)
-	}
-	flush()
-	return candidates, warnings, nil
+	candidates := assembler.Finish(includeOpen)
+	setSourceOwner(candidates, ownerSessionID)
+	return candidates, nil, nil
 }
 
 func (Claude) ExtractTurn(path, turnID string) ([]domain.DialogueMessage, error) {
-	file, err := os.Open(path)
+	candidates, _, err := parseClaude(path, true)
 	if err != nil {
-		return nil, fmt.Errorf("open Claude log %s: %w", path, err)
+		return nil, err
 	}
-	defer func() { _ = file.Close() }()
-
-	var userText, finalAssistantText string
-	found := false
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
-	for scanner.Scan() {
-		var record claudeRecord
-		if json.Unmarshal(scanner.Bytes(), &record) != nil {
-			continue
-		}
-		if isClaudeHumanMessage(record) {
-			quote, decodeErr := claudeText(record.Message.Content)
-			if decodeErr == nil && strings.TrimSpace(quote) != "" && !isClaudeSyntheticQuote(quote) {
-				recordTurnID := sourceTurnID(record.UUID, scanner.Bytes())
-				if found {
-					break
-				}
-				if recordTurnID == turnID {
-					found = true
-					userText = quote
-				}
-				continue
-			}
-		}
-		if !found || record.IsSidechain ||
-			record.Type != "assistant" || record.Message.Role != "assistant" {
-			continue
-		}
-		text, decodeErr := claudeText(record.Message.Content)
-		if decodeErr == nil && strings.TrimSpace(text) != "" {
-			finalAssistantText = text
+	for _, candidate := range candidates {
+		if candidate.TurnID == turnID {
+			return candidate.Dialogue, nil
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan Claude log %s: %w", path, err)
-	}
-	if !found {
-		return nil, fmt.Errorf("source turn %s was not found in Claude log %s", turnID, path)
-	}
-	messages := []domain.DialogueMessage{{Role: "user", Content: userText}}
-	if strings.TrimSpace(finalAssistantText) != "" {
-		messages = append(messages, domain.DialogueMessage{
-			Role: "assistant", Content: finalAssistantText,
-		})
-	}
-	return messages, nil
+	return nil, fmt.Errorf("source turn %s was not found in Claude log %s", turnID, path)
 }
 
-func isClaudeHumanMessage(record claudeRecord) bool {
-	if record.Type != "user" || record.Message.Role != "user" ||
-		record.IsMeta || record.IsSidechain ||
-		record.IsCompactSummary || record.IsVisibleInTranscriptOnly {
-		return false
+func decodeClaudeRecord(raw []byte) ([]sourceEvent, error) {
+	var record claudeRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return nil, fmt.Errorf("decode Claude record: %w", err)
+	}
+	if record.Type == "" {
+		return nil, fmt.Errorf("Claude record has no type")
+	}
+	switch record.Type {
+	case "user":
+		return decodeClaudeUser(record, raw)
+	case "assistant":
+		return decodeClaudeAssistant(record)
+	default:
+		if _, ignored := ignoredClaudeRecordTypes[record.Type]; ignored {
+			return []sourceEvent{{Kind: eventIgnored}}, nil
+		}
+		return nil, fmt.Errorf("unknown Claude record type %q", record.Type)
+	}
+}
+
+func decodeClaudeUser(record claudeRecord, raw []byte) ([]sourceEvent, error) {
+	if record.Message.Role != "user" {
+		return nil, fmt.Errorf("Claude user record has role %q", record.Message.Role)
+	}
+	if record.IsMeta || record.IsSidechain || record.IsCompactSummary ||
+		record.IsVisibleInTranscriptOnly {
+		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
 	blocks, err := claudeBlocks(record.Message.Content)
-	if err == nil && len(blocks) > 0 {
-		for _, block := range blocks {
-			if block.Type == "tool_result" {
-				return false
-			}
+	if err != nil {
+		return nil, fmt.Errorf("decode Claude user content: %w", err)
+	}
+	for _, block := range blocks {
+		if _, known := knownClaudeBlockTypes[block.Type]; !known {
+			return nil, fmt.Errorf("unknown Claude user content block %q", block.Type)
+		}
+		if block.Type == "tool_result" {
+			return []sourceEvent{{Kind: eventIgnored}}, nil
 		}
 	}
-	return true
+	text, err := claudeText(record.Message.Content)
+	if err != nil {
+		return nil, fmt.Errorf("decode Claude user text: %w", err)
+	}
+	if isClaudeSyntheticQuote(text) {
+		return []sourceEvent{{Kind: eventTurnCompleted}}, nil
+	}
+	if strings.TrimSpace(text) == "" {
+		return []sourceEvent{{Kind: eventIgnored}}, nil
+	}
+	timestamp, err := time.Parse(time.RFC3339Nano, record.Timestamp)
+	if err != nil {
+		return nil, fmt.Errorf("parse Claude user timestamp: %w", err)
+	}
+	return []sourceEvent{{
+		Kind: eventUserMessage, SessionID: record.SessionID,
+		TurnID: sourceTurnID(record.UUID, raw), Timestamp: timestamp,
+		CWD: record.CWD, Branch: record.GitBranch, Text: text,
+	}}, nil
+}
+
+func decodeClaudeAssistant(record claudeRecord) ([]sourceEvent, error) {
+	if record.Message.Role != "assistant" {
+		return nil, fmt.Errorf("Claude assistant record has role %q", record.Message.Role)
+	}
+	if record.IsSidechain {
+		return []sourceEvent{{Kind: eventIgnored}}, nil
+	}
+	blocks, err := claudeBlocks(record.Message.Content)
+	if err != nil {
+		return nil, fmt.Errorf("decode Claude assistant content: %w", err)
+	}
+	for _, block := range blocks {
+		if _, known := knownClaudeBlockTypes[block.Type]; !known {
+			return nil, fmt.Errorf("unknown Claude assistant content block %q", block.Type)
+		}
+	}
+	text, err := claudeText(record.Message.Content)
+	if err != nil {
+		return nil, fmt.Errorf("decode Claude assistant text: %w", err)
+	}
+	return []sourceEvent{{
+		Kind: eventAssistantMessage, Text: text, Priority: assistantFinal,
+		CompletesTurn: record.Message.StopReason == "end_turn",
+	}}, nil
 }
 
 func isClaudeSyntheticQuote(quote string) bool {
@@ -254,14 +282,6 @@ func isClaudeSyntheticQuote(quote string) bool {
 	default:
 		return false
 	}
-}
-
-func isClaudeSyntheticQuoteRecord(record claudeRecord) bool {
-	if record.Type != "user" || record.Message.Role != "user" {
-		return false
-	}
-	quote, err := claudeText(record.Message.Content)
-	return err == nil && isClaudeSyntheticQuote(quote)
 }
 
 func claudeText(raw json.RawMessage) (string, error) {

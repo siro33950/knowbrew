@@ -888,7 +888,11 @@ func TestSummaryUsesMastersAddedJSONName(t *testing.T) {
 	data, err := json.Marshal(Summary{
 		TurnsSelected: 3,
 		TurnsPending:  7,
+		SourcesFailed: 1,
 		MastersAdded:  2,
+		SourceFailures: []SourceFailure{{
+			Path: "/logs/broken.jsonl", Reason: "unknown format",
+		}},
 		Usage: llm.NewUsageReport("api", "priced-model", llm.Usage{
 			InputTokens:           100,
 			CachedInputTokens:     30,
@@ -901,6 +905,8 @@ func TestSummaryUsesMastersAddedJSONName(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"turns_selected":3`) ||
 		!strings.Contains(string(data), `"turns_pending":7`) ||
+		!strings.Contains(string(data), `"sources_failed":1`) ||
+		!strings.Contains(string(data), `"source_failures":[{"path":"/logs/broken.jsonl","reason":"unknown format"}]`) ||
 		!strings.Contains(string(data), `"masters_added":2`) ||
 		strings.Contains(string(data), "masters_pending_added") {
 		t.Fatalf("summary JSON = %s", data)
@@ -1067,6 +1073,34 @@ func TestAnnotationPromptIncludesOnlyThreePriorTurnsWithinSession(t *testing.T) 
 		if strings.Contains(prompt, forbidden) {
 			t.Fatalf("zero-context prompt contains %q:\n%s", forbidden, prompt)
 		}
+	}
+}
+
+func TestAnnotationContextUsesForkAncestorTurnsWithoutCrossingOtherSources(t *testing.T) {
+	base := time.Date(2026, 7, 30, 1, 0, 0, 0, time.UTC)
+	candidates := []domain.FeedstockCandidate{
+		{
+			ID: "parent", Agent: "codex", Session: domain.SessionRef{ID: "parent-session"},
+			SourceOwnerSessionID: "child-session", Timestamp: base,
+			Dialogue: []domain.DialogueMessage{{Role: "user", Content: "parent context"}},
+		},
+		{
+			ID: "target", Agent: "codex", Session: domain.SessionRef{ID: "child-session"},
+			SourceOwnerSessionID: "child-session", Timestamp: base.Add(time.Minute),
+			Dialogue: []domain.DialogueMessage{{Role: "user", Content: "child request"}},
+		},
+		{
+			ID: "unrelated", Agent: "codex", Session: domain.SessionRef{ID: "other-session"},
+			SourceOwnerSessionID: "other-session", Timestamp: base.Add(2 * time.Minute),
+			Dialogue: []domain.DialogueMessage{{Role: "user", Content: "unrelated"}},
+		},
+	}
+	context, err := annotationContextFromCandidates(candidates, "target", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(context.PriorTurns) != 1 || context.PriorTurns[0].UserInput != "parent context" {
+		t.Fatalf("context = %#v", context)
 	}
 }
 
@@ -1652,6 +1686,108 @@ func TestDrawClassifiesAllFeedstocksWithConcurrentWorkers(t *testing.T) {
 		if feedstock.AnnotatedAt == nil {
 			t.Fatalf("feedstock %s remained unannotated", feedstock.ID)
 		}
+	}
+}
+
+func TestDrawContinuesAfterSourceParseFailure(t *testing.T) {
+	root := t.TempDir()
+	dataStore, _ := store.New(root)
+	sourceDir := t.TempDir()
+	validPath := filepath.Join(sourceDir, "valid.jsonl")
+	invalidPath := filepath.Join(sourceDir, "invalid.jsonl")
+	valid := `{"type":"user","uuid":"turn-1","sessionId":"valid-session","timestamp":"2026-07-30T01:02:03Z","message":{"role":"user","content":"valid"}}
+{"type":"assistant","sessionId":"valid-session","timestamp":"2026-07-30T01:02:04Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}
+`
+	if err := os.WriteFile(validPath, []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		invalidPath,
+		[]byte("{\"type\":\"future-conversation-record\"}\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{
+		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
+		LLM: config.LLM{Backend: "claude-cli"}, Draw: config.Draw{Concurrency: 1},
+		Sources: []config.Source{{
+			Agent: "claude", Parser: "claude", Paths: []string{sourceDir},
+		}},
+	}
+	var progress bytes.Buffer
+	summary, err := Run(
+		context.Background(), cfg, nil,
+		annotatingRunner{store: dataStore}, &progress,
+	)
+	var acquisitionErr AcquisitionFailuresError
+	if !errors.As(err, &acquisitionErr) || acquisitionErr.Count != 1 {
+		t.Fatalf("error = %v", err)
+	}
+	if summary.SourcesFailed != 1 || len(summary.SourceFailures) != 1 ||
+		summary.SourceFailures[0].Path != invalidPath ||
+		summary.FeedstocksAcquired != 1 || summary.FeedstocksAnnotated != 1 {
+		t.Fatalf("summary = %#v", summary)
+	}
+	if !strings.Contains(progress.String(), "Acquisition failed · "+invalidPath) {
+		t.Fatalf("progress = %s", progress.String())
+	}
+	feedstocks, warnings, listErr := dataStore.ListFeedstocks()
+	if listErr != nil || len(warnings) != 0 || len(feedstocks) != 1 ||
+		feedstocks[0].Session.ID != "valid-session" {
+		t.Fatalf("feedstocks = %#v, warnings = %#v, error = %v", feedstocks, warnings, listErr)
+	}
+}
+
+func TestDrawRejectsEveryFileInAConflictingLogicalSession(t *testing.T) {
+	root := t.TempDir()
+	dataStore, _ := store.New(root)
+	sourceDir := t.TempDir()
+	for name, quote := range map[string]string{"first.jsonl": "first", "second.jsonl": "second"} {
+		log := fmt.Sprintf(
+			"{\"type\":\"user\",\"uuid\":\"turn-1\",\"sessionId\":\"shared-session\",\"timestamp\":\"2026-07-30T01:02:03Z\",\"message\":{\"role\":\"user\",\"content\":%q}}\n"+
+				"{\"type\":\"assistant\",\"sessionId\":\"shared-session\",\"timestamp\":\"2026-07-30T01:02:04Z\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[]}}\n",
+			quote,
+		)
+		if err := os.WriteFile(filepath.Join(sourceDir, name), []byte(log), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Config{
+		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
+		LLM: config.LLM{Backend: "claude-cli"}, Draw: config.Draw{Concurrency: 1},
+		Sources: []config.Source{{
+			Agent: "claude", Parser: "claude", Paths: []string{sourceDir},
+		}},
+	}
+	summary, err := Run(
+		context.Background(), cfg, nil,
+		annotatingRunner{store: dataStore}, nil,
+	)
+	var acquisitionErr AcquisitionFailuresError
+	if !errors.As(err, &acquisitionErr) || acquisitionErr.Count != 2 {
+		t.Fatalf("error = %v", err)
+	}
+	if summary.SourcesFailed != 2 || len(summary.SourceFailures) != 2 ||
+		summary.FeedstocksAcquired != 0 {
+		t.Fatalf("summary = %#v", summary)
+	}
+	feedstocks, warnings, listErr := dataStore.ListFeedstocks()
+	if listErr != nil || len(warnings) != 0 || len(feedstocks) != 0 {
+		t.Fatalf("feedstocks = %#v, warnings = %#v, error = %v", feedstocks, warnings, listErr)
+	}
+}
+
+func TestSelectUnfinishedCandidatesUsesSourceSequenceWhenTimestampsMatch(t *testing.T) {
+	timestamp := time.Date(2025, 8, 8, 10, 39, 10, 0, time.UTC)
+	candidates := []domain.FeedstockCandidate{
+		{ID: "first", Session: domain.SessionRef{ID: "session"}, Timestamp: timestamp, SourceSequence: 1},
+		{ID: "second", Session: domain.SessionRef{ID: "session"}, Timestamp: timestamp, SourceSequence: 2},
+		{ID: "third", Session: domain.SessionRef{ID: "session"}, Timestamp: timestamp, SourceSequence: 3},
+	}
+	selected := selectUnfinishedCandidates(candidates, nil, 2)
+	if len(selected) != 2 || selected[0].ID != "third" || selected[1].ID != "second" {
+		t.Fatalf("selected = %#v", selected)
 	}
 }
 

@@ -95,15 +95,17 @@ type SemanticSubject struct {
 }
 
 type FeedstockCandidate struct {
-	ID        string            `json:"id"`
-	TurnID    string            `json:"turn_id"`
-	Session   SessionRef        `json:"session"`
-	Timestamp time.Time         `json:"timestamp"`
-	Agent     string            `json:"agent"`
-	CWD       string            `json:"cwd,omitempty"`
-	Repo      string            `json:"repo,omitempty"`
-	Branch    string            `json:"branch,omitempty"`
-	Dialogue  []DialogueMessage `json:"-"`
+	ID                   string            `json:"id"`
+	TurnID               string            `json:"turn_id"`
+	Session              SessionRef        `json:"session"`
+	Timestamp            time.Time         `json:"timestamp"`
+	Agent                string            `json:"agent"`
+	CWD                  string            `json:"cwd,omitempty"`
+	Repo                 string            `json:"repo,omitempty"`
+	Branch               string            `json:"branch,omitempty"`
+	Dialogue             []DialogueMessage `json:"-"`
+	SourceSequence       int64             `json:"-"`
+	SourceOwnerSessionID string            `json:"-"`
 }
 
 var (

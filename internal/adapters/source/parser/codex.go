@@ -1,10 +1,10 @@
 package parser
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -13,6 +13,16 @@ import (
 )
 
 type Codex struct{}
+
+type codexParserState struct {
+	Sequence        int64                              `json:"sequence"`
+	ActiveSessionID string                             `json:"active_session_id"`
+	OwnerSessionID  string                             `json:"owner_session_id"`
+	OwnerIdentified bool                               `json:"owner_identified"`
+	MetadataSeen    bool                               `json:"metadata_seen"`
+	Excluded        bool                               `json:"excluded"`
+	Assemblers      map[string]turnAssemblerCheckpoint `json:"assemblers"`
+}
 
 type codexRecord struct {
 	Type      string          `json:"type"`
@@ -25,6 +35,7 @@ type codexPayload struct {
 	ID        string          `json:"id"`
 	TurnID    string          `json:"turn_id"`
 	SessionID string          `json:"session_id"`
+	Timestamp string          `json:"timestamp"`
 	CWD       string          `json:"cwd"`
 	Message   string          `json:"message"`
 	Role      string          `json:"role"`
@@ -35,9 +46,29 @@ type codexPayload struct {
 		RepositoryURL string `json:"repository_url"`
 		RepoURL       string `json:"repo_url"`
 	} `json:"git"`
-	InternalChatMessageMetadata struct {
-		TurnID string `json:"turn_id"`
-	} `json:"internal_chat_message_metadata_passthrough"`
+}
+
+type codexSessionMetadata struct {
+	ID           string          `json:"id"`
+	SessionID    string          `json:"session_id"`
+	ThreadSource string          `json:"thread_source"`
+	Source       json.RawMessage `json:"source"`
+}
+
+type codexLegacyHeader struct {
+	ID        string `json:"id"`
+	Timestamp string `json:"timestamp"`
+	Git       struct {
+		Branch        string `json:"branch"`
+		RepositoryURL string `json:"repository_url"`
+	} `json:"git"`
+}
+
+type codexLegacyItem struct {
+	Type    string              `json:"type"`
+	ID      string              `json:"id"`
+	Role    string              `json:"role"`
+	Content []codexContentBlock `json:"content"`
 }
 
 type codexContentBlock struct {
@@ -45,306 +76,576 @@ type codexContentBlock struct {
 	Text string `json:"text"`
 }
 
+var ignoredCodexTopLevelTypes = map[string]struct{}{
+	"compacted": {}, "inter_agent_communication_metadata": {}, "world_state": {},
+}
+
+var ignoredCodexEventTypes = map[string]struct{}{
+	"agent_reasoning": {}, "context_compacted": {}, "error": {},
+	"exec_command_end": {}, "item_completed": {}, "mcp_tool_call_end": {},
+	"patch_apply_end": {}, "sub_agent_activity": {}, "task_started": {},
+	"thread_goal_updated": {}, "thread_rolled_back": {},
+	"thread_settings_applied": {}, "token_count": {}, "web_search_end": {},
+}
+
+var ignoredCodexResponseItemTypes = map[string]struct{}{
+	"agent_message": {}, "custom_tool_call": {}, "custom_tool_call_output": {},
+	"function_call": {}, "function_call_output": {}, "reasoning": {},
+	"tool_search_call": {}, "tool_search_output": {}, "web_search_call": {},
+}
+
+var ignoredCodexLegacyItemTypes = map[string]struct{}{
+	"custom_tool_call": {}, "custom_tool_call_output": {}, "function_call": {},
+	"function_call_output": {}, "reasoning": {}, "tool_search_call": {},
+	"tool_search_output": {}, "web_search_call": {},
+}
+
 func (Codex) SessionID(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("open Codex log %s: %w", path, err)
-	}
-	defer func() { _ = file.Close() }()
 	fallback := sessionIDFromPath(path)
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
-	for scanner.Scan() {
-		var record codexRecord
-		if json.Unmarshal(scanner.Bytes(), &record) != nil || record.Type != "session_meta" {
-			continue
+	found := ""
+	err := scanSnapshot(path, func(_ int, raw []byte) (bool, error) {
+		kind, err := classifyCodexRecord(raw)
+		if err != nil {
+			return false, err
 		}
-		var payload codexPayload
-		if json.Unmarshal(record.Payload, &payload) != nil {
-			continue
+		switch kind {
+		case codexCurrent:
+			var record codexRecord
+			if err := json.Unmarshal(raw, &record); err != nil {
+				return false, err
+			}
+			if record.Type != "session_meta" {
+				return true, nil
+			}
+			var payload codexPayload
+			if err := json.Unmarshal(record.Payload, &payload); err != nil {
+				return false, err
+			}
+			found = payload.ID
+			if found == "" {
+				found = payload.SessionID
+			}
+		case codexLegacyHeaderRecord:
+			var header codexLegacyHeader
+			if err := json.Unmarshal(raw, &header); err != nil {
+				return false, err
+			}
+			found = header.ID
 		}
-		if payload.ID != "" {
-			return payload.ID, nil
-		}
-		if payload.SessionID != "" {
-			return payload.SessionID, nil
-		}
-		return fallback, nil
-	}
-	if err := scanner.Err(); err != nil {
+		return found == "", nil
+	})
+	if err != nil {
 		return "", fmt.Errorf("scan Codex log %s: %w", path, err)
+	}
+	if found != "" {
+		return found, nil
 	}
 	return fallback, nil
 }
 
 func (Codex) Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warning, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open Codex log %s: %w", path, err)
+	return parseCodex(path, false)
+}
+
+func (Codex) ParseIncremental(
+	path string,
+	checkpoint *Checkpoint,
+) (IncrementalResult, []diagnostic.Warning, error) {
+	position := scanPosition{}
+	sequence := int64(0)
+	activeSessionID := sessionIDFromPath(path)
+	ownerSessionID := activeSessionID
+	ownerIdentified := false
+	metadataSeen := false
+	excluded := false
+	assemblers := make(map[string]*turnAssembler)
+	if checkpoint != nil {
+		position = scanPosition{
+			Offset: checkpoint.Offset, Line: checkpoint.Line, SnapshotSize: checkpoint.SnapshotSize,
+		}
+		var state codexParserState
+		if err := json.Unmarshal(checkpoint.State, &state); err != nil {
+			return IncrementalResult{}, nil, fmt.Errorf("restore Codex parser checkpoint: %w", err)
+		}
+		sequence = state.Sequence
+		activeSessionID = state.ActiveSessionID
+		ownerSessionID = state.OwnerSessionID
+		ownerIdentified = state.OwnerIdentified
+		metadataSeen = state.MetadataSeen
+		excluded = state.Excluded
+		for sessionID, saved := range state.Assemblers {
+			assemblers[sessionID] = restoreTurnAssembler(saved, &sequence)
+		}
 	}
-	defer func() { _ = file.Close() }()
-
-	sessionID := sessionIDFromPath(path)
-	var sessionCWD, branch, repo string
-	var nextTurnID string
-	var candidates []domain.FeedstockCandidate
-	var warnings []diagnostic.Warning
-	var current *domain.FeedstockCandidate
-	var currentComplete bool
-	var finalAssistantText, fallbackAssistantText, eventAssistantText string
-	var sawPhasedAssistant bool
-
-	flush := func() {
-		if current == nil {
-			return
+	assemblerFor := func(sessionID string) *turnAssembler {
+		if sessionID == "" {
+			sessionID = sessionIDFromPath(path)
 		}
-		assistantText := finalAssistantText
-		if !sawPhasedAssistant && assistantText == "" {
-			assistantText = fallbackAssistantText
-			if assistantText == "" {
-				assistantText = eventAssistantText
-			}
+		assembler, exists := assemblers[sessionID]
+		if !exists {
+			assembler = newTurnAssemblerWithSequence("codex", sessionID, &sequence)
+			assemblers[sessionID] = assembler
 		}
-		if strings.TrimSpace(assistantText) != "" {
-			current.Dialogue = append(current.Dialogue, domain.DialogueMessage{
-				Role: "assistant", Content: assistantText,
-			})
-		}
-		if currentComplete {
-			candidates = append(candidates, *current)
-		}
-		current = nil
-		currentComplete = false
-		finalAssistantText = ""
-		fallbackAssistantText = ""
-		eventAssistantText = ""
-		sawPhasedAssistant = false
+		return assembler
 	}
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
-	line := 0
-	for scanner.Scan() {
-		line++
-		var record codexRecord
-		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
-			warnings = append(warnings, diagnostic.FromError(
-				fmt.Sprintf("%s:%d", path, line),
-				fmt.Errorf("decode Codex record: %w", err),
-			))
-			continue
-		}
-		var payload codexPayload
-		if err := json.Unmarshal(record.Payload, &payload); err != nil {
-			warnings = append(warnings, diagnostic.FromError(
-				fmt.Sprintf("%s:%d", path, line),
-				fmt.Errorf("decode Codex payload: %w", err),
-			))
-			continue
-		}
-		switch record.Type {
-		case "session_meta":
-			if payload.ID != "" {
-				sessionID = payload.ID
-			} else if payload.SessionID != "" {
-				sessionID = payload.SessionID
-			}
-			sessionCWD = payload.CWD
-			branch = payload.Git.Branch
-			repo = payload.Git.RepositoryURL
-			if repo == "" {
-				repo = payload.Git.RepoURL
-			}
-		case "turn_context":
-			if current != nil && payload.TurnID == current.TurnID {
-				if payload.CWD != "" {
-					sessionCWD = payload.CWD
-					current.CWD = payload.CWD
-				}
-				continue
-			}
-			if current != nil {
-				currentComplete = true
-			}
-			flush()
-			nextTurnID = payload.TurnID
-			if payload.CWD != "" {
-				sessionCWD = payload.CWD
-			}
-		case "event_msg":
-			switch payload.Type {
-			case "user_message":
-				if strings.TrimSpace(payload.Message) == "" {
-					nextTurnID = ""
-					continue
-				}
-				if current != nil {
-					currentComplete = true
-				}
-				flush()
-				timestamp, err := time.Parse(time.RFC3339Nano, record.Timestamp)
+	end := position
+	var err error
+	if !excluded {
+		end, err = scanSnapshotFrom(path, position, MaxJSONLRecordBytes, func(_ int, raw []byte) (bool, error) {
+			if !metadataSeen {
+				metadata, found, err := currentCodexSessionMetadata(raw)
 				if err != nil {
-					warnings = append(warnings, diagnostic.FromError(
-						fmt.Sprintf("%s:%d", path, line),
-						fmt.Errorf("parse timestamp: %w", err),
-					))
-					nextTurnID = ""
-					continue
+					return false, err
 				}
-				turnID := sourceTurnID(nextTurnID, scanner.Bytes())
-				nextTurnID = ""
-				current = &domain.FeedstockCandidate{
-					ID:        FeedstockID("codex", sessionID, turnID),
-					TurnID:    turnID,
-					Session:   domain.SessionRef{ID: sessionID},
-					Timestamp: timestamp,
-					Agent:     "codex",
-					CWD:       sessionCWD,
-					Repo:      repo,
-					Branch:    branch,
-					Dialogue:  []domain.DialogueMessage{{Role: "user", Content: payload.Message}},
-				}
-			case "agent_message":
-				if current != nil && strings.TrimSpace(payload.Message) != "" {
-					eventAssistantText = payload.Message
-				}
-			case "task_complete", "turn_aborted":
-				if current != nil && payload.TurnID == current.TurnID {
-					currentComplete = true
+				if found {
+					metadataSeen = true
+					if codexSessionIsSubagent(metadata) {
+						excluded = true
+						return false, nil
+					}
 				}
 			}
-		case "response_item":
-			if current == nil || payload.Type != "message" || payload.Role != "assistant" {
-				continue
+			events, err := decodeCodexRecord(raw)
+			if err != nil {
+				return false, err
 			}
-			text := codexOutputText(payload.Content)
-			if strings.TrimSpace(text) == "" {
-				if payload.Phase != "" {
-					sawPhasedAssistant = true
+			for _, event := range events {
+				if event.Kind == eventSessionStarted && strings.TrimSpace(event.SessionID) != "" {
+					if !ownerIdentified {
+						ownerSessionID = event.SessionID
+						ownerIdentified = true
+					}
+					activeSessionID = event.SessionID
+				} else if event.Kind == eventUserMessage && strings.TrimSpace(event.SessionID) != "" {
+					activeSessionID = event.SessionID
 				}
-				continue
+				if err := assemblerFor(activeSessionID).Apply(event); err != nil {
+					return false, err
+				}
 			}
-			switch payload.Phase {
-			case "final_answer":
-				sawPhasedAssistant = true
-				finalAssistantText = text
-				currentComplete = true
-			case "":
-				fallbackAssistantText = text
-			default:
-				sawPhasedAssistant = true
+			return true, nil
+		})
+	} else if info, statErr := os.Stat(path); statErr != nil {
+		err = statErr
+	} else {
+		end.Offset = info.Size()
+		end.SnapshotSize = info.Size()
+	}
+	if err != nil {
+		return IncrementalResult{}, nil, fmt.Errorf("parse Codex log %s: %w", path, err)
+	}
+	var candidates []domain.FeedstockCandidate
+	savedAssemblers := make(map[string]turnAssemblerCheckpoint, len(assemblers))
+	for sessionID, assembler := range assemblers {
+		assembler.FlushCompleted()
+		candidates = append(candidates, assembler.Drain()...)
+		savedAssemblers[sessionID] = assembler.checkpoint()
+	}
+	slices.SortStableFunc(candidates, func(left, right domain.FeedstockCandidate) int {
+		return int(left.SourceSequence - right.SourceSequence)
+	})
+	setSourceOwner(candidates, ownerSessionID)
+	state, err := json.Marshal(codexParserState{
+		Sequence: sequence, ActiveSessionID: activeSessionID,
+		OwnerSessionID: ownerSessionID, OwnerIdentified: ownerIdentified,
+		MetadataSeen: metadataSeen, Excluded: excluded, Assemblers: savedAssemblers,
+	})
+	if err != nil {
+		return IncrementalResult{}, nil, fmt.Errorf("save Codex parser checkpoint: %w", err)
+	}
+	return IncrementalResult{
+		Candidates: candidates, Excluded: excluded,
+		Checkpoint: Checkpoint{
+			Offset: end.Offset, Line: end.Line, SnapshotSize: end.SnapshotSize, State: state,
+		},
+	}, nil, nil
+}
+
+func parseCodex(
+	path string,
+	includeOpen bool,
+) ([]domain.FeedstockCandidate, []diagnostic.Warning, error) {
+	sequence := int64(0)
+	assemblers := make(map[string]*turnAssembler)
+	activeSessionID := sessionIDFromPath(path)
+	ownerSessionID := activeSessionID
+	ownerIdentified := false
+	metadataSeen := false
+	excluded := false
+	assemblerFor := func(sessionID string) *turnAssembler {
+		if sessionID == "" {
+			sessionID = sessionIDFromPath(path)
+		}
+		assembler, exists := assemblers[sessionID]
+		if !exists {
+			assembler = newTurnAssemblerWithSequence("codex", sessionID, &sequence)
+			assemblers[sessionID] = assembler
+		}
+		return assembler
+	}
+	err := scanSnapshot(path, func(_ int, raw []byte) (bool, error) {
+		if !metadataSeen {
+			metadata, found, err := currentCodexSessionMetadata(raw)
+			if err != nil {
+				return false, err
+			}
+			if found {
+				metadataSeen = true
+				if codexSessionIsSubagent(metadata) {
+					excluded = true
+					return false, nil
+				}
 			}
 		}
+		events, err := decodeCodexRecord(raw)
+		if err != nil {
+			return false, err
+		}
+		for _, event := range events {
+			if event.Kind == eventSessionStarted && strings.TrimSpace(event.SessionID) != "" {
+				if !ownerIdentified {
+					ownerSessionID = event.SessionID
+					ownerIdentified = true
+				}
+				activeSessionID = event.SessionID
+			} else if event.Kind == eventUserMessage && strings.TrimSpace(event.SessionID) != "" {
+				activeSessionID = event.SessionID
+			}
+			if err := assemblerFor(activeSessionID).Apply(event); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse Codex log %s: %w", path, err)
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, warnings, fmt.Errorf("scan Codex log %s: %w", path, err)
+	if excluded {
+		return nil, nil, nil
 	}
-	flush()
-	return candidates, warnings, nil
+	var candidates []domain.FeedstockCandidate
+	for _, assembler := range assemblers {
+		candidates = append(candidates, assembler.Finish(includeOpen)...)
+	}
+	slices.SortStableFunc(candidates, func(left, right domain.FeedstockCandidate) int {
+		return int(left.SourceSequence - right.SourceSequence)
+	})
+	setSourceOwner(candidates, ownerSessionID)
+	return candidates, nil, nil
+}
+
+func currentCodexSessionMetadata(raw []byte) (codexSessionMetadata, bool, error) {
+	kind, err := classifyCodexRecord(raw)
+	if err != nil {
+		return codexSessionMetadata{}, false, err
+	}
+	if kind != codexCurrent {
+		return codexSessionMetadata{}, false, nil
+	}
+	var record codexRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return codexSessionMetadata{}, false, err
+	}
+	if record.Type != "session_meta" {
+		return codexSessionMetadata{}, false, nil
+	}
+	var metadata codexSessionMetadata
+	if err := json.Unmarshal(record.Payload, &metadata); err != nil {
+		return codexSessionMetadata{}, false, err
+	}
+	return metadata, true, nil
+}
+
+func codexSessionIsSubagent(metadata codexSessionMetadata) bool {
+	if strings.EqualFold(strings.TrimSpace(metadata.ThreadSource), "subagent") {
+		return true
+	}
+	var sourceName string
+	if json.Unmarshal(metadata.Source, &sourceName) == nil {
+		return strings.EqualFold(strings.TrimSpace(sourceName), "subagent")
+	}
+	var source struct {
+		Subagent json.RawMessage `json:"subagent"`
+	}
+	if json.Unmarshal(metadata.Source, &source) != nil {
+		return false
+	}
+	trimmed := strings.TrimSpace(string(source.Subagent))
+	return trimmed != "" && trimmed != "null"
 }
 
 func (Codex) ExtractTurn(path, turnID string) ([]domain.DialogueMessage, error) {
-	file, err := os.Open(path)
+	candidates, _, err := parseCodex(path, true)
 	if err != nil {
-		return nil, fmt.Errorf("open Codex log %s: %w", path, err)
+		return nil, err
 	}
-	defer func() { _ = file.Close() }()
-
-	var userText, finalAssistantText, fallbackAssistantText, eventAssistantText string
-	var nextTurnID string
-	found := false
-	sawPhasedAssistant := false
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
-scan:
-	for scanner.Scan() {
-		var record codexRecord
-		if json.Unmarshal(scanner.Bytes(), &record) != nil {
-			continue
-		}
-		var payload codexPayload
-		if json.Unmarshal(record.Payload, &payload) != nil {
-			continue
-		}
-		switch record.Type {
-		case "turn_context":
-			if found {
-				if payload.TurnID == turnID {
-					continue
-				}
-				break scan
-			}
-			nextTurnID = payload.TurnID
-		case "event_msg":
-			switch payload.Type {
-			case "user_message":
-				recordTurnID := sourceTurnID(nextTurnID, scanner.Bytes())
-				nextTurnID = ""
-				if found {
-					break scan
-				}
-				if recordTurnID == turnID && strings.TrimSpace(payload.Message) != "" {
-					found = true
-					userText = payload.Message
-				}
-			case "agent_message":
-				if found && strings.TrimSpace(payload.Message) != "" {
-					eventAssistantText = payload.Message
-				}
-			}
-		case "response_item":
-			if !found || payload.Type != "message" || payload.Role != "assistant" {
-				continue
-			}
-			text := codexOutputText(payload.Content)
-			if strings.TrimSpace(text) == "" {
-				if payload.Phase != "" {
-					sawPhasedAssistant = true
-				}
-				continue
-			}
-			switch payload.Phase {
-			case "final_answer":
-				sawPhasedAssistant = true
-				finalAssistantText = text
-			case "":
-				fallbackAssistantText = text
-			default:
-				sawPhasedAssistant = true
-			}
+	for _, candidate := range candidates {
+		if candidate.TurnID == turnID {
+			return candidate.Dialogue, nil
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan Codex log %s: %w", path, err)
-	}
-	if !found {
-		return nil, fmt.Errorf("source turn %s was not found in Codex log %s", turnID, path)
-	}
-	if !sawPhasedAssistant && finalAssistantText == "" {
-		finalAssistantText = fallbackAssistantText
-		if finalAssistantText == "" {
-			finalAssistantText = eventAssistantText
-		}
-	}
-	messages := []domain.DialogueMessage{{Role: "user", Content: userText}}
-	if strings.TrimSpace(finalAssistantText) != "" {
-		messages = append(messages, domain.DialogueMessage{
-			Role: "assistant", Content: finalAssistantText,
-		})
-	}
-	return messages, nil
+	return nil, fmt.Errorf("source turn %s was not found in Codex log %s", turnID, path)
 }
 
-func codexOutputText(raw json.RawMessage) string {
-	var blocks []codexContentBlock
-	if json.Unmarshal(raw, &blocks) != nil {
-		return ""
+type codexRecordKind uint8
+
+const (
+	codexCurrent codexRecordKind = iota + 1
+	codexLegacyHeaderRecord
+	codexLegacyStateRecord
+	codexLegacyItemRecord
+)
+
+func classifyCodexRecord(raw []byte) (codexRecordKind, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return 0, fmt.Errorf("decode Codex record: %w", err)
 	}
-	var values []string
+	if fields == nil {
+		return 0, fmt.Errorf("Codex record is not an object")
+	}
+	_, hasType := fields["type"]
+	_, hasTimestamp := fields["timestamp"]
+	_, hasPayload := fields["payload"]
+	_, hasRecordType := fields["record_type"]
+	_, hasID := fields["id"]
+	_, hasInstructions := fields["instructions"]
+	_, hasGit := fields["git"]
+	matches := make([]codexRecordKind, 0, 2)
+	if hasType && hasTimestamp && hasPayload {
+		matches = append(matches, codexCurrent)
+	}
+	if !hasType && hasID && hasTimestamp && (hasInstructions || hasGit) {
+		matches = append(matches, codexLegacyHeaderRecord)
+	}
+	if hasRecordType {
+		matches = append(matches, codexLegacyStateRecord)
+	}
+	if hasType && !hasTimestamp && !hasPayload {
+		matches = append(matches, codexLegacyItemRecord)
+	}
+	if len(matches) == 0 {
+		return 0, fmt.Errorf("unknown Codex record shape")
+	}
+	if len(matches) > 1 {
+		return 0, fmt.Errorf("ambiguous Codex record shape")
+	}
+	return matches[0], nil
+}
+
+func decodeCodexRecord(raw []byte) ([]sourceEvent, error) {
+	kind, err := classifyCodexRecord(raw)
+	if err != nil {
+		return nil, err
+	}
+	switch kind {
+	case codexCurrent:
+		return decodeCurrentCodexRecord(raw)
+	case codexLegacyHeaderRecord:
+		var header codexLegacyHeader
+		if err := json.Unmarshal(raw, &header); err != nil {
+			return nil, err
+		}
+		timestamp, err := time.Parse(time.RFC3339Nano, header.Timestamp)
+		if err != nil {
+			return nil, fmt.Errorf("parse legacy Codex session timestamp: %w", err)
+		}
+		return []sourceEvent{{
+			Kind: eventSessionStarted, SessionID: header.ID, Timestamp: timestamp,
+			Repo: header.Git.RepositoryURL, Branch: header.Git.Branch,
+		}}, nil
+	case codexLegacyStateRecord:
+		var state struct {
+			RecordType string `json:"record_type"`
+		}
+		if err := json.Unmarshal(raw, &state); err != nil {
+			return nil, err
+		}
+		if state.RecordType != "state" {
+			return nil, fmt.Errorf("unknown legacy Codex record type %q", state.RecordType)
+		}
+		return []sourceEvent{{Kind: eventIgnored}}, nil
+	case codexLegacyItemRecord:
+		return decodeLegacyCodexItem(raw)
+	default:
+		return nil, fmt.Errorf("unsupported Codex record shape")
+	}
+}
+
+func decodeCurrentCodexRecord(raw []byte) ([]sourceEvent, error) {
+	var record codexRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return nil, fmt.Errorf("decode current Codex record: %w", err)
+	}
+	if _, ignored := ignoredCodexTopLevelTypes[record.Type]; ignored {
+		return []sourceEvent{{Kind: eventIgnored}}, nil
+	}
+	var payload codexPayload
+	if len(record.Payload) == 0 || string(record.Payload) == "null" {
+		return nil, fmt.Errorf("Codex %s record has no payload", record.Type)
+	}
+	if err := json.Unmarshal(record.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("decode Codex %s payload: %w", record.Type, err)
+	}
+	switch record.Type {
+	case "session_meta":
+		timestampText := payload.Timestamp
+		if timestampText == "" {
+			timestampText = record.Timestamp
+		}
+		timestamp, err := time.Parse(time.RFC3339Nano, timestampText)
+		if err != nil {
+			return nil, fmt.Errorf("parse Codex session timestamp: %w", err)
+		}
+		sessionID := payload.ID
+		if sessionID == "" {
+			sessionID = payload.SessionID
+		}
+		repo := payload.Git.RepositoryURL
+		if repo == "" {
+			repo = payload.Git.RepoURL
+		}
+		return []sourceEvent{{
+			Kind: eventSessionStarted, SessionID: sessionID, Timestamp: timestamp,
+			CWD: payload.CWD, Repo: repo, Branch: payload.Git.Branch,
+		}}, nil
+	case "turn_context":
+		return []sourceEvent{{
+			Kind: eventTurnStarted, TurnID: payload.TurnID, CWD: payload.CWD,
+		}}, nil
+	case "event_msg":
+		return decodeCodexEvent(record, payload, raw)
+	case "response_item":
+		return decodeCodexResponseItem(payload)
+	default:
+		return nil, fmt.Errorf("unknown Codex record type %q", record.Type)
+	}
+}
+
+func decodeCodexEvent(record codexRecord, payload codexPayload, raw []byte) ([]sourceEvent, error) {
+	switch payload.Type {
+	case "user_message":
+		if strings.TrimSpace(payload.Message) == "" {
+			return []sourceEvent{{Kind: eventIgnored}}, nil
+		}
+		timestamp, err := time.Parse(time.RFC3339Nano, record.Timestamp)
+		if err != nil {
+			return nil, fmt.Errorf("parse Codex user timestamp: %w", err)
+		}
+		return []sourceEvent{{
+			Kind: eventUserMessage, TurnID: payload.TurnID,
+			FallbackTurnID: sourceTurnID("", raw), Timestamp: timestamp,
+			Text: payload.Message,
+		}}, nil
+	case "agent_message":
+		return []sourceEvent{{
+			Kind: eventAssistantMessage, Text: payload.Message, Priority: assistantEvent,
+		}}, nil
+	case "task_complete", "turn_aborted":
+		return []sourceEvent{{Kind: eventTurnCompleted, TurnID: payload.TurnID}}, nil
+	default:
+		if _, ignored := ignoredCodexEventTypes[payload.Type]; ignored {
+			return []sourceEvent{{Kind: eventIgnored}}, nil
+		}
+		return nil, fmt.Errorf("unknown Codex event type %q", payload.Type)
+	}
+}
+
+func decodeCodexResponseItem(payload codexPayload) ([]sourceEvent, error) {
+	if _, ignored := ignoredCodexResponseItemTypes[payload.Type]; ignored {
+		return []sourceEvent{{Kind: eventIgnored}}, nil
+	}
+	if payload.Type != "message" {
+		return nil, fmt.Errorf("unknown Codex response item type %q", payload.Type)
+	}
+	if payload.Role != "assistant" {
+		if payload.Role == "user" || payload.Role == "developer" || payload.Role == "system" {
+			return []sourceEvent{{Kind: eventIgnored}}, nil
+		}
+		return nil, fmt.Errorf("unknown Codex response message role %q", payload.Role)
+	}
+	text, err := codexText(payload.Content, "output_text")
+	if err != nil {
+		return nil, err
+	}
+	switch payload.Phase {
+	case "final_answer":
+		return []sourceEvent{{
+			Kind: eventAssistantMessage, Text: text, Priority: assistantFinal,
+			CompletesTurn: true,
+		}}, nil
+	case "":
+		return []sourceEvent{{
+			Kind: eventAssistantMessage, Text: text, Priority: assistantFallback,
+		}}, nil
+	case "commentary":
+		return []sourceEvent{{Kind: eventIgnored}}, nil
+	default:
+		return nil, fmt.Errorf("unknown Codex assistant message phase %q", payload.Phase)
+	}
+}
+
+func decodeLegacyCodexItem(raw []byte) ([]sourceEvent, error) {
+	var item codexLegacyItem
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return nil, fmt.Errorf("decode legacy Codex item: %w", err)
+	}
+	if _, ignored := ignoredCodexLegacyItemTypes[item.Type]; ignored {
+		return []sourceEvent{{Kind: eventIgnored}}, nil
+	}
+	if item.Type != "message" {
+		return nil, fmt.Errorf("unknown legacy Codex item type %q", item.Type)
+	}
+	switch item.Role {
+	case "user":
+		text, err := textFromCodexBlocks(item.Content, "input_text")
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(text) == "" {
+			return []sourceEvent{{Kind: eventIgnored}}, nil
+		}
+		turnID := ""
+		if strings.TrimSpace(item.ID) != "" {
+			turnID = "record-" + item.ID
+		}
+		return []sourceEvent{{
+			Kind: eventUserMessage, TurnID: turnID,
+			FallbackTurnID: sourceTurnID("", raw), Text: text,
+		}}, nil
+	case "assistant":
+		text, err := textFromCodexBlocks(item.Content, "output_text")
+		if err != nil {
+			return nil, err
+		}
+		return []sourceEvent{{
+			Kind: eventAssistantMessage, Text: text, Priority: assistantFinal,
+			CompletesTurn: true,
+		}}, nil
+	case "developer", "system":
+		return []sourceEvent{{Kind: eventIgnored}}, nil
+	default:
+		return nil, fmt.Errorf("unknown legacy Codex message role %q", item.Role)
+	}
+}
+
+func codexText(raw json.RawMessage, expected string) (string, error) {
+	var blocks []codexContentBlock
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return "", fmt.Errorf("decode Codex message content: %w", err)
+	}
+	return textFromCodexBlocks(blocks, expected)
+}
+
+func textFromCodexBlocks(blocks []codexContentBlock, expected string) (string, error) {
+	values := make([]string, 0, len(blocks))
 	for _, block := range blocks {
-		if block.Type == "output_text" && block.Text != "" {
+		if block.Type != expected {
+			return "", fmt.Errorf("unknown Codex message content block %q", block.Type)
+		}
+		if strings.TrimSpace(block.Text) != "" {
 			values = append(values, block.Text)
 		}
 	}
-	return strings.Join(values, "\n")
+	return strings.Join(values, "\n"), nil
 }

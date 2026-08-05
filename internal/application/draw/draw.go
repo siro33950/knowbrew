@@ -1,6 +1,7 @@
 package draw
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/siro33950/knowbrew/internal/application/agent"
 	"github.com/siro33950/knowbrew/internal/application/diagnostic"
+	applicationsource "github.com/siro33950/knowbrew/internal/application/source"
 	"github.com/siro33950/knowbrew/internal/domain"
 )
 
@@ -30,6 +32,7 @@ const annotationContextAssistantTruncatedMarker = "\n[adjacent assistant respons
 type Summary struct {
 	TurnsSelected             int                  `json:"turns_selected"`
 	TurnsPending              int                  `json:"turns_pending"`
+	SourcesFailed             int                  `json:"sources_failed"`
 	FeedstocksAcquired        int                  `json:"feedstocks_acquired"`
 	FeedstocksSummarized      int                  `json:"feedstocks_summarized"`
 	FeedstocksAnnotated       int                  `json:"feedstocks_annotated"`
@@ -40,8 +43,22 @@ type Summary struct {
 	Usage                     agent.UsageReport    `json:"usage"`
 	SummarizationUsage        agent.UsageReport    `json:"summarization_usage"`
 	AssertionExtractionUsage  agent.UsageReport    `json:"assertion_extraction_usage"`
+	SourceFailures            []SourceFailure      `json:"source_failures,omitempty"`
 	Failures                  []FeedstockFailure   `json:"failures,omitempty"`
 	Warnings                  []diagnostic.Warning `json:"warnings,omitempty"`
+}
+
+type SourceFailure struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+}
+
+type AcquisitionFailuresError struct {
+	Count int
+}
+
+func (failure AcquisitionFailuresError) Error() string {
+	return fmt.Sprintf("%d source logs failed during acquisition", failure.Count)
 }
 
 type FeedstockFailure struct {
@@ -117,8 +134,20 @@ func (service Service) RunWithOptions(
 		return Summary{}, err
 	}
 	var allCandidates []domain.FeedstockCandidate
-	candidateIDs := make(map[string]struct{})
 	sourceCandidates := make(map[string][]domain.FeedstockCandidate)
+	setsBySession := make(map[string][]applicationsource.CandidateSet)
+	failedPaths := make(map[string]struct{})
+	recordSourceFailure := func(path string, failure error) {
+		if _, failed := failedPaths[path]; failed {
+			return
+		}
+		failedPaths[path] = struct{}{}
+		summary.SourcesFailed++
+		summary.SourceFailures = append(summary.SourceFailures, SourceFailure{
+			Path: path, Reason: failure.Error(),
+		})
+		display.Errorf("Acquisition failed · %s · %v", path, failure)
+	}
 	display.Start(fmt.Sprintf("Acquiring · 0/%d sources · 0 feedstocks", len(files)))
 	sourcesProcessed := 0
 	updateAcquisition := func() {
@@ -134,11 +163,18 @@ func (service Service) RunWithOptions(
 		display.Verbosef("Acquiring %s", input.Path)
 		parsedCandidates, warnings, err := service.Sources.Parse(input)
 		if err != nil {
-			return summary, err
+			recordSourceFailure(input.Path, err)
+			updateAcquisition()
+			continue
 		}
 		diagnostic.Add(&summary.Warnings, display, warnings...)
+		verifiedBySession := make(map[string][]domain.FeedstockCandidate)
 		for index := range parsedCandidates {
 			candidate := parsedCandidates[index]
+			ownerSessionID := strings.TrimSpace(candidate.SourceOwnerSessionID)
+			if ownerSessionID != "" && ownerSessionID != candidate.Session.ID {
+				continue
+			}
 			if strings.HasPrefix(candidate.TurnID, "record-") {
 				dialogue, extractErr := service.Sources.ExtractTurn(input, candidate.TurnID)
 				if extractErr != nil || !slices.Equal(dialogue, candidate.Dialogue) {
@@ -152,14 +188,37 @@ func (service Service) RunWithOptions(
 					continue
 				}
 			}
+			key := applicationsource.SessionKey(candidate)
+			verifiedBySession[key] = append(verifiedBySession[key], candidate)
 			sourceCandidates[candidate.ID] = parsedCandidates
-			if _, duplicate := candidateIDs[candidate.ID]; duplicate {
-				continue
-			}
-			candidateIDs[candidate.ID] = struct{}{}
-			allCandidates = append(allCandidates, candidate)
+		}
+		for key, candidates := range verifiedBySession {
+			setsBySession[key] = append(setsBySession[key], applicationsource.CandidateSet{
+				Source: input.Path, Candidates: candidates,
+			})
 		}
 		updateAcquisition()
+	}
+	sessionKeys := make([]string, 0, len(setsBySession))
+	for key := range setsBySession {
+		sessionKeys = append(sessionKeys, key)
+	}
+	slices.Sort(sessionKeys)
+	for _, key := range sessionKeys {
+		sets := setsBySession[key]
+		merged, mergeErr := applicationsource.MergeCandidateSets(sets)
+		if mergeErr != nil {
+			for _, set := range sets {
+				recordSourceFailure(set.Source, mergeErr)
+			}
+			continue
+		}
+		allCandidates = append(allCandidates, merged...)
+		for _, candidate := range merged {
+			if !hasLineageContext(sourceCandidates[candidate.ID], candidate.Session.ID) {
+				sourceCandidates[candidate.ID] = merged
+			}
+		}
 	}
 	selected := selectUnfinishedCandidates(allCandidates, existingByID, options.MaxTurns)
 	selectedIDs := make(map[string]struct{}, len(selected))
@@ -199,9 +258,8 @@ func (service Service) RunWithOptions(
 	}
 	summary.TurnsSelected = len(selected)
 	display.Complete(fmt.Sprintf(
-		"Acquisition complete · %d feedstocks from %d sources",
-		summary.FeedstocksAcquired,
-		len(files),
+		"Acquisition complete · %d feedstocks from %d sources · %d failed",
+		summary.FeedstocksAcquired, len(files)-summary.SourcesFailed, summary.SourcesFailed,
 	))
 	updateMastersAdded := func() error {
 		mastersAfter, warnings, countErr := masterCount(dataStore)
@@ -333,7 +391,20 @@ func (service Service) RunWithOptions(
 		return summary, err
 	}
 	summary.TurnsPending = countPendingTurns(allCandidates, feedstocks)
+	if summary.SourcesFailed > 0 {
+		return summary, AcquisitionFailuresError{Count: summary.SourcesFailed}
+	}
 	return summary, nil
+}
+
+func hasLineageContext(candidates []domain.FeedstockCandidate, ownerSessionID string) bool {
+	for _, candidate := range candidates {
+		if candidate.Session.ID != ownerSessionID &&
+			candidate.SourceOwnerSessionID == ownerSessionID {
+			return true
+		}
+	}
+	return false
 }
 
 func selectUnfinishedCandidates(
@@ -355,6 +426,10 @@ func selectUnfinishedCandidates(
 	newestFirst := func(left, right domain.FeedstockCandidate) int {
 		if compared := right.Timestamp.Compare(left.Timestamp); compared != 0 {
 			return compared
+		}
+		if left.Agent == right.Agent && left.Session.ID == right.Session.ID &&
+			left.SourceSequence != right.SourceSequence {
+			return cmp.Compare(right.SourceSequence, left.SourceSequence)
 		}
 		return strings.Compare(left.ID, right.ID)
 	}

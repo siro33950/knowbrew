@@ -122,7 +122,7 @@ func newDrawCommand() *cobra.Command {
 				return err
 			}
 			settings := drawSettings(cfg)
-			sourceGateway := sourceadapter.New(settings.Sources)
+			sourceGateway := sourceadapter.NewCached(cfg.Root, settings.Sources)
 			service := draw.Service{
 				Settings: settings, Repository: repositoryFor(dataStore),
 				Sources: sourceGateway, Runner: runner, Progress: display,
@@ -134,6 +134,13 @@ func newDrawCommand() *cobra.Command {
 			}
 			summary, err := service.RunWithOptions(command.Context(), options)
 			if err != nil {
+				var acquisitionErr draw.AcquisitionFailuresError
+				if errors.As(err, &acquisitionErr) {
+					if writeErr := writeJSON(os.Stdout, summary); writeErr != nil {
+						return errors.Join(err, writeErr)
+					}
+					return err
+				}
 				display.Abort()
 				return err
 			}
@@ -233,7 +240,7 @@ func newBrewCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			sourceGateway := sourceadapter.New(configuredSources(cfg))
+			sourceGateway := sourceadapter.NewCached(cfg.Root, configuredSources(cfg))
 			service := brew.Service{
 				Settings: brew.Settings{
 					ContextTurns: cfg.Draw.ContextTurns,
@@ -354,7 +361,7 @@ func newShowCommand() *cobra.Command {
 				return err
 			}
 			if raw {
-				sourceGateway := sourceadapter.New(configuredSources(cfg))
+				sourceGateway := sourceadapter.NewCached(cfg.Root, configuredSources(cfg))
 				reader := dialogueadapter.Query{Store: dataStore, Source: sourceGateway}
 				response, err := query.ShowRaw(dataStore, reader, ids[0], page)
 				if err != nil {
@@ -550,7 +557,7 @@ func newFeedstockCommand() *cobra.Command {
 				return err
 			}
 			turnContext, warnings, err := draw.LoadAnnotationContext(
-				sourceadapter.New(configuredSources(cfg)),
+				sourceadapter.NewCached(cfg.Root, configuredSources(cfg)),
 				repositoryFor(dataStore),
 				args[0],
 				cfg.Draw.MaxContextTurns,

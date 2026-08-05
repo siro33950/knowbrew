@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -23,21 +24,33 @@ const defaultLookback = 24 * time.Hour
 type Gateway struct {
 	Configured []applicationsource.Configured
 	catalog    *sessionCatalog
+	cache      *sourceCache
 }
 
 type sessionCatalog struct {
 	once  sync.Once
-	files map[string]applicationsource.File
+	files map[string][]applicationsource.File
 	err   error
 }
 
 func New(configured []applicationsource.Configured) Gateway {
+	return newGateway(configured, nil)
+}
+
+func NewCached(root string, configured []applicationsource.Configured) Gateway {
+	return newGateway(configured, newSourceCache(root))
+}
+
+func newGateway(
+	configured []applicationsource.Configured,
+	cache *sourceCache,
+) Gateway {
 	copied := make([]applicationsource.Configured, len(configured))
 	for index, source := range configured {
 		copied[index] = source
 		copied[index].Paths = append([]string(nil), source.Paths...)
 	}
-	return Gateway{Configured: copied, catalog: &sessionCatalog{}}
+	return Gateway{Configured: copied, catalog: &sessionCatalog{}, cache: cache}
 }
 
 func (Gateway) Collect(
@@ -97,7 +110,7 @@ func (Gateway) Collect(
 	return filterByModification(unique(inputs), since, options.ModifiedUntil)
 }
 
-func (Gateway) Parse(file applicationsource.File) (
+func (gateway Gateway) Parse(file applicationsource.File) (
 	[]domain.FeedstockCandidate,
 	[]diagnostic.Warning,
 	error,
@@ -105,6 +118,16 @@ func (Gateway) Parse(file applicationsource.File) (
 	logParser, err := parser.For(file.Parser)
 	if err != nil {
 		return nil, nil, err
+	}
+	return gateway.parseFile(file, logParser)
+}
+
+func (gateway Gateway) parseFile(
+	file applicationsource.File,
+	logParser parser.Parser,
+) ([]domain.FeedstockCandidate, []diagnostic.Warning, error) {
+	if gateway.cache != nil {
+		return gateway.cache.parse(file, logParser)
 	}
 	return logParser.Parse(file.Path)
 }
@@ -114,35 +137,113 @@ func (gateway Gateway) ParseSession(agent, sessionID string) (
 	[]diagnostic.Warning,
 	error,
 ) {
-	file, err := gateway.resolveSession(agent, sessionID)
+	files, err := gateway.resolveSession(agent, sessionID)
 	if err != nil {
 		return nil, nil, err
 	}
-	logParser, err := parser.For(file.Parser)
-	if err != nil {
-		return nil, nil, err
+	sets := make([]applicationsource.CandidateSet, 0, len(files))
+	var warnings []diagnostic.Warning
+	var firstErr error
+	for _, file := range files {
+		logParser, parserErr := parser.For(file.Parser)
+		if parserErr != nil {
+			return nil, warnings, parserErr
+		}
+		candidates, parsedWarnings, parseErr := gateway.parseFile(file, logParser)
+		warnings = append(warnings, parsedWarnings...)
+		if parseErr != nil {
+			warnings = append(warnings, diagnostic.FromError(file.Path, parseErr))
+			if firstErr == nil {
+				firstErr = parseErr
+			}
+			continue
+		}
+		sets = append(sets, applicationsource.CandidateSet{
+			Source: file.Path, Candidates: candidates,
+		})
 	}
-	return logParser.Parse(file.Path)
+	if len(sets) == 0 {
+		return nil, warnings, firstErr
+	}
+	merged, err := applicationsource.MergeCandidateSets(sets)
+	return merged, warnings, err
 }
 
 func (gateway Gateway) ReadTurn(agent, sessionID, turnID string) ([]domain.DialogueMessage, error) {
-	file, err := gateway.resolveSession(agent, sessionID)
+	files, err := gateway.resolveSession(agent, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	logParser, err := parser.For(file.Parser)
-	if err != nil {
-		return nil, err
+	var found []domain.DialogueMessage
+	var firstErr error
+	var foundPath string
+	for _, file := range files {
+		logParser, parserErr := parser.For(file.Parser)
+		if parserErr != nil {
+			return nil, parserErr
+		}
+		var messages []domain.DialogueMessage
+		var extractErr error
+		if gateway.cache == nil {
+			messages, extractErr = logParser.ExtractTurn(file.Path, turnID)
+		} else {
+			var candidates []domain.FeedstockCandidate
+			candidates, _, extractErr = gateway.parseFile(file, logParser)
+			if extractErr == nil {
+				messages, extractErr = dialogueForTurn(candidates, turnID)
+			}
+		}
+		if extractErr != nil {
+			if firstErr == nil {
+				firstErr = extractErr
+			}
+			continue
+		}
+		if found == nil {
+			found = messages
+			foundPath = file.Path
+			continue
+		}
+		if !slices.Equal(found, messages) {
+			return nil, fmt.Errorf(
+				"conflicting source turn %s in %s and %s", turnID, foundPath, file.Path,
+			)
+		}
 	}
-	return logParser.ExtractTurn(file.Path, turnID)
+	if found != nil {
+		return found, nil
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return nil, fmt.Errorf("source turn %s was not found in session %s/%s", turnID, agent, sessionID)
 }
 
-func (Gateway) ExtractTurn(file applicationsource.File, turnID string) ([]domain.DialogueMessage, error) {
+func (gateway Gateway) ExtractTurn(file applicationsource.File, turnID string) ([]domain.DialogueMessage, error) {
 	logParser, err := parser.For(file.Parser)
 	if err != nil {
 		return nil, err
 	}
-	return logParser.ExtractTurn(file.Path, turnID)
+	if gateway.cache == nil {
+		return logParser.ExtractTurn(file.Path, turnID)
+	}
+	candidates, _, err := gateway.parseFile(file, logParser)
+	if err != nil {
+		return nil, err
+	}
+	return dialogueForTurn(candidates, turnID)
+}
+
+func dialogueForTurn(
+	candidates []domain.FeedstockCandidate,
+	turnID string,
+) ([]domain.DialogueMessage, error) {
+	for _, candidate := range candidates {
+		if candidate.TurnID == turnID {
+			return append([]domain.DialogueMessage(nil), candidate.Dialogue...), nil
+		}
+	}
+	return nil, fmt.Errorf("source turn %s was not found", turnID)
 }
 
 func (Gateway) DiscoverRepository(ctx context.Context, cwd string) string {
@@ -246,21 +347,21 @@ func pathWithin(root, target string) bool {
 	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-func (gateway Gateway) resolveSession(agent, sessionID string) (applicationsource.File, error) {
+func (gateway Gateway) resolveSession(agent, sessionID string) ([]applicationsource.File, error) {
 	catalog, err := gateway.loadCatalog()
 	if err != nil {
-		return applicationsource.File{}, err
+		return nil, err
 	}
-	file, exists := catalog[sessionKey(agent, sessionID)]
+	files, exists := catalog[sessionKey(agent, sessionID)]
 	if !exists {
-		return applicationsource.File{}, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"source session %s/%s was not found in configured paths", agent, sessionID,
 		)
 	}
-	return file, nil
+	return files, nil
 }
 
-func (gateway Gateway) loadCatalog() (map[string]applicationsource.File, error) {
+func (gateway Gateway) loadCatalog() (map[string][]applicationsource.File, error) {
 	if gateway.catalog == nil {
 		return buildSessionCatalog(gateway.Configured)
 	}
@@ -272,12 +373,12 @@ func (gateway Gateway) loadCatalog() (map[string]applicationsource.File, error) 
 
 func buildSessionCatalog(
 	configured []applicationsource.Configured,
-) (map[string]applicationsource.File, error) {
+) (map[string][]applicationsource.File, error) {
 	files, err := configuredFiles(configured, nil)
 	if err != nil {
 		return nil, err
 	}
-	catalog := make(map[string]applicationsource.File, len(files))
+	catalog := make(map[string][]applicationsource.File, len(files))
 	for _, file := range files {
 		logParser, parserErr := parser.For(file.Parser)
 		if parserErr != nil {
@@ -288,9 +389,7 @@ func buildSessionCatalog(
 			sessionID = parser.SessionIDHint(file.Path)
 		}
 		key := sessionKey(file.Agent, sessionID)
-		if _, exists := catalog[key]; !exists {
-			catalog[key] = file
-		}
+		catalog[key] = append(catalog[key], file)
 	}
 	return catalog, nil
 }
@@ -319,7 +418,7 @@ func expand(agent, parserName, path string) ([]applicationsource.File, error) {
 			return walkErr
 		}
 		if entry.IsDir() {
-			if entry.Name() == "tool-results" {
+			if entry.Name() == "tool-results" || entry.Name() == "subagents" {
 				return filepath.SkipDir
 			}
 			return nil

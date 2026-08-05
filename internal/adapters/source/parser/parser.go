@@ -3,6 +3,7 @@ package parser
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -13,8 +14,22 @@ import (
 
 type Parser interface {
 	Parse(path string) ([]domain.FeedstockCandidate, []diagnostic.Warning, error)
+	ParseIncremental(path string, checkpoint *Checkpoint) (IncrementalResult, []diagnostic.Warning, error)
 	ExtractTurn(path, turnID string) ([]domain.DialogueMessage, error)
 	SessionID(path string) (string, error)
+}
+
+type Checkpoint struct {
+	Offset       int64           `json:"offset"`
+	Line         int             `json:"line"`
+	SnapshotSize int64           `json:"snapshot_size"`
+	State        json.RawMessage `json:"state"`
+}
+
+type IncrementalResult struct {
+	Candidates []domain.FeedstockCandidate
+	Checkpoint Checkpoint
+	Excluded   bool
 }
 
 func For(name string) (Parser, error) {
@@ -56,4 +71,22 @@ func sessionIDFromPath(path string) string {
 
 func SessionIDHint(path string) string {
 	return sessionIDFromPath(path)
+}
+
+func SourceFingerprint(path string) (string, error) {
+	digest := sha256.Sum256([]byte("empty JSONL source"))
+	err := scanSnapshot(path, func(_ int, raw []byte) (bool, error) {
+		digest = sha256.Sum256(raw)
+		return false, nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("fingerprint source %s: %w", path, err)
+	}
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func setSourceOwner(candidates []domain.FeedstockCandidate, sessionID string) {
+	for index := range candidates {
+		candidates[index].SourceOwnerSessionID = sessionID
+	}
 }

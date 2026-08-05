@@ -118,8 +118,16 @@ func sourceSession(
 	target := candidates[targetIndex]
 	session := make([]domain.FeedstockCandidate, 0, len(candidates))
 	filteredTargetIndex := -1
+	ownerSessionID := strings.TrimSpace(target.SourceOwnerSessionID)
 	for _, candidate := range candidates {
-		if candidate.Agent != target.Agent || candidate.Session.ID != target.Session.ID {
+		if candidate.Agent != target.Agent {
+			continue
+		}
+		if ownerSessionID == "" {
+			if candidate.Session.ID != target.Session.ID {
+				continue
+			}
+		} else if candidate.SourceOwnerSessionID != ownerSessionID {
 			continue
 		}
 		if candidate.ID == feedstockID {

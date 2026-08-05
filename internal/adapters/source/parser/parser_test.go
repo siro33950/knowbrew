@@ -425,7 +425,7 @@ func TestRealLogWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestParsersSkipMalformedJSONLines(t *testing.T) {
+func TestParsersRejectMalformedTerminatedJSONLines(t *testing.T) {
 	tests := []struct {
 		name    string
 		parser  Parser
@@ -452,31 +452,327 @@ func TestParsersSkipMalformedJSONLines(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "session.jsonl")
-			content := test.content
-			if test.name == "Claude" {
-				content += `{"type":"user","sessionId":"session","timestamp":"2026-07-30T01:00:02Z","message":{"role":"user","content":"third"}}` + "\n"
-			} else {
-				content += `{"timestamp":"2026-07-30T01:00:03Z","type":"event_msg","payload":{"type":"user_message","message":"third"}}` + "\n"
-			}
-			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			feedstocks, warnings, err := test.parser.Parse(path)
-			if err != nil {
-				t.Fatal(err)
+			if err == nil || !strings.Contains(err.Error(), "line 2") {
+				t.Fatalf("error = %v", err)
 			}
-			if len(feedstocks) != 2 {
-				t.Fatalf("feedstocks = %#v", feedstocks)
-			}
-			if len(warnings) != 1 {
-				t.Fatalf("warnings = %#v", warnings)
-			}
-			if warnings[0].Path != path+":2" || !strings.Contains(warnings[0].Reason, "decode "+test.name+" record") {
-				t.Fatalf("warning = %#v", warnings[0])
-			}
-			if !strings.HasPrefix(warnings[0].String(), "skipped: "+path+":2:") {
-				t.Fatalf("warning string = %q", warnings[0].String())
+			if len(feedstocks) != 0 || len(warnings) != 0 {
+				t.Fatalf("feedstocks = %#v, warnings = %#v", feedstocks, warnings)
 			}
 		})
+	}
+}
+
+func TestParsersDeferUnterminatedFinalRecord(t *testing.T) {
+	tests := []struct {
+		name    string
+		parser  Parser
+		content string
+	}{
+		{
+			name: "Claude", parser: Claude{},
+			content: `{"type":"user","uuid":"turn-1","sessionId":"session","timestamp":"2026-07-30T01:00:00Z","message":{"role":"user","content":"first"}}
+{"type":"assistant","sessionId":"session","timestamp":"2026-07-30T01:00:01Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}
+{"type":"user"`,
+		},
+		{
+			name: "Codex", parser: Codex{},
+			content: `{"timestamp":"2026-07-30T01:00:00Z","type":"session_meta","payload":{"id":"session"}}
+{"timestamp":"2026-07-30T01:00:01Z","type":"turn_context","payload":{"turn_id":"turn-1"}}
+{"timestamp":"2026-07-30T01:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"first"}}
+{"timestamp":"2026-07-30T01:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+{"timestamp":"2026-07-30`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			feedstocks, warnings, err := test.parser.Parse(path)
+			if err != nil || len(warnings) != 0 || len(feedstocks) != 1 {
+				t.Fatalf("feedstocks = %#v, warnings = %#v, error = %v", feedstocks, warnings, err)
+			}
+		})
+	}
+}
+
+func TestParsersReadCompleteFinalRecordWithoutNewline(t *testing.T) {
+	tests := []struct {
+		name    string
+		parser  Parser
+		content string
+	}{
+		{
+			name: "Claude", parser: Claude{},
+			content: `{"type":"user","uuid":"turn-1","sessionId":"session","timestamp":"2026-07-30T01:00:00Z","message":{"role":"user","content":"first"}}
+{"type":"assistant","sessionId":"session","timestamp":"2026-07-30T01:00:01Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}`,
+		},
+		{
+			name: "Codex", parser: Codex{},
+			content: `{"timestamp":"2026-07-30T01:00:00Z","type":"session_meta","payload":{"id":"session"}}
+{"timestamp":"2026-07-30T01:00:01Z","type":"turn_context","payload":{"turn_id":"turn-1"}}
+{"timestamp":"2026-07-30T01:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"first"}}
+{"timestamp":"2026-07-30T01:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			feedstocks, warnings, err := test.parser.Parse(path)
+			if err != nil || len(warnings) != 0 || len(feedstocks) != 1 {
+				t.Fatalf("feedstocks = %#v, warnings = %#v, error = %v", feedstocks, warnings, err)
+			}
+			if feedstocks[0].Dialogue[0].Content != "first" {
+				t.Fatalf("feedstock = %#v", feedstocks[0])
+			}
+		})
+	}
+}
+
+func TestCodexParsesLegacyAndCurrentRecordsInOneLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-legacy.jsonl")
+	legacyUser := `{"type":"message","role":"user","content":[{"type":"input_text","text":"legacy request"}]}`
+	content := `{"id":"session-id","timestamp":"2025-08-08T10:39:10.241Z","instructions":null,"git":{"branch":"main","repository_url":"https://example/repo.git"}}
+{"record_type":"state"}
+` + legacyUser + `
+{"type":"message","role":"assistant","content":[{"type":"output_text","text":"legacy answer"}]}
+{"timestamp":"2026-07-30T01:00:01Z","type":"turn_context","payload":{"turn_id":"current-turn","cwd":"/repo"}}
+{"timestamp":"2026-07-30T01:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"current request"}}
+{"timestamp":"2026-07-30T01:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"current answer"}]}}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feedstocks, warnings, err := (Codex{}).Parse(path)
+	if err != nil || len(warnings) != 0 || len(feedstocks) != 2 {
+		t.Fatalf("feedstocks = %#v, warnings = %#v, error = %v", feedstocks, warnings, err)
+	}
+	if feedstocks[0].TurnID != sourceTurnID("", []byte(legacyUser)) ||
+		feedstocks[0].Dialogue[0].Content != "legacy request" ||
+		feedstocks[0].Dialogue[1].Content != "legacy answer" ||
+		feedstocks[1].TurnID != "current-turn" ||
+		feedstocks[1].Dialogue[0].Content != "current request" ||
+		feedstocks[1].Dialogue[1].Content != "current answer" {
+		t.Fatalf("feedstocks = %#v", feedstocks)
+	}
+}
+
+func TestLegacyCodexPreservesSourceSequence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-legacy.jsonl")
+	content := `{"id":"session-id","timestamp":"2025-08-08T10:39:10.241Z","instructions":null}
+{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}
+{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}
+{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}
+{"type":"message","role":"assistant","content":[{"type":"output_text","text":"second answer"}]}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feedstocks, warnings, err := (Codex{}).Parse(path)
+	if err != nil || len(warnings) != 0 || len(feedstocks) != 2 {
+		t.Fatalf("feedstocks = %#v, warnings = %#v, error = %v", feedstocks, warnings, err)
+	}
+	if feedstocks[0].SourceSequence != 1 || feedstocks[1].SourceSequence != 2 {
+		t.Fatalf("source sequences = %d, %d", feedstocks[0].SourceSequence, feedstocks[1].SourceSequence)
+	}
+	if !feedstocks[0].Timestamp.Equal(feedstocks[1].Timestamp) {
+		t.Fatalf("legacy timestamps were fabricated: %s, %s", feedstocks[0].Timestamp, feedstocks[1].Timestamp)
+	}
+}
+
+func TestParsersRejectUnknownRecordKinds(t *testing.T) {
+	tests := []struct {
+		name    string
+		parser  Parser
+		content string
+	}{
+		{
+			name: "Claude", parser: Claude{},
+			content: `{"type":"future-conversation-record","message":{"role":"user","content":"hidden"}}
+`,
+		},
+		{
+			name: "Codex", parser: Codex{},
+			content: `{"timestamp":"2026-07-30T01:00:00Z","type":"future_record","payload":{"message":"hidden"}}
+`,
+		},
+		{
+			name: "ambiguous Codex", parser: Codex{},
+			content: `{"timestamp":"2026-07-30T01:00:00Z","type":"session_meta","payload":{"id":"session"},"record_type":"state"}
+`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := test.parser.Parse(path); err == nil {
+				t.Fatal("unknown or ambiguous record was accepted")
+			}
+		})
+	}
+}
+
+func TestCodexParsesRecordLargerThanScannerLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	largeOutput := strings.Repeat("x", 33*1024*1024)
+	content := `{"timestamp":"2026-07-30T01:00:00Z","type":"session_meta","payload":{"id":"session"}}
+{"timestamp":"2026-07-30T01:00:01Z","type":"turn_context","payload":{"turn_id":"turn-1"}}
+{"timestamp":"2026-07-30T01:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"first"}}
+` + `{"timestamp":"2026-07-30T01:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"` + largeOutput + `"}}
+{"timestamp":"2026-07-30T01:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feedstocks, warnings, err := (Codex{}).Parse(path)
+	if err != nil || len(warnings) != 0 || len(feedstocks) != 1 {
+		t.Fatalf("feedstocks = %#v, warnings = %#v, error = %v", feedstocks, warnings, err)
+	}
+}
+
+func TestCodexExcludesTopLevelSubagentTranscript(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-subagent.jsonl")
+	content := `{"timestamp":"2026-07-30T01:00:00Z","type":"session_meta","payload":{"id":"child-session","thread_source":"subagent","source":{"subagent":{"parent_thread_id":"parent-session"}}}}
+{"timestamp":"2026-07-30T01:00:01Z","type":"turn_context","payload":{"turn_id":"child-turn"}}
+{"timestamp":"2026-07-30T01:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"internal task"}}
+{"timestamp":"2026-07-30T01:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"child-turn"}}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feedstocks, warnings, err := (Codex{}).Parse(path)
+	if err != nil || len(warnings) != 0 {
+		t.Fatalf("warnings = %#v, error = %v", warnings, err)
+	}
+	if len(feedstocks) != 0 {
+		t.Fatalf("subagent feedstocks = %#v", feedstocks)
+	}
+}
+
+func TestCodexParsesForkLineageWithOriginalSessionIdentities(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-child-session.jsonl")
+	content := `{"timestamp":"2026-07-30T01:00:00Z","type":"session_meta","payload":{"id":"child-session","forked_from_id":"parent-session","thread_source":"user"}}
+{"timestamp":"2026-07-29T01:00:00Z","type":"session_meta","payload":{"id":"parent-session","thread_source":"user"}}
+{"timestamp":"2026-07-29T01:00:01Z","type":"turn_context","payload":{"turn_id":"parent-turn"}}
+{"timestamp":"2026-07-29T01:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"parent request"}}
+{"timestamp":"2026-07-29T01:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"parent-turn"}}
+{"timestamp":"2026-07-30T01:00:04Z","type":"session_meta","payload":{"id":"child-session","forked_from_id":"parent-session","thread_source":"user"}}
+{"timestamp":"2026-07-30T01:00:05Z","type":"turn_context","payload":{"turn_id":"child-turn"}}
+{"timestamp":"2026-07-30T01:00:06Z","type":"event_msg","payload":{"type":"user_message","message":"child request"}}
+{"timestamp":"2026-07-30T01:00:07Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"child-turn"}}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feedstocks, warnings, err := (Codex{}).Parse(path)
+	if err != nil || len(warnings) != 0 {
+		t.Fatalf("feedstocks = %#v, warnings = %#v, error = %v", feedstocks, warnings, err)
+	}
+	if len(feedstocks) != 2 {
+		t.Fatalf("feedstocks = %#v", feedstocks)
+	}
+	if feedstocks[0].Session.ID != "parent-session" || feedstocks[0].TurnID != "parent-turn" ||
+		feedstocks[1].Session.ID != "child-session" || feedstocks[1].TurnID != "child-turn" {
+		t.Fatalf("fork feedstocks = %#v", feedstocks)
+	}
+	if feedstocks[0].SourceOwnerSessionID != "child-session" ||
+		feedstocks[1].SourceOwnerSessionID != "child-session" {
+		t.Fatalf("fork owners = %#v", feedstocks)
+	}
+	if feedstocks[0].SourceSequence != 1 || feedstocks[1].SourceSequence != 2 {
+		t.Fatalf("source sequences = %d, %d", feedstocks[0].SourceSequence, feedstocks[1].SourceSequence)
+	}
+}
+
+func TestSnapshotReaderRejectsRecordAboveConfiguredLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 65)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := scanSnapshotWithLimit(path, 64, func(_ int, _ []byte) (bool, error) {
+		return true, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "line 1") ||
+		!strings.Contains(err.Error(), "64 bytes") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestClaudeIncrementalParserResumesAfterCheckpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	first := `{"type":"user","uuid":"turn-1","sessionId":"session","timestamp":"2026-07-30T01:00:00Z","message":{"role":"user","content":"first"}}
+{"type":"assistant","sessionId":"session","timestamp":"2026-07-30T01:00:01Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"first answer"}]}}
+`
+	if err := os.WriteFile(path, []byte(first), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, warnings, err := (Claude{}).ParseIncremental(path, nil)
+	if err != nil || len(warnings) != 0 || len(initial.Candidates) != 1 {
+		t.Fatalf("initial = %#v, warnings = %#v, error = %v", initial, warnings, err)
+	}
+	second := `{"type":"user","uuid":"turn-2","sessionId":"session","timestamp":"2026-07-30T01:01:00Z","message":{"role":"user","content":"second"}}
+{"type":"assistant","sessionId":"session","timestamp":"2026-07-30T01:01:01Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"second answer"}]}}
+`
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(second); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resumed, warnings, err := (Claude{}).ParseIncremental(path, &initial.Checkpoint)
+	if err != nil || len(warnings) != 0 || len(resumed.Candidates) != 1 {
+		t.Fatalf("resumed = %#v, warnings = %#v, error = %v", resumed, warnings, err)
+	}
+	if resumed.Candidates[0].TurnID != "turn-2" || resumed.Candidates[0].SourceSequence != 2 {
+		t.Fatalf("resumed candidates = %#v", resumed.Candidates)
+	}
+}
+
+func TestClaudeIncrementalParserCompletesOpenTurnAfterAppend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	user := `{"type":"user","uuid":"turn-1","sessionId":"session","timestamp":"2026-07-30T01:00:00Z","message":{"role":"user","content":"first"}}
+`
+	if err := os.WriteFile(path, []byte(user), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, _, err := (Claude{}).ParseIncremental(path, nil)
+	if err != nil || len(initial.Candidates) != 0 {
+		t.Fatalf("initial = %#v, error = %v", initial, err)
+	}
+	assistant := `{"type":"assistant","sessionId":"session","timestamp":"2026-07-30T01:00:01Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}
+`
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(assistant); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resumed, _, err := (Claude{}).ParseIncremental(path, &initial.Checkpoint)
+	if err != nil || len(resumed.Candidates) != 1 {
+		t.Fatalf("resumed = %#v, error = %v", resumed, err)
+	}
+	if resumed.Candidates[0].Dialogue[1].Content != "done" {
+		t.Fatalf("candidate = %#v", resumed.Candidates[0])
 	}
 }
