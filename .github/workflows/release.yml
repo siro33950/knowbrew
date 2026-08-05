@@ -93,6 +93,19 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "CC=${{ matrix.cc }}"
           Add-Content -Path $env:GITHUB_ENV -Value "CXX=${{ matrix.cxx }}"
 
+      - name: Prepare Windows SQLite headers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          go mod download github.com/mattn/go-sqlite3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $module = go list -m -f "{{.Dir}}" github.com/mattn/go-sqlite3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $include = Join-Path $env:RUNNER_TEMP "sqlite3-include"
+          New-Item -ItemType Directory -Force -Path $include | Out-Null
+          Copy-Item (Join-Path $module "sqlite3-binding.h") (Join-Path $include "sqlite3.h")
+          Add-Content -Path $env:GITHUB_ENV -Value "CGO_CFLAGS=-I$include"
+
       - name: Build and smoke-test Unix binary
         if: runner.os != 'Windows'
         shell: bash
