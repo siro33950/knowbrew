@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -614,7 +615,7 @@ func TestDefaultTypeMastersAreGeneratedOnlyWhenEmpty(t *testing.T) {
 		"relation":   {"An established relationship between two or more subjects or concepts.", "The archive belongs to the research collection."},
 		"principle":  {"An established generalized causal relationship, mechanism, or recurring tendency.", "Higher fermentation temperatures generally accelerate fermentation."},
 		"constraint": {"An established limit or required condition imposed by something other than a choice recorded here.", "The venue cannot admit more than 200 people."},
-		"decision":   {"A settled choice made by an authorized person or group and intended to remain applicable beyond the current task, together with its reason when known.", "Use SQLite because the index must be local and rebuildable."},
+		"decision":   {"An established policy, rule, design direction, or operating practice that governs future behavior until changed.", "The local rebuildable index uses SQLite."},
 		"intent":     {"A durable intended outcome or quality that explains why a subject, rule, or design exists, independently of the current means used to achieve it.", "Feedstock classification remains consistent with its Assertions so records without Assertions are not presented as classified."},
 		"preference": {"A stable stated preference of a person or group, rather than a one-time request or binding decision.", "The user prefers concise headings."},
 	}
@@ -625,6 +626,28 @@ func TestDefaultTypeMastersAreGeneratedOnlyWhenEmpty(t *testing.T) {
 		}
 		if entry.Definition != expected.definition || entry.Example != expected.example {
 			t.Fatalf("default type master %q = %#v", entry.Name, entry)
+		}
+		if entry.Name == "decision" {
+			for _, exclusion := range []string{
+				"Proposals or tentative options that have not been adopted.",
+				"One-time tasks, implementation steps, and instructions limited to the current work.",
+				"Intended outcomes or desired qualities without a governing policy, rule, design direction, or operating practice.",
+				"Limits or required conditions imposed externally rather than established as a governing direction.",
+			} {
+				if !slices.Contains(entry.Excludes, exclusion) {
+					t.Fatalf("default decision type does not exclude %q: %#v", exclusion, entry)
+				}
+			}
+		}
+		if entry.Name == "preference" {
+			for _, exclusion := range []string{
+				"Binding rules, policies, design directions, or operating practices established by an authorized instruction.",
+				"One-time reactions, feedback, or requests limited to the current work.",
+			} {
+				if !slices.Contains(entry.Excludes, exclusion) {
+					t.Fatalf("default preference type does not exclude %q: %#v", exclusion, entry)
+				}
+			}
 		}
 		delete(want, entry.Name)
 	}

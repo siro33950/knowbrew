@@ -12,7 +12,7 @@ import (
 
 func TestMergeClaudeSettingsPreservesExistingContentAndIsIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	existing := `{"permissions":{"allow":["Read"]},"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"echo existing"}]},{"matcher":"startup","hooks":[{"type":"command","command":"knowbrew search --trigger always"}]}]}}`
+	existing := `{"permissions":{"allow":["Read"]},"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"echo existing"}]},{"matcher":"startup","hooks":[{"type":"command","command":"knowbrew search --trigger always"}]}],"Stop":[{"hooks":[{"type":"command","command":"echo stopped"}]}]}}`
 	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -32,14 +32,23 @@ func TestMergeClaudeSettingsPreservesExistingContentAndIsIdempotent(t *testing.T
 	if count := strings.Count(string(data), "Loading approved knowbrew rules"); count != 1 {
 		t.Fatalf("knowbrew hook count = %d", count)
 	}
+	if count := strings.Count(string(data), "Drawing completed turn"); count != 1 {
+		t.Fatalf("knowbrew draw hook count = %d", count)
+	}
 	if !strings.Contains(string(data), "echo existing") {
 		t.Fatal("existing hook was lost")
+	}
+	if !strings.Contains(string(data), "echo stopped") {
+		t.Fatal("existing Stop hook was lost")
 	}
 	if strings.Contains(string(data), "search --trigger always") {
 		t.Fatalf("legacy hook was not removed:\n%s", data)
 	}
 	if !strings.Contains(string(data), "/opt/bin/knowbrew knowledge --trigger always") {
 		t.Fatalf("new knowledge hook was not installed:\n%s", data)
+	}
+	if !strings.Contains(string(data), "/opt/bin/knowbrew draw --hook") {
+		t.Fatalf("new draw hook was not installed:\n%s", data)
 	}
 }
 
@@ -57,6 +66,15 @@ func TestMergeCodexConfigAndInstructionsAreIdempotent(t *testing.T) {
 	data, _ := os.ReadFile(configPath)
 	if strings.Count(string(data), tomlStart) != 1 || !strings.Contains(string(data), `model = "existing"`) {
 		t.Fatalf("unexpected config:\n%s", data)
+	}
+	for _, expected := range []string{
+		"[[hooks.Stop]]",
+		"/opt/bin/knowbrew draw --hook",
+		"Drawing completed turn",
+	} {
+		if !strings.Contains(string(data), expected) {
+			t.Fatalf("Codex config does not contain %q:\n%s", expected, data)
+		}
 	}
 	var parsed map[string]any
 	if _, err := toml.Decode(string(data), &parsed); err != nil {

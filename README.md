@@ -70,8 +70,10 @@ knowbrew init
 ```
 
 It asks which session logs to read, which LLM backend to use, and whether to
-register itself with Claude Code and Codex. Running `init` again seeds the form
-from your current configuration and keeps settings it does not ask about.
+register itself with Claude Code and Codex. Registration adds a SessionStart
+hook for approved Knowledge and a Stop hook that Draws the completed session
+turn. Running `init` again seeds the form from your current configuration and
+keeps settings it does not ask about.
 
 Then build your knowledge base:
 
@@ -278,8 +280,8 @@ so knowbrew works from any directory.
 
 CLI backends run your own agent, so your `CLAUDE.md` / `AGENTS.md` apply: what
 knowbrew writes follows your instructions, including the language you write in.
-Your MCP servers are not loaded for these background jobs, and knowbrew's own
-SessionStart hook does not fire inside them.
+Your MCP servers are not loaded for these background jobs. knowbrew's own hooks
+exit immediately inside them, preventing recursive Draws and Knowledge lookup.
 
 `init` offers Japanese-recommended Ruri, English-recommended Snowflake,
 quality-first Qwen3, or disabled full-text-only search. knowbrew downloads and

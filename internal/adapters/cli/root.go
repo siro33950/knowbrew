@@ -80,6 +80,7 @@ func newInitCommand() *cobra.Command {
 func newDrawCommand() *cobra.Command {
 	var (
 		verbose bool
+		hook    bool
 		maximum int
 		sources []string
 		since   string
@@ -90,6 +91,27 @@ func newDrawCommand() *cobra.Command {
 		Short: "Acquire feedstocks, then classify unannotated records concurrently",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(command *cobra.Command, paths []string) error {
+			if hook {
+				if strings.TrimSpace(os.Getenv(config.InvocationIDEnvironment)) != "" {
+					return nil
+				}
+				for _, name := range []string{"max", "source", "since", "until", "verbose"} {
+					if command.Flags().Changed(name) {
+						return fmt.Errorf("--hook cannot be used with --%s", name)
+					}
+				}
+				if len(paths) > 0 {
+					return errors.New("--hook does not accept explicit paths")
+				}
+				path, err := drawHookTranscriptPath(command.InOrStdin())
+				if err != nil {
+					return err
+				}
+				if path == "" {
+					return nil
+				}
+				paths = []string{path}
+			}
 			now := time.Now()
 			options := draw.Options{Paths: paths, Sources: sources}
 			if command.Flags().Changed("max") {
@@ -113,6 +135,9 @@ func newDrawCommand() *cobra.Command {
 				options.ModifiedUntil = &value
 			}
 			display := progressDisplay(verbose)
+			if hook {
+				display = progress.From(nil)
+			}
 			cfg, runner, err := loadRunner(verbose)
 			if err != nil {
 				return err
@@ -136,7 +161,10 @@ func newDrawCommand() *cobra.Command {
 			if err != nil {
 				var acquisitionErr draw.AcquisitionFailuresError
 				if errors.As(err, &acquisitionErr) {
-					if writeErr := writeJSON(os.Stdout, summary); writeErr != nil {
+					if hook {
+						return err
+					}
+					if writeErr := writeJSON(command.OutOrStdout(), summary); writeErr != nil {
 						return errors.Join(err, writeErr)
 					}
 					return err
@@ -144,15 +172,43 @@ func newDrawCommand() *cobra.Command {
 				display.Abort()
 				return err
 			}
-			return writeJSON(os.Stdout, summary)
+			if hook {
+				return nil
+			}
+			return writeJSON(command.OutOrStdout(), summary)
 		},
 	}
+	command.Flags().BoolVar(&hook, "hook", false, "Read a Stop hook payload from stdin and draw its transcript")
 	command.Flags().BoolVar(&verbose, "verbose", false, "Stream agent output and per-record progress")
 	command.Flags().IntVar(&maximum, "max", 0, "Process at most N unfinished turns across all history")
 	command.Flags().StringSliceVar(&sources, "source", nil, "Limit configured sources to claude or codex")
 	command.Flags().StringVar(&since, "since", "", "Use logs modified since a duration ago or timestamp")
 	command.Flags().StringVar(&until, "until", "", "Use logs modified until a duration ago or timestamp")
 	return command
+}
+
+func drawHookTranscriptPath(reader io.Reader) (string, error) {
+	var input struct {
+		Event          string  `json:"hook_event_name"`
+		TranscriptPath *string `json:"transcript_path"`
+	}
+	decoder := json.NewDecoder(reader)
+	if err := decoder.Decode(&input); err != nil {
+		return "", fmt.Errorf("decode draw hook input: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
+		return "", fmt.Errorf("decode draw hook input: %w", err)
+	}
+	if input.Event != "Stop" {
+		return "", fmt.Errorf("draw hook requires a Stop event, got %q", input.Event)
+	}
+	if input.TranscriptPath == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(*input.TranscriptPath), nil
 }
 
 func drawSettings(cfg config.Config) draw.Settings {

@@ -117,7 +117,7 @@ func TestDrawBrewAndDistillExposeCommonMaxFlag(t *testing.T) {
 
 func TestDrawExposesBoundedSourceSelectionFlags(t *testing.T) {
 	command := newDrawCommand()
-	for _, name := range []string{"max", "source", "since", "until"} {
+	for _, name := range []string{"hook", "max", "source", "since", "until"} {
 		if command.Flags().Lookup(name) == nil {
 			t.Fatalf("draw has no --%s flag", name)
 		}
@@ -127,6 +127,108 @@ func TestDrawExposesBoundedSourceSelectionFlags(t *testing.T) {
 	}
 	if command.Flags().Lookup("max-turns") != nil {
 		t.Fatal("draw still exposes legacy --max-turns flag")
+	}
+}
+
+func TestDrawHookReadsStopTranscriptPath(t *testing.T) {
+	path, err := drawHookTranscriptPath(strings.NewReader(`{
+		"hook_event_name":"Stop",
+		"transcript_path":"/tmp/session.jsonl"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/tmp/session.jsonl" {
+		t.Fatalf("transcript path = %q", path)
+	}
+}
+
+func TestDrawHookRejectsInvalidInput(t *testing.T) {
+	for _, input := range []string{
+		`{"hook_event_name":"SessionStart","transcript_path":"/tmp/session.jsonl"}`,
+		`{"hook_event_name":"Stop","transcript_path":"/tmp/session.jsonl"}{}`,
+		`not json`,
+	} {
+		if _, err := drawHookTranscriptPath(strings.NewReader(input)); err == nil {
+			t.Fatalf("input was accepted: %s", input)
+		}
+	}
+}
+
+func TestDrawHookAllowsMissingTranscriptPath(t *testing.T) {
+	path, err := drawHookTranscriptPath(strings.NewReader(`{"hook_event_name":"Stop","transcript_path":null}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "" {
+		t.Fatalf("transcript path = %q", path)
+	}
+}
+
+func TestDrawHookSuppressesKnowbrewAgentInvocationBeforeReadingInput(t *testing.T) {
+	t.Setenv(config.InvocationIDEnvironment, "invocation-id")
+	command := newRootCommand()
+	command.SetIn(strings.NewReader("invalid hook input"))
+	command.SetArgs([]string{"draw", "--hook"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDrawHookProcessesOnlyPayloadTranscriptAndWritesNoSummary(t *testing.T) {
+	rootDir := t.TempDir()
+	sourceDir := t.TempDir()
+	transcriptPath := filepath.Join(sourceDir, "session.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "unrelated.jsonl"), []byte("not json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" +
+		"[llm]\nbackend = \"claude-cli\"\n\n" +
+		"[embedding]\nmodel = \"disabled\"\n\n" +
+		"[[sources]]\nagent = \"codex\"\nparser = \"codex\"\npaths = [" + quoteTOML(sourceDir) + "]\n"
+	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.ConfigEnvironment, configPath)
+	payload, err := json.Marshal(map[string]any{
+		"hook_event_name": "Stop", "transcript_path": transcriptPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	command := newRootCommand()
+	command.SetIn(bytes.NewReader(payload))
+	command.SetOut(&output)
+	command.SetArgs([]string{"draw", "--hook"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("hook output = %q", output.String())
+	}
+}
+
+func TestDrawHookRejectsExplicitArgumentsAndFilters(t *testing.T) {
+	for _, args := range [][]string{
+		{"draw", "--hook", "/tmp/session.jsonl"},
+		{"draw", "--hook", "--max", "1"},
+		{"draw", "--hook", "--source", "codex"},
+		{"draw", "--hook", "--since", "1h"},
+		{"draw", "--hook", "--until", "1h"},
+		{"draw", "--hook", "--verbose"},
+	} {
+		command := newRootCommand()
+		command.SetIn(strings.NewReader(`{"hook_event_name":"Stop","transcript_path":null}`))
+		command.SetArgs(args)
+		if err := command.Execute(); err == nil {
+			t.Fatalf("hook arguments were accepted: %v", args)
+		}
 	}
 }
 

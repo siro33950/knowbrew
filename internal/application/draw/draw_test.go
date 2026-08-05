@@ -659,6 +659,8 @@ func TestAnnotationPromptIncludesFilteredDialogueWithoutReadInstructions(t *test
 		Name:       "observation",
 		Definition: "A verified observation from the dialogue.",
 		Example:    "The custom parser accepts nested records.",
+		Includes:   []string{"verified runtime behavior"},
+		Excludes:   []string{"temporary task progress"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -739,6 +741,17 @@ func TestAnnotationPromptIncludesFilteredDialogueWithoutReadInstructions(t *test
 		"Do not turn one broad approval into separate assertions for every explanatory sentence",
 		"Re-read target_user_input clause by clause",
 		"Treat knowledge_type_master as the sole authority",
+		"Master field semantics:",
+		"name is the selectable identifier",
+		"definition is the controlling positive boundary",
+		"example is one illustration of the definition",
+		"includes lists explicit positive scope clarifications",
+		"excludes lists hard vetoes",
+		"Excludes wins over every positive field",
+		"An omitted optional field adds no condition",
+		"Evaluate every listed excludes value as a hard veto",
+		`"includes": [`, `"verified runtime behavior"`,
+		`"excludes": [`, `"temporary task progress"`,
 		"Choose only existing subjects", `"name": "observation"`, `"name": "agent-model"`,
 	} {
 		if !strings.Contains(assertionText, required) {

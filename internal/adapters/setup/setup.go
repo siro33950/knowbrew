@@ -189,10 +189,10 @@ func RunInteractive() error {
 		huh.NewGroup(firstGroupFields...),
 		huh.NewGroup(
 			huh.NewConfirm().
-				Title("Register Claude Code SessionStart hook and instructions?").
+				Title("Register Claude Code hooks and instructions?").
 				Value(&installClaude),
 			huh.NewConfirm().
-				Title("Register Codex SessionStart hook and instructions?").
+				Title("Register Codex hooks and instructions?").
 				Value(&installCodex),
 		),
 	)
@@ -520,6 +520,20 @@ func MergeClaudeSettings(path, executable string) error {
 		}},
 	})
 	hooks["SessionStart"] = filtered
+	stop, _ := hooks["Stop"].([]any)
+	filtered = make([]any, 0, len(stop)+1)
+	for _, value := range stop {
+		if !containsCommand(value, "knowbrew draw --hook") {
+			filtered = append(filtered, value)
+		}
+	}
+	filtered = append(filtered, map[string]any{
+		"hooks": []any{map[string]any{
+			"type": "command", "command": drawHookCommand(executable),
+			"timeout": 600, "statusMessage": "Drawing completed turn",
+		}},
+	})
+	hooks["Stop"] = filtered
 	encoded, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return err
@@ -561,6 +575,12 @@ func ClaudeSnippet(executable string) string {
 					"timeout": 30, "statusMessage": "Loading approved knowbrew rules",
 				}},
 			}},
+			"Stop": []any{map[string]any{
+				"hooks": []any{map[string]any{
+					"type": "command", "command": drawHookCommand(executable),
+					"timeout": 600, "statusMessage": "Drawing completed turn",
+				}},
+			}},
 		},
 	}
 	data, _ := json.MarshalIndent(payload, "", "  ")
@@ -569,6 +589,7 @@ func ClaudeSnippet(executable string) string {
 
 func CodexSnippet(executable string) string {
 	command := shellCommand(executable)
+	drawCommand := drawHookCommand(executable)
 	return fmt.Sprintf(`%s
 [[hooks.SessionStart]]
 matcher = "startup|resume|clear|compact"
@@ -579,7 +600,15 @@ command = %s
 timeout = 30
 statusMessage = "Loading approved knowbrew rules"
 additionalContextLimit = 2500
-%s`, tomlStart, strconv.Quote(command), tomlEnd)
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = %s
+timeout = 600
+statusMessage = "Drawing completed turn"
+%s`, tomlStart, strconv.Quote(command), strconv.Quote(drawCommand), tomlEnd)
 }
 
 func instructionBlock() string {
@@ -618,6 +647,10 @@ func containsCommand(value any, fragment string) bool {
 
 func shellCommand(executable string) string {
 	return shellQuote(executable) + " knowledge --trigger always"
+}
+
+func drawHookCommand(executable string) string {
+	return shellQuote(executable) + " draw --hook"
 }
 
 func shellQuote(value string) string {
