@@ -9,6 +9,8 @@ import (
 	"github.com/gofrs/flock"
 )
 
+var ErrBusy = errors.New("lock is already held")
+
 type FileLock struct {
 	Path          string
 	Name          string
@@ -35,6 +37,9 @@ func (lock FileLock) Lock(ctx context.Context) (func() error, error) {
 		return nil, fmt.Errorf("acquire %s lock: %w", lock.Name, err)
 	}
 	if !locked {
+		if lock.Immediate {
+			return nil, fmt.Errorf("acquire %s lock: %w", lock.Name, ErrBusy)
+		}
 		return nil, errors.New(lock.Name + " lock wait ended without acquiring the lock")
 	}
 	return fileLock.Unlock, nil
