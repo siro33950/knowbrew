@@ -46,7 +46,8 @@ type claudeBlock struct {
 }
 
 var ignoredClaudeRecordTypes = map[string]struct{}{
-	"attachment": {}, "custom-title": {}, "file-history-snapshot": {},
+	"ai-title": {}, "attachment": {}, "custom-title": {},
+	"file-history-delta": {}, "file-history-snapshot": {},
 	"last-prompt": {}, "mode": {}, "permission-mode": {}, "pr-link": {},
 	"progress": {}, "queue-operation": {}, "result": {}, "started": {},
 	"system": {},
@@ -106,8 +107,9 @@ func (Claude) ParseIncremental(
 		ownerIdentified = state.OwnerIdentified
 		assembler = restoreTurnAssembler(state.Assembler, &sequence)
 	}
+	collector := newWarningCollector(path)
 	end, err := scanSnapshotFrom(path, position, MaxJSONLRecordBytes, func(_ int, raw []byte) (bool, error) {
-		events, err := decodeClaudeRecord(raw)
+		events, err := decodeClaudeRecord(raw, collector.add)
 		if err != nil {
 			return false, err
 		}
@@ -123,7 +125,7 @@ func (Claude) ParseIncremental(
 		return true, nil
 	})
 	if err != nil {
-		return IncrementalResult{}, nil, fmt.Errorf("parse Claude log %s: %w", path, err)
+		return IncrementalResult{}, collector.warnings, fmt.Errorf("parse Claude log %s: %w", path, err)
 	}
 	assembler.FlushCompleted()
 	state, err := json.Marshal(claudeParserState{
@@ -131,7 +133,7 @@ func (Claude) ParseIncremental(
 		OwnerIdentified: ownerIdentified, Assembler: assembler.checkpoint(),
 	})
 	if err != nil {
-		return IncrementalResult{}, nil, fmt.Errorf("save Claude parser checkpoint: %w", err)
+		return IncrementalResult{}, collector.warnings, fmt.Errorf("save Claude parser checkpoint: %w", err)
 	}
 	candidates := assembler.Drain()
 	setSourceOwner(candidates, ownerSessionID)
@@ -140,7 +142,7 @@ func (Claude) ParseIncremental(
 		Checkpoint: Checkpoint{
 			Offset: end.Offset, Line: end.Line, SnapshotSize: end.SnapshotSize, State: state,
 		},
-	}, nil, nil
+	}, collector.warnings, nil
 }
 
 func parseClaude(
@@ -150,8 +152,9 @@ func parseClaude(
 	assembler := newTurnAssembler("claude", sessionIDFromPath(path))
 	ownerSessionID := sessionIDFromPath(path)
 	ownerIdentified := false
+	collector := newWarningCollector(path)
 	err := scanSnapshot(path, func(_ int, raw []byte) (bool, error) {
-		events, err := decodeClaudeRecord(raw)
+		events, err := decodeClaudeRecord(raw, collector.add)
 		if err != nil {
 			return false, err
 		}
@@ -167,11 +170,11 @@ func parseClaude(
 		return true, nil
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse Claude log %s: %w", path, err)
+		return nil, collector.warnings, fmt.Errorf("parse Claude log %s: %w", path, err)
 	}
 	candidates := assembler.Finish(includeOpen)
 	setSourceOwner(candidates, ownerSessionID)
-	return candidates, nil, nil
+	return candidates, collector.warnings, nil
 }
 
 func (Claude) ExtractTurn(path, turnID string) ([]domain.DialogueMessage, error) {
@@ -187,7 +190,7 @@ func (Claude) ExtractTurn(path, turnID string) ([]domain.DialogueMessage, error)
 	return nil, fmt.Errorf("source turn %s was not found in Claude log %s", turnID, path)
 }
 
-func decodeClaudeRecord(raw []byte) ([]sourceEvent, error) {
+func decodeClaudeRecord(raw []byte, warn func(reason string)) ([]sourceEvent, error) {
 	var record claudeRecord
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return nil, fmt.Errorf("decode Claude record: %w", err)
@@ -197,18 +200,22 @@ func decodeClaudeRecord(raw []byte) ([]sourceEvent, error) {
 	}
 	switch record.Type {
 	case "user":
-		return decodeClaudeUser(record, raw)
+		return decodeClaudeUser(record, raw, warn)
 	case "assistant":
-		return decodeClaudeAssistant(record)
+		return decodeClaudeAssistant(record, warn)
 	default:
-		if _, ignored := ignoredClaudeRecordTypes[record.Type]; ignored {
-			return []sourceEvent{{Kind: eventIgnored}}, nil
+		if _, ignored := ignoredClaudeRecordTypes[record.Type]; !ignored {
+			warn(fmt.Sprintf("unknown Claude record type %q", record.Type))
 		}
-		return nil, fmt.Errorf("unknown Claude record type %q", record.Type)
+		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
 }
 
-func decodeClaudeUser(record claudeRecord, raw []byte) ([]sourceEvent, error) {
+func decodeClaudeUser(
+	record claudeRecord,
+	raw []byte,
+	warn func(reason string),
+) ([]sourceEvent, error) {
 	if record.Message.Role != "user" {
 		return nil, fmt.Errorf("Claude user record has role %q", record.Message.Role)
 	}
@@ -222,7 +229,8 @@ func decodeClaudeUser(record claudeRecord, raw []byte) ([]sourceEvent, error) {
 	}
 	for _, block := range blocks {
 		if _, known := knownClaudeBlockTypes[block.Type]; !known {
-			return nil, fmt.Errorf("unknown Claude user content block %q", block.Type)
+			warn(fmt.Sprintf("unknown Claude user content block %q", block.Type))
+			continue
 		}
 		if block.Type == "tool_result" {
 			return []sourceEvent{{Kind: eventIgnored}}, nil
@@ -249,7 +257,10 @@ func decodeClaudeUser(record claudeRecord, raw []byte) ([]sourceEvent, error) {
 	}}, nil
 }
 
-func decodeClaudeAssistant(record claudeRecord) ([]sourceEvent, error) {
+func decodeClaudeAssistant(
+	record claudeRecord,
+	warn func(reason string),
+) ([]sourceEvent, error) {
 	if record.Message.Role != "assistant" {
 		return nil, fmt.Errorf("Claude assistant record has role %q", record.Message.Role)
 	}
@@ -262,7 +273,7 @@ func decodeClaudeAssistant(record claudeRecord) ([]sourceEvent, error) {
 	}
 	for _, block := range blocks {
 		if _, known := knownClaudeBlockTypes[block.Type]; !known {
-			return nil, fmt.Errorf("unknown Claude assistant content block %q", block.Type)
+			warn(fmt.Sprintf("unknown Claude assistant content block %q", block.Type))
 		}
 	}
 	text, err := claudeText(record.Message.Content)

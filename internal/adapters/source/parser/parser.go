@@ -32,6 +32,26 @@ type IncrementalResult struct {
 	Excluded   bool
 }
 
+type warningCollector struct {
+	path     string
+	seen     map[string]struct{}
+	warnings []diagnostic.Warning
+}
+
+func newWarningCollector(path string) *warningCollector {
+	return &warningCollector{path: path, seen: map[string]struct{}{}}
+}
+
+func (collector *warningCollector) add(reason string) {
+	if _, exists := collector.seen[reason]; exists {
+		return
+	}
+	collector.seen[reason] = struct{}{}
+	collector.warnings = append(collector.warnings, diagnostic.Warning{
+		Path: collector.path, Reason: reason,
+	})
+}
+
 func For(name string) (Parser, error) {
 	switch name {
 	case "claude":

@@ -588,36 +588,88 @@ func TestLegacyCodexPreservesSourceSequence(t *testing.T) {
 	}
 }
 
-func TestParsersRejectUnknownRecordKinds(t *testing.T) {
+func TestClaudeSkipsUnknownRecordsWithWarning(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	content := `{"type":"future-conversation-record","message":{"role":"user","content":"hidden"}}
+{"type":"ai-title","aiTitle":"session title","sessionId":"session-id"}
+{"type":"user","uuid":"turn-1","sessionId":"session-id","timestamp":"2026-07-30T01:00:00Z","message":{"role":"user","content":"first"}}
+{"type":"assistant","sessionId":"session-id","timestamp":"2026-07-30T01:00:01Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"future-block","text":"hidden"},{"type":"text","text":"done"}]}}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feedstocks, warnings, err := (Claude{}).Parse(path)
+	if err != nil || len(feedstocks) != 1 {
+		t.Fatalf("feedstocks = %#v, error = %v", feedstocks, err)
+	}
+	if feedstocks[0].Dialogue[0].Content != "first" || feedstocks[0].Dialogue[1].Content != "done" {
+		t.Fatalf("dialogue = %#v", feedstocks[0].Dialogue)
+	}
+	wantReasons := []string{
+		`unknown Claude record type "future-conversation-record"`,
+		`unknown Claude assistant content block "future-block"`,
+	}
+	if len(warnings) != len(wantReasons) {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	for index, reason := range wantReasons {
+		if warnings[index].Path != path || warnings[index].Reason != reason {
+			t.Fatalf("warnings[%d] = %#v", index, warnings[index])
+		}
+	}
+}
+
+func TestCodexSkipsUnknownRecordsWithWarning(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	content := `{"timestamp":"2026-07-30T01:00:00Z","type":"session_meta","payload":{"id":"session"}}
+{"timestamp":"2026-07-30T01:00:01Z","type":"turn_context","payload":{"turn_id":"turn-1"}}
+{"timestamp":"2026-07-30T01:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"first"}}
+{"timestamp":"2026-07-30T01:00:03Z","type":"future_record","payload":{"message":"hidden"}}
+{"timestamp":"2026-07-30T01:00:04Z","type":"event_msg","payload":{"type":"future_event","message":"hidden"}}
+{"timestamp":"2026-07-30T01:00:05Z","type":"session_meta","payload":{"id":"ambiguous"},"record_type":"state"}
+{"timestamp":"2026-07-30T01:00:06Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feedstocks, warnings, err := (Codex{}).Parse(path)
+	if err != nil || len(feedstocks) != 1 {
+		t.Fatalf("feedstocks = %#v, error = %v", feedstocks, err)
+	}
+	if feedstocks[0].Dialogue[0].Content != "first" {
+		t.Fatalf("dialogue = %#v", feedstocks[0].Dialogue)
+	}
+	wantReasons := []string{
+		`unknown Codex record type "future_record"`,
+		`unknown Codex event type "future_event"`,
+		"ambiguous Codex record shape",
+	}
+	if len(warnings) != len(wantReasons) {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	for index, reason := range wantReasons {
+		if warnings[index].Path != path || warnings[index].Reason != reason {
+			t.Fatalf("warnings[%d] = %#v", index, warnings[index])
+		}
+	}
+}
+
+func TestParsersRejectMalformedRecords(t *testing.T) {
 	tests := []struct {
-		name    string
-		parser  Parser
-		content string
+		name   string
+		parser Parser
 	}{
-		{
-			name: "Claude", parser: Claude{},
-			content: `{"type":"future-conversation-record","message":{"role":"user","content":"hidden"}}
-`,
-		},
-		{
-			name: "Codex", parser: Codex{},
-			content: `{"timestamp":"2026-07-30T01:00:00Z","type":"future_record","payload":{"message":"hidden"}}
-`,
-		},
-		{
-			name: "ambiguous Codex", parser: Codex{},
-			content: `{"timestamp":"2026-07-30T01:00:00Z","type":"session_meta","payload":{"id":"session"},"record_type":"state"}
-`,
-		},
+		{name: "Claude", parser: Claude{}},
+		{name: "Codex", parser: Codex{}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "session.jsonl")
-			if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
+			if err := os.WriteFile(path, []byte("{\"type\":\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if _, _, err := test.parser.Parse(path); err == nil {
-				t.Fatal("unknown or ambiguous record was accepted")
+				t.Fatal("malformed record was accepted")
 			}
 		})
 	}
