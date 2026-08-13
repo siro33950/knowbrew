@@ -104,7 +104,7 @@ func (Codex) SessionID(path string) (string, error) {
 	fallback := sessionIDFromPath(path)
 	found := ""
 	err := scanSnapshot(path, func(_ int, raw []byte) (bool, error) {
-		kind, err := classifyCodexRecord(raw)
+		kind, _, err := classifyCodexRecord(raw)
 		if err != nil {
 			return false, err
 		}
@@ -190,6 +190,7 @@ func (Codex) ParseIncremental(
 	}
 	end := position
 	var err error
+	collector := newWarningCollector(path)
 	if !excluded {
 		end, err = scanSnapshotFrom(path, position, MaxJSONLRecordBytes, func(_ int, raw []byte) (bool, error) {
 			if !metadataSeen {
@@ -205,7 +206,7 @@ func (Codex) ParseIncremental(
 					}
 				}
 			}
-			events, err := decodeCodexRecord(raw)
+			events, err := decodeCodexRecord(raw, collector.add)
 			if err != nil {
 				return false, err
 			}
@@ -232,7 +233,7 @@ func (Codex) ParseIncremental(
 		end.SnapshotSize = info.Size()
 	}
 	if err != nil {
-		return IncrementalResult{}, nil, fmt.Errorf("parse Codex log %s: %w", path, err)
+		return IncrementalResult{}, collector.warnings, fmt.Errorf("parse Codex log %s: %w", path, err)
 	}
 	var candidates []domain.FeedstockCandidate
 	savedAssemblers := make(map[string]turnAssemblerCheckpoint, len(assemblers))
@@ -251,14 +252,14 @@ func (Codex) ParseIncremental(
 		MetadataSeen: metadataSeen, Excluded: excluded, Assemblers: savedAssemblers,
 	})
 	if err != nil {
-		return IncrementalResult{}, nil, fmt.Errorf("save Codex parser checkpoint: %w", err)
+		return IncrementalResult{}, collector.warnings, fmt.Errorf("save Codex parser checkpoint: %w", err)
 	}
 	return IncrementalResult{
 		Candidates: candidates, Excluded: excluded,
 		Checkpoint: Checkpoint{
 			Offset: end.Offset, Line: end.Line, SnapshotSize: end.SnapshotSize, State: state,
 		},
-	}, nil, nil
+	}, collector.warnings, nil
 }
 
 func parseCodex(
@@ -283,6 +284,7 @@ func parseCodex(
 		}
 		return assembler
 	}
+	collector := newWarningCollector(path)
 	err := scanSnapshot(path, func(_ int, raw []byte) (bool, error) {
 		if !metadataSeen {
 			metadata, found, err := currentCodexSessionMetadata(raw)
@@ -297,7 +299,7 @@ func parseCodex(
 				}
 			}
 		}
-		events, err := decodeCodexRecord(raw)
+		events, err := decodeCodexRecord(raw, collector.add)
 		if err != nil {
 			return false, err
 		}
@@ -318,10 +320,10 @@ func parseCodex(
 		return true, nil
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse Codex log %s: %w", path, err)
+		return nil, collector.warnings, fmt.Errorf("parse Codex log %s: %w", path, err)
 	}
 	if excluded {
-		return nil, nil, nil
+		return nil, collector.warnings, nil
 	}
 	var candidates []domain.FeedstockCandidate
 	for _, assembler := range assemblers {
@@ -331,11 +333,11 @@ func parseCodex(
 		return int(left.SourceSequence - right.SourceSequence)
 	})
 	setSourceOwner(candidates, ownerSessionID)
-	return candidates, nil, nil
+	return candidates, collector.warnings, nil
 }
 
 func currentCodexSessionMetadata(raw []byte) (codexSessionMetadata, bool, error) {
-	kind, err := classifyCodexRecord(raw)
+	kind, _, err := classifyCodexRecord(raw)
 	if err != nil {
 		return codexSessionMetadata{}, false, err
 	}
@@ -396,13 +398,13 @@ const (
 	codexLegacyItemRecord
 )
 
-func classifyCodexRecord(raw []byte) (codexRecordKind, error) {
+func classifyCodexRecord(raw []byte) (codexRecordKind, string, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
-		return 0, fmt.Errorf("decode Codex record: %w", err)
+		return 0, "", fmt.Errorf("decode Codex record: %w", err)
 	}
 	if fields == nil {
-		return 0, fmt.Errorf("Codex record is not an object")
+		return 0, "Codex record is not an object", nil
 	}
 	_, hasType := fields["type"]
 	_, hasTimestamp := fields["timestamp"]
@@ -425,22 +427,26 @@ func classifyCodexRecord(raw []byte) (codexRecordKind, error) {
 		matches = append(matches, codexLegacyItemRecord)
 	}
 	if len(matches) == 0 {
-		return 0, fmt.Errorf("unknown Codex record shape")
+		return 0, "unknown Codex record shape", nil
 	}
 	if len(matches) > 1 {
-		return 0, fmt.Errorf("ambiguous Codex record shape")
+		return 0, "ambiguous Codex record shape", nil
 	}
-	return matches[0], nil
+	return matches[0], "", nil
 }
 
-func decodeCodexRecord(raw []byte) ([]sourceEvent, error) {
-	kind, err := classifyCodexRecord(raw)
+func decodeCodexRecord(raw []byte, warn func(reason string)) ([]sourceEvent, error) {
+	kind, shapeIssue, err := classifyCodexRecord(raw)
 	if err != nil {
 		return nil, err
 	}
+	if shapeIssue != "" {
+		warn(shapeIssue)
+		return []sourceEvent{{Kind: eventIgnored}}, nil
+	}
 	switch kind {
 	case codexCurrent:
-		return decodeCurrentCodexRecord(raw)
+		return decodeCurrentCodexRecord(raw, warn)
 	case codexLegacyHeaderRecord:
 		var header codexLegacyHeader
 		if err := json.Unmarshal(raw, &header); err != nil {
@@ -462,22 +468,27 @@ func decodeCodexRecord(raw []byte) ([]sourceEvent, error) {
 			return nil, err
 		}
 		if state.RecordType != "state" {
-			return nil, fmt.Errorf("unknown legacy Codex record type %q", state.RecordType)
+			warn(fmt.Sprintf("unknown legacy Codex record type %q", state.RecordType))
 		}
 		return []sourceEvent{{Kind: eventIgnored}}, nil
 	case codexLegacyItemRecord:
-		return decodeLegacyCodexItem(raw)
+		return decodeLegacyCodexItem(raw, warn)
 	default:
 		return nil, fmt.Errorf("unsupported Codex record shape")
 	}
 }
 
-func decodeCurrentCodexRecord(raw []byte) ([]sourceEvent, error) {
+func decodeCurrentCodexRecord(raw []byte, warn func(reason string)) ([]sourceEvent, error) {
 	var record codexRecord
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return nil, fmt.Errorf("decode current Codex record: %w", err)
 	}
-	if _, ignored := ignoredCodexTopLevelTypes[record.Type]; ignored {
+	switch record.Type {
+	case "session_meta", "turn_context", "event_msg", "response_item":
+	default:
+		if _, ignored := ignoredCodexTopLevelTypes[record.Type]; !ignored {
+			warn(fmt.Sprintf("unknown Codex record type %q", record.Type))
+		}
 		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
 	var payload codexPayload
@@ -514,15 +525,20 @@ func decodeCurrentCodexRecord(raw []byte) ([]sourceEvent, error) {
 			Kind: eventTurnStarted, TurnID: payload.TurnID, CWD: payload.CWD,
 		}}, nil
 	case "event_msg":
-		return decodeCodexEvent(record, payload, raw)
+		return decodeCodexEvent(record, payload, raw, warn)
 	case "response_item":
-		return decodeCodexResponseItem(payload)
+		return decodeCodexResponseItem(payload, warn)
 	default:
-		return nil, fmt.Errorf("unknown Codex record type %q", record.Type)
+		return nil, fmt.Errorf("unsupported Codex record type %q", record.Type)
 	}
 }
 
-func decodeCodexEvent(record codexRecord, payload codexPayload, raw []byte) ([]sourceEvent, error) {
+func decodeCodexEvent(
+	record codexRecord,
+	payload codexPayload,
+	raw []byte,
+	warn func(reason string),
+) ([]sourceEvent, error) {
 	switch payload.Type {
 	case "user_message":
 		if strings.TrimSpace(payload.Message) == "" {
@@ -544,27 +560,27 @@ func decodeCodexEvent(record codexRecord, payload codexPayload, raw []byte) ([]s
 	case "task_complete", "turn_aborted":
 		return []sourceEvent{{Kind: eventTurnCompleted, TurnID: payload.TurnID}}, nil
 	default:
-		if _, ignored := ignoredCodexEventTypes[payload.Type]; ignored {
-			return []sourceEvent{{Kind: eventIgnored}}, nil
+		if _, ignored := ignoredCodexEventTypes[payload.Type]; !ignored {
+			warn(fmt.Sprintf("unknown Codex event type %q", payload.Type))
 		}
-		return nil, fmt.Errorf("unknown Codex event type %q", payload.Type)
+		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
 }
 
-func decodeCodexResponseItem(payload codexPayload) ([]sourceEvent, error) {
-	if _, ignored := ignoredCodexResponseItemTypes[payload.Type]; ignored {
+func decodeCodexResponseItem(payload codexPayload, warn func(reason string)) ([]sourceEvent, error) {
+	if payload.Type != "message" {
+		if _, ignored := ignoredCodexResponseItemTypes[payload.Type]; !ignored {
+			warn(fmt.Sprintf("unknown Codex response item type %q", payload.Type))
+		}
 		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
-	if payload.Type != "message" {
-		return nil, fmt.Errorf("unknown Codex response item type %q", payload.Type)
-	}
 	if payload.Role != "assistant" {
-		if payload.Role == "user" || payload.Role == "developer" || payload.Role == "system" {
-			return []sourceEvent{{Kind: eventIgnored}}, nil
+		if payload.Role != "user" && payload.Role != "developer" && payload.Role != "system" {
+			warn(fmt.Sprintf("unknown Codex response message role %q", payload.Role))
 		}
-		return nil, fmt.Errorf("unknown Codex response message role %q", payload.Role)
+		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
-	text, err := codexText(payload.Content, "output_text")
+	text, err := codexText(payload.Content, "output_text", warn)
 	if err != nil {
 		return nil, err
 	}
@@ -581,27 +597,25 @@ func decodeCodexResponseItem(payload codexPayload) ([]sourceEvent, error) {
 	case "commentary":
 		return []sourceEvent{{Kind: eventIgnored}}, nil
 	default:
-		return nil, fmt.Errorf("unknown Codex assistant message phase %q", payload.Phase)
+		warn(fmt.Sprintf("unknown Codex assistant message phase %q", payload.Phase))
+		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
 }
 
-func decodeLegacyCodexItem(raw []byte) ([]sourceEvent, error) {
+func decodeLegacyCodexItem(raw []byte, warn func(reason string)) ([]sourceEvent, error) {
 	var item codexLegacyItem
 	if err := json.Unmarshal(raw, &item); err != nil {
 		return nil, fmt.Errorf("decode legacy Codex item: %w", err)
 	}
-	if _, ignored := ignoredCodexLegacyItemTypes[item.Type]; ignored {
-		return []sourceEvent{{Kind: eventIgnored}}, nil
-	}
 	if item.Type != "message" {
-		return nil, fmt.Errorf("unknown legacy Codex item type %q", item.Type)
+		if _, ignored := ignoredCodexLegacyItemTypes[item.Type]; !ignored {
+			warn(fmt.Sprintf("unknown legacy Codex item type %q", item.Type))
+		}
+		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
 	switch item.Role {
 	case "user":
-		text, err := textFromCodexBlocks(item.Content, "input_text")
-		if err != nil {
-			return nil, err
-		}
+		text := textFromCodexBlocks(item.Content, "input_text", warn)
 		if strings.TrimSpace(text) == "" {
 			return []sourceEvent{{Kind: eventIgnored}}, nil
 		}
@@ -614,10 +628,7 @@ func decodeLegacyCodexItem(raw []byte) ([]sourceEvent, error) {
 			FallbackTurnID: sourceTurnID("", raw), Text: text,
 		}}, nil
 	case "assistant":
-		text, err := textFromCodexBlocks(item.Content, "output_text")
-		if err != nil {
-			return nil, err
-		}
+		text := textFromCodexBlocks(item.Content, "output_text", warn)
 		return []sourceEvent{{
 			Kind: eventAssistantMessage, Text: text, Priority: assistantFinal,
 			CompletesTurn: true,
@@ -625,27 +636,29 @@ func decodeLegacyCodexItem(raw []byte) ([]sourceEvent, error) {
 	case "developer", "system":
 		return []sourceEvent{{Kind: eventIgnored}}, nil
 	default:
-		return nil, fmt.Errorf("unknown legacy Codex message role %q", item.Role)
+		warn(fmt.Sprintf("unknown legacy Codex message role %q", item.Role))
+		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
 }
 
-func codexText(raw json.RawMessage, expected string) (string, error) {
+func codexText(raw json.RawMessage, expected string, warn func(reason string)) (string, error) {
 	var blocks []codexContentBlock
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return "", fmt.Errorf("decode Codex message content: %w", err)
 	}
-	return textFromCodexBlocks(blocks, expected)
+	return textFromCodexBlocks(blocks, expected, warn), nil
 }
 
-func textFromCodexBlocks(blocks []codexContentBlock, expected string) (string, error) {
+func textFromCodexBlocks(blocks []codexContentBlock, expected string, warn func(reason string)) string {
 	values := make([]string, 0, len(blocks))
 	for _, block := range blocks {
 		if block.Type != expected {
-			return "", fmt.Errorf("unknown Codex message content block %q", block.Type)
+			warn(fmt.Sprintf("unknown Codex message content block %q", block.Type))
+			continue
 		}
 		if strings.TrimSpace(block.Text) != "" {
 			values = append(values, block.Text)
 		}
 	}
-	return strings.Join(values, "\n"), nil
+	return strings.Join(values, "\n")
 }

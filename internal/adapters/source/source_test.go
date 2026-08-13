@@ -218,7 +218,7 @@ func TestCachedGatewayInvalidatesSameSizeRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rewritten := strings.Replace(string(data), `"type":"user"`, `"type":"nope"`, 1)
+	rewritten := strings.Replace(string(data), `"content":"first"`, `"content":"burst"`, 1)
 	if len(rewritten) != len(data) {
 		t.Fatal("rewrite changed file size")
 	}
@@ -229,8 +229,12 @@ func TestCachedGatewayInvalidatesSameSizeRewrite(t *testing.T) {
 	if err := os.Chtimes(path, future, future); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := gateway.Parse(file); err == nil || !strings.Contains(err.Error(), "unknown Claude record type") {
-		t.Fatalf("rewrite error = %v", err)
+	reparsed, _, err := gateway.Parse(file)
+	if err != nil || len(reparsed) != 1 {
+		t.Fatalf("reparsed = %#v, error = %v", reparsed, err)
+	}
+	if reparsed[0].Dialogue[0].Content != "burst" {
+		t.Fatalf("reparsed candidate = %#v", reparsed[0])
 	}
 }
 
