@@ -152,13 +152,17 @@ func newDrawCommand() *cobra.Command {
 				Settings: settings, Repository: repositoryFor(dataStore),
 				Sources: sourceGateway, Runner: runner, Progress: display,
 				RunLock: runlock.FileLock{
-					Path: filepath.Join(cfg.Root, ".knowbrew", "state", "draw.lock"),
-					Name: "draw",
+					Path:      filepath.Join(cfg.Root, ".knowbrew", "state", "draw.lock"),
+					Name:      "draw",
+					Immediate: hook,
 				},
 				SearchIndex: drawSearchIndex{Config: cfg, Store: dataStore},
 			}
 			summary, err := service.RunWithOptions(command.Context(), options)
 			if err != nil {
+				if hook && errors.Is(err, runlock.ErrBusy) {
+					return nil
+				}
 				var acquisitionErr draw.AcquisitionFailuresError
 				if errors.As(err, &acquisitionErr) {
 					if hook {

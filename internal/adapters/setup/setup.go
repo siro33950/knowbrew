@@ -531,6 +531,7 @@ func MergeClaudeSettings(path, executable string) error {
 		"hooks": []any{map[string]any{
 			"type": "command", "command": drawHookCommand(executable),
 			"timeout": 600, "statusMessage": "Drawing completed turn",
+			"async": true,
 		}},
 	})
 	hooks["Stop"] = filtered
@@ -579,6 +580,7 @@ func ClaudeSnippet(executable string) string {
 				"hooks": []any{map[string]any{
 					"type": "command", "command": drawHookCommand(executable),
 					"timeout": 600, "statusMessage": "Drawing completed turn",
+					"async": true,
 				}},
 			}},
 		},

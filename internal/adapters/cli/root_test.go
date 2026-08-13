@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/siro33950/knowbrew/internal/adapters/config"
 	"github.com/siro33950/knowbrew/internal/adapters/persistence/markdownstore"
 	"github.com/siro33950/knowbrew/internal/adapters/source/parser"
@@ -208,6 +209,56 @@ func TestDrawHookProcessesOnlyPayloadTranscriptAndWritesNoSummary(t *testing.T) 
 	command.SetArgs([]string{"draw", "--hook"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("hook output = %q", output.String())
+	}
+}
+
+func TestDrawHookExitsQuietlyWhileAnotherRunHoldsTheLock(t *testing.T) {
+	rootDir := t.TempDir()
+	sourceDir := t.TempDir()
+	transcriptPath := filepath.Join(sourceDir, "session.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(rootDir, ".knowbrew", "state")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	held := flock.New(filepath.Join(stateDir, "draw.lock"))
+	locked, err := held.TryLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !locked {
+		t.Fatal("could not hold the draw lock")
+	}
+	defer func() { _ = held.Unlock() }()
+
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" +
+		"[llm]\nbackend = \"claude-cli\"\n\n" +
+		"[embedding]\nmodel = \"disabled\"\n\n" +
+		"[[sources]]\nagent = \"codex\"\nparser = \"codex\"\npaths = [" + quoteTOML(sourceDir) + "]\n"
+	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.ConfigEnvironment, configPath)
+	payload, err := json.Marshal(map[string]any{
+		"hook_event_name": "Stop", "transcript_path": transcriptPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	command := newRootCommand()
+	command.SetIn(bytes.NewReader(payload))
+	command.SetOut(&output)
+	command.SetArgs([]string{"draw", "--hook"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("hook reported a busy lock as an error: %v", err)
 	}
 	if output.Len() != 0 {
 		t.Fatalf("hook output = %q", output.String())
