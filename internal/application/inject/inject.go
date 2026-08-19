@@ -155,11 +155,12 @@ func assemble(sections []section, maxTokens int) string {
 			}
 			if output.Len()+len(segment) > budget {
 				if included == 0 {
-					truncated := limitSegment(segment, budget-output.Len())
-					output.WriteString(truncated)
-					included++
-					headingWritten = true
-					continue
+					if truncated := limitSegment(segment, budget-output.Len()); truncated != "" {
+						output.WriteString(truncated)
+						included++
+						headingWritten = true
+						continue
+					}
 				}
 				omitted++
 				continue

@@ -246,6 +246,9 @@ concurrency = 5           # parallel LLM workers
 context_turns = 3         # earlier dialogue turns given to the extractor
 max_context_turns = 20    # bounded fallback window
 
+[context]
+max_tokens = 2000         # session-start injection budget (approximate tokens)
+
 [embedding]
 model = "ruri-v3-130m-int8-onnx" # or snowflake..., qwen3..., disabled, custom
 # path = "/absolute/path/to/model" # required only for custom

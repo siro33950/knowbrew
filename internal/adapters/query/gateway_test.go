@@ -186,6 +186,10 @@ func TestVectorIndexEmbedsOnlyRepresentativeTextPerKind(t *testing.T) {
 			(response.Results[0].Agent != "claude" || response.Results[0].Session != "session") {
 			t.Fatalf("feedstock search metadata = %#v", response.Results[0])
 		}
+		if test.target == searchapp.TargetDocument &&
+			(response.Results[0].Template != "concept" || response.Results[0].Subject != "z-real-doc") {
+			t.Fatalf("document search metadata = %#v", response.Results[0])
+		}
 	}
 	filtered, err := service.Search(context.Background(), searchapp.Options{
 		Target: searchapp.TargetKnowledge, Keywords: []string{"undo a release"},

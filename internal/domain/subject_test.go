@@ -31,6 +31,9 @@ func TestAliasMatchNormalizesRepositoryURLs(t *testing.T) {
 	if !AliasMatch("git@github.com:example/knowbrew.git", "https://github.com/example/knowbrew.git") {
 		t.Fatal("equivalent repository URLs did not match")
 	}
+	if !AliasMatch("git@github.com:example/knowbrew.git", "https://github.com/example/knowbrew.git/") {
+		t.Fatal("a trailing slash broke repository URL normalization")
+	}
 	if AliasMatch("git@github.com:first/knowbrew.git", "https://github.com/second/knowbrew.git") {
 		t.Fatal("different repository owners were conflated")
 	}

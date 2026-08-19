@@ -641,27 +641,48 @@ func syncDocuments(
 	}
 	warnings := append([]diagnostic.Warning(nil), walkWarnings...)
 	current := make(map[string]struct{}, len(files))
+	// Duplicate frontmatter across paths maps to one record key; track which
+	// live file owns each key so a stale duplicate can never delete the
+	// surviving document's record.
+	claimed := make(map[string]string, len(files))
+	var stale []string
 	for _, file := range files {
 		current[file.Path] = struct{}{}
 		previous, exists := indexed[file.Path]
 		if exists && previous.ModTime == file.ModTime && previous.Size == file.Size {
+			if _, taken := claimed[previous.RecordKey]; !taken {
+				claimed[previous.RecordKey] = file.Path
+			}
 			continue
 		}
 		distilled, err := dataStore.ReadDistilledDocumentFile(file.Path)
 		if err != nil {
 			warnings = append(warnings, diagnostic.FromError(file.Path, err))
 			if exists {
-				if err := deleteDocument(ctx, transaction, previous.RecordKey); err != nil {
-					return warnings, err
-				}
+				stale = append(stale, previous.RecordKey)
 			}
 			continue
 		}
+		value := document{
+			ID: distilled.Subject + "/" + distilled.Template, Kind: TargetDocument,
+		}
+		key := value.recordKey()
+		if owner, taken := claimed[key]; taken {
+			warnings = append(warnings, diagnostic.FromError(file.Path, fmt.Errorf(
+				"distilled document %s/%s is already indexed from %s",
+				distilled.Subject, distilled.Template, owner,
+			)))
+			if exists && previous.RecordKey != key {
+				stale = append(stale, previous.RecordKey)
+			}
+			continue
+		}
+		claimed[key] = file.Path
 		subjects, _ := json.Marshal([]string{distilled.Subject})
 		templates, _ := json.Marshal([]string{distilled.Template})
 		supersedes, _ := json.Marshal([]string{})
 		timestamp := time.Unix(0, file.ModTime).UTC()
-		if err := upsertDocument(ctx, transaction, document{
+		value = document{
 			ID: distilled.Subject + "/" + distilled.Template, Kind: TargetDocument,
 			Timestamp: timestamp.Format(time.RFC3339Nano), TimestampNS: file.ModTime,
 			Subjects: string(subjects), Type: string(templates),
@@ -673,12 +694,27 @@ func syncDocuments(
 				distilled.Template,
 			}, "\n"),
 			SourceMtimeNS: file.ModTime, SourceSize: file.Size,
-		}); err != nil {
+		}
+		if err := upsertDocument(ctx, transaction, value); err != nil {
+			return warnings, err
+		}
+		if exists && previous.RecordKey != key {
+			stale = append(stale, previous.RecordKey)
+		}
+	}
+	for _, key := range stale {
+		if _, taken := claimed[key]; taken {
+			continue
+		}
+		if err := deleteDocument(ctx, transaction, key); err != nil {
 			return warnings, err
 		}
 	}
 	for path, value := range indexed {
 		if _, exists := current[path]; exists {
+			continue
+		}
+		if _, taken := claimed[value.RecordKey]; taken {
 			continue
 		}
 		if err := deleteDocument(ctx, transaction, value.RecordKey); err != nil {

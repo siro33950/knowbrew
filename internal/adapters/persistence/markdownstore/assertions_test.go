@@ -71,7 +71,7 @@ func TestFeedstockAssertionsRoundTripAsGeneratedMarkdown(t *testing.T) {
 			t.Fatalf("feedstock Markdown does not contain %q:\n%s", required, text)
 		}
 	}
-	for _, removed := range []string{"user_quote:", "speech_acts:", "commands:", "files_changed:", "errors:", "Applies when:"} {
+	for _, removed := range []string{"user_quote:", "speech_acts:", "commands:", "files_changed:", "errors:", "Applies when:", "- Trigger:"} {
 		if strings.Contains(text, removed) {
 			t.Fatalf("feedstock contains removed field %q:\n%s", removed, text)
 		}

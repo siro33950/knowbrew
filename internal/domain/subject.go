@@ -43,7 +43,7 @@ func CanonicalRepo(value string) string {
 	if err != nil || parsed.Hostname() == "" {
 		return ""
 	}
-	path := strings.Trim(strings.TrimSuffix(parsed.Path, ".git"), "/")
+	path := strings.TrimSuffix(strings.Trim(parsed.Path, "/"), ".git")
 	if path == "" {
 		return ""
 	}

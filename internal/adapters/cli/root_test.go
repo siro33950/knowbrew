@@ -492,6 +492,15 @@ func TestContextHookFallsBackToProcessCwdOnEmptyStdin(t *testing.T) {
 	}
 }
 
+func TestContextRejectsNonPositiveExplicitMaxTokens(t *testing.T) {
+	command := newRootCommand()
+	command.SetArgs([]string{"context", "--max-tokens", "0"})
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--max-tokens must be at least 1") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestContextHookRejectsNonSessionStartEvents(t *testing.T) {
 	command := newRootCommand()
 	command.SetIn(strings.NewReader(`{"hook_event_name":"Stop","cwd":"/tmp"}`))

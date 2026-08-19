@@ -916,6 +916,49 @@ func TestDocumentSyncSearchAndDeletion(t *testing.T) {
 	}
 }
 
+func TestDocumentSyncExcludesDuplicateIDsAndPreservesSurvivor(t *testing.T) {
+	dataStore := newStore(t)
+	original := writeDistilledDocumentFile(t, dataStore, "alpha", "decisions",
+		"# alpha\n\nOriginal decisions body.\n")
+	duplicate := filepath.Join(dataStore.Root, "documents", "alpha", "stale-copy.md")
+	data, err := os.ReadFile(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(duplicate, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || first.Total != 1 {
+		t.Fatalf("first = %#v, error = %v", first, err)
+	}
+	duplicateWarned := false
+	for _, warning := range first.Warnings {
+		if strings.Contains(warning.Reason, "already indexed") {
+			duplicateWarned = true
+		}
+	}
+	if !duplicateWarned {
+		t.Fatalf("duplicate warning missing: %#v", first.Warnings)
+	}
+
+	if err := os.Remove(original); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || second.Total != 1 || second.Results[0].ID != "alpha/decisions" {
+		t.Fatalf("second = %#v, error = %v", second, err)
+	}
+	if len(second.Warnings) != 0 {
+		t.Fatalf("survivor sync still warns: %#v", second.Warnings)
+	}
+}
+
 func TestReindexAndBrokenRecordWarnings(t *testing.T) {
 	dataStore := newStore(t)
 	writeFeedstock(t, dataStore, "claude-session-t000001", time.Now().UTC(), "valid source")

@@ -521,6 +521,9 @@ func newContextCommand() *cobra.Command {
 		Short: "Print session-start context assembled from distilled Subject documents",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
+			if command.Flags().Changed("max-tokens") && maxTokens < 1 {
+				return errors.New("--max-tokens must be at least 1")
+			}
 			if _, internalInvocation := os.LookupEnv(config.InvocationIDEnvironment); internalInvocation {
 				return nil
 			}

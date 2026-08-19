@@ -233,6 +233,9 @@ concurrency = 5           # 並列LLMワーカー数
 context_turns = 3         # 抽出時に渡す先行ターン数
 max_context_turns = 20    # 上限付きのフォールバック窓
 
+[context]
+max_tokens = 2000         # セッション開始時の注入上限（近似トークン数）
+
 [embedding]
 model = "ruri-v3-130m-int8-onnx" # または snowflake..., qwen3..., disabled, custom
 # path = "/absolute/path/to/model" # custom の場合のみ必須
