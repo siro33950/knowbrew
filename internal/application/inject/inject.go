@@ -170,13 +170,13 @@ func assemble(sections []section, maxTokens int) string {
 		}
 	}
 	if omitted > 0 {
-		output.WriteString(fmt.Sprintf(
+		_, _ = fmt.Fprintf(&output,
 			"\n---\nContext budget reached: %d document(s) were omitted (context.max_tokens = %d).\n"+
 				"Retrieve them on demand:\n"+
 				"- `knowbrew document --subject <subject> -- <keywords>`\n"+
 				"- `knowbrew knowledge -- <keywords>`\n",
 			omitted, maxTokens,
-		))
+		)
 	}
 	return output.String()
 }
