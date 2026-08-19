@@ -128,6 +128,48 @@ completion:
 	}
 }
 
+func TestReadDistilledDocumentFileByPath(t *testing.T) {
+	dataStore, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	template := validDocumentTemplate()
+	document := domain.DistilledDocument{
+		Subject: "knowbrew", Template: "concept",
+		KnowledgeIDs: []string{"kn-0123456789abcdef"}, Body: "# knowbrew\n\nBody.",
+	}
+	if err := dataStore.WriteDistilledDocument(template, document); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dataStore.Root, "documents", "knowbrew", "concept.md")
+	loaded, err := dataStore.ReadDistilledDocumentFile(path)
+	if err != nil || loaded.Subject != "knowbrew" || loaded.Template != "concept" ||
+		loaded.Body != "# knowbrew\n\nBody.\n" ||
+		len(loaded.KnowledgeIDs) != 1 || loaded.KnowledgeIDs[0] != "kn-0123456789abcdef" {
+		t.Fatalf("loaded = %#v, error = %v", loaded, err)
+	}
+
+	broken := filepath.Join(dataStore.Root, "documents", "knowbrew", "broken.md")
+	brokenData := `---
+subject: "[[knowbrew]]"
+template: "[[concept]]"
+knowledge: []
+---
+
+# knowbrew
+`
+	if err := os.WriteFile(broken, []byte(brokenData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dataStore.ReadDistilledDocumentFile(broken); err == nil ||
+		!strings.Contains(err.Error(), "at least one Knowledge reference") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestReadDistilledDocumentRejectsDuplicateKnowledgeReferences(t *testing.T) {
 	dataStore, err := New(t.TempDir())
 	if err != nil {

@@ -321,6 +321,7 @@ knowbrew distill [flags]           approved knowledge → Subject documents
 knowbrew knowledge [keywords...]   search knowledge (alias: kn)
 knowbrew knowledge show <id...>    inspect knowledge in any lifecycle state
 knowbrew feedstock [keywords...]   search or replay feedstock
+knowbrew document [keywords...]    search distilled Subject documents
 knowbrew show <id...>              one feedstock record; --raw for the dialogue
 knowbrew index sync|rebuild|status maintain the derived search indexes
 ```
@@ -328,7 +329,8 @@ knowbrew index sync|rebuild|status maintain the derived search indexes
 Shared search flags: `--subject`, `--type`, `--since`, `--until`, `--limit`,
 `--max-tokens`, `--reindex`, `--search-mode`. `knowledge` adds `--include-pending`,
 `--include-retired`, and `--trigger always`. `feedstock` adds `--session`,
-`--agent`, and `--last N`.
+`--agent`, and `--last N`. `document` searches distilled Subject documents and
+adds `--template` instead of `--type`.
 
 `draw` flags: `--max N`, `--since`, `--until`, `--source claude|codex`,
 `--verbose`. Explicit files and directories must be inside a configured source

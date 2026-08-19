@@ -768,6 +768,13 @@ func TestIndexSchemaUsesKindsAndExternalContentFTS(t *testing.T) {
 		"schema vocabulary",
 		"",
 	)
+	writeDistilledDocumentFile(
+		t,
+		dataStore,
+		"schema-subject",
+		"concept",
+		"# schema-subject\n\nschema vocabulary body.\n",
+	)
 	if _, err := Search(context.Background(), dataStore, SearchOptions{
 		Target: TargetFeedstock, Limit: 10, MaxTokens: 1000,
 	}); err != nil {
@@ -809,6 +816,7 @@ func TestIndexSchemaUsesKindsAndExternalContentFTS(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantRecords := []string{
+		"document=document:schema-subject/concept",
 		"feedstock=feedstock:" + feedstock.ID,
 		"knowledge=knowledge:schema-knowledge",
 	}
@@ -866,6 +874,64 @@ func TestIndexSchemaUsesKindsAndExternalContentFTS(t *testing.T) {
 	}
 	if triggerCount != 3 {
 		t.Fatalf("FTS trigger count = %d, want 3", triggerCount)
+	}
+}
+
+func TestDocumentSyncSearchAndDeletion(t *testing.T) {
+	dataStore := newStore(t)
+	conceptPath := writeDistilledDocumentFile(t, dataStore, "alpha", "concept",
+		"# alpha\n\nRollback procedures for alpha deployments.\n")
+	writeDistilledDocumentFile(t, dataStore, "alpha", "decisions", "# alpha\n\nDecision history.\n")
+	writeDistilledDocumentFile(t, dataStore, "beta", "concept", "# beta\n\nUnrelated body.\n")
+
+	all, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || all.Total != 3 || len(all.Results) != 3 {
+		t.Fatalf("all = %#v, error = %v", all, err)
+	}
+	bySubject, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Subject: "alpha", Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || bySubject.Total != 2 {
+		t.Fatalf("bySubject = %#v, error = %v", bySubject, err)
+	}
+	byTemplate, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Template: "concept", Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || byTemplate.Total != 2 {
+		t.Fatalf("byTemplate = %#v, error = %v", byTemplate, err)
+	}
+	keyword, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Keywords: []string{"rollback"}, Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || keyword.Total != 1 || len(keyword.Results) != 1 {
+		t.Fatalf("keyword = %#v, error = %v", keyword, err)
+	}
+	result := keyword.Results[0]
+	if result.ID != "alpha/concept" || result.Subject != "alpha" || result.Path != conceptPath ||
+		len(result.Types) != 1 || string(result.Types[0]) != "concept" ||
+		!strings.Contains(result.Claim, "Rollback procedures") {
+		t.Fatalf("result = %#v", result)
+	}
+
+	writeDistilledDocumentFile(t, dataStore, "beta", "concept",
+		"# beta\n\nRollback steps now live in the beta document body.\n")
+	keyword, err = Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Keywords: []string{"rollback"}, Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || keyword.Total != 2 {
+		t.Fatalf("after update = %#v, error = %v", keyword, err)
+	}
+
+	if err := os.Remove(conceptPath); err != nil {
+		t.Fatal(err)
+	}
+	all, err = Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || all.Total != 2 {
+		t.Fatalf("after delete = %#v, error = %v", all, err)
 	}
 }
 
@@ -1050,4 +1116,27 @@ func writeKnowledgeForTest(path string, knowledge domain.Knowledge, body string)
 		return err
 	}
 	return fsutil.AtomicWrite(path, data, 0o644)
+}
+
+func writeDistilledDocumentFile(
+	t *testing.T,
+	dataStore *store.Store,
+	subject, template, body string,
+) string {
+	t.Helper()
+	directory := filepath.Join(dataStore.Root, "documents", subject)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, template+".md")
+	data := "---\n" +
+		"subject: \"[[" + subject + "]]\"\n" +
+		"template: \"[[" + template + "]]\"\n" +
+		"knowledge:\n" +
+		"  - \"[[kn-0123456789abcdef]]\"\n" +
+		"---\n\n" + body
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

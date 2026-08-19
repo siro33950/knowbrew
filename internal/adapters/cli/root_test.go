@@ -24,7 +24,7 @@ func TestCommandSurfaceExposesDistill(t *testing.T) {
 	for _, command := range root.Commands() {
 		got[command.Name()] = true
 	}
-	for _, name := range []string{"init", "draw", "brew", "distill", "show", "feedstock", "knowledge", "index"} {
+	for _, name := range []string{"init", "draw", "brew", "distill", "show", "feedstock", "knowledge", "document", "index"} {
 		if !got[name] {
 			t.Errorf("missing command %q", name)
 		}
@@ -356,11 +356,28 @@ func TestSearchCommandsDoNotExposeTopicFlag(t *testing.T) {
 	for _, args := range [][]string{
 		{"feedstock", "--topic", "testing"},
 		{"knowledge", "--topic", "testing"},
+		{"document", "--topic", "testing"},
 	} {
 		command := newRootCommand()
 		command.SetArgs(args)
 		err := command.Execute()
 		if err == nil || !strings.Contains(err.Error(), "unknown flag: --topic") {
+			t.Fatalf("%v error = %v", args, err)
+		}
+	}
+}
+
+func TestDocumentCommandRejectsKnowledgeOnlyFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"document", "--type", "decision"},
+		{"document", "--trigger", "always"},
+		{"document", "--include-pending"},
+		{"document", "--session", "session"},
+	} {
+		command := newRootCommand()
+		command.SetArgs(args)
+		err := command.Execute()
+		if err == nil || !strings.Contains(err.Error(), "unknown flag") {
 			t.Fatalf("%v error = %v", args, err)
 		}
 	}

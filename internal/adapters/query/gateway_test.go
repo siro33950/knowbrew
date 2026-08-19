@@ -125,7 +125,7 @@ func TestGatewayRebuildReplacesCorruptVectorDatabase(t *testing.T) {
 	}
 }
 
-func TestVectorIndexUsesOnlyKnowledgeClaimAndFeedstockSummary(t *testing.T) {
+func TestVectorIndexEmbedsOnlyRepresentativeTextPerKind(t *testing.T) {
 	dataStore := newStore(t)
 	now := time.Now().UTC()
 	hidden := domain.Feedstock{
@@ -159,6 +159,10 @@ func TestVectorIndexUsesOnlyKnowledgeClaimAndFeedstockSummary(t *testing.T) {
 		t, dataStore, "z-real-knowledge", real.ID,
 		domain.StatusActive, "rollback policy", "",
 	)
+	writeDistilledDocumentFile(t, dataStore, "a-hidden-doc", "concept",
+		"# hidden\n\nweather forecast\n\nrollback appears only in a later paragraph.\n")
+	writeDistilledDocumentFile(t, dataStore, "z-real-doc", "concept",
+		"# real\n\nrollback policy\n")
 	service := searchapp.Service{Gateway: Gateway{Store: dataStore, Encoder: semanticFakeEncoder{}}}
 	for _, test := range []struct {
 		target searchapp.Target
@@ -166,6 +170,7 @@ func TestVectorIndexUsesOnlyKnowledgeClaimAndFeedstockSummary(t *testing.T) {
 	}{
 		{target: searchapp.TargetKnowledge, want: "z-real-knowledge"},
 		{target: searchapp.TargetFeedstock, want: "z-real-feedstock"},
+		{target: searchapp.TargetDocument, want: "z-real-doc/concept"},
 	} {
 		response, err := service.Search(context.Background(), searchapp.Options{
 			Target: test.target, Keywords: []string{"undo a release"},

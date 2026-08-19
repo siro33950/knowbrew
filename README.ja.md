@@ -306,6 +306,7 @@ knowbrew distill [flags]           承認済みknowledge → subject文書
 knowbrew knowledge [keywords...]   knowledgeを検索（別名: kn）
 knowbrew knowledge show <id...>    任意の状態のknowledgeを表示
 knowbrew feedstock [keywords...]   feedstockを検索・再生
+knowbrew document [keywords...]    distill済みsubject文書を検索
 knowbrew show <id...>              feedstock 1件; --raw で元の対話
 knowbrew index sync|rebuild|status 派生検索索引の保守
 ```
@@ -313,7 +314,8 @@ knowbrew index sync|rebuild|status 派生検索索引の保守
 検索の共通フラグ: `--subject`・`--type`・`--since`・`--until`・`--limit`・
 `--max-tokens`・`--reindex`・`--search-mode`。`knowledge` にはさらに `--include-pending`・
 `--include-retired`・`--trigger always`。`feedstock` にはさらに `--session`・
-`--agent`・`--last N`。
+`--agent`・`--last N`。`document` はdistill済みsubject文書を検索し、`--type` の
+代わりに `--template` を持ちます。
 
 `draw` のフラグ: `--max N`・`--since`・`--until`・`--source claude|codex`・
 `--verbose`。明示するファイルまたはディレクトリは、設定済みsourceの配下である

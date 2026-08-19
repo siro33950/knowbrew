@@ -61,6 +61,7 @@ func newRootCommand() *cobra.Command {
 		newShowCommand(),
 		newFeedstockCommand(),
 		newKnowledgeCommand(),
+		newDocumentCommand(),
 		newIndexCommand(),
 	)
 	return root
@@ -512,6 +513,34 @@ func runSearch(
 		return response, searchErr
 	}
 	return response, errors.Join(searchErr, encoder.Close())
+}
+
+func newDocumentCommand() *cobra.Command {
+	var flags searchFlags
+	var template string
+	command := &cobra.Command{
+		Use:   "document [keywords...]",
+		Short: "Search distilled Subject documents as JSON",
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(command *cobra.Command, keywords []string) error {
+			response, err := runSearch(command, searchapp.TargetDocument, keywords, flags, searchapp.Options{
+				Template: template,
+			})
+			if err != nil {
+				return err
+			}
+			return writeJSON(command.OutOrStdout(), response)
+		},
+	}
+	command.Flags().StringVar(&flags.subject, "subject", "", "Filter by exact subject")
+	command.Flags().StringVar(&template, "template", "", "Filter by exact template name")
+	command.Flags().StringVar(&flags.since, "since", "", "Filter at or after an RFC3339 timestamp or YYYY-MM-DD date")
+	command.Flags().StringVar(&flags.until, "until", "", "Filter at or before an RFC3339 timestamp or YYYY-MM-DD date")
+	command.Flags().IntVar(&flags.limit, "limit", 20, "Maximum returned results")
+	command.Flags().IntVar(&flags.maxTokens, "max-tokens", 2000, "Approximate maximum JSON result tokens")
+	command.Flags().BoolVar(&flags.reindex, "reindex", false, "Fully rebuild the derived search index")
+	command.Flags().StringVar(&flags.mode, "search-mode", string(searchapp.ModeHybrid), "Search mode: hybrid, text, or vector")
+	return command
 }
 
 func newFeedstockCommand() *cobra.Command {

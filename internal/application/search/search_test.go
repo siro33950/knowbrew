@@ -132,6 +132,29 @@ func TestLastUsesItsExplicitResultCount(t *testing.T) {
 	}
 }
 
+func TestValidateOptionsDocumentTarget(t *testing.T) {
+	options := Options{Target: TargetDocument, Subject: "alpha", Template: "concept"}
+	if err := ValidateOptions(&options); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []Options{
+		{Target: TargetDocument, Type: domain.KnowledgeType("decision")},
+		{Target: TargetDocument, Trigger: "always"},
+		{Target: TargetDocument, Session: "session"},
+		{Target: TargetDocument, Agent: "claude"},
+		{Target: TargetDocument, Last: 3},
+		{Target: TargetDocument, IncludePending: true},
+		{Target: TargetDocument, IncludeRetired: true},
+		{Target: TargetKnowledge, Template: "concept"},
+		{Target: TargetFeedstock, Template: "concept"},
+	} {
+		value := invalid
+		if err := ValidateOptions(&value); err == nil {
+			t.Fatalf("options %#v were accepted", invalid)
+		}
+	}
+}
+
 func TestSearchRejectsTypeMissingFromMaster(t *testing.T) {
 	gateway := &recordingGateway{validateTypeErr: errors.New("not defined")}
 	_, err := (Service{Gateway: gateway}).Search(context.Background(), Options{

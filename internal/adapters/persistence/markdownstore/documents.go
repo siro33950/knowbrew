@@ -131,6 +131,26 @@ func (s *Store) ReadDistilledDocument(
 	return document, true, nil
 }
 
+func (s *Store) ReadDistilledDocumentFile(path string) (domain.DistilledDocument, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return domain.DistilledDocument{}, err
+	}
+	var header distilledFrontmatter
+	body, err := frontmatter.Decode(data, &header)
+	if err != nil {
+		return domain.DistilledDocument{}, fmt.Errorf("read distilled document %s: %w", path, err)
+	}
+	document := domain.DistilledDocument{
+		Subject: domain.MasterName(header.Subject), Template: domain.MasterName(header.Template),
+		KnowledgeIDs: normalizeDocumentReferences(header.Knowledge), Body: body,
+	}
+	if err := domain.ValidateDistilledDocument(document); err != nil {
+		return domain.DistilledDocument{}, fmt.Errorf("validate distilled document %s: %w", path, err)
+	}
+	return document, nil
+}
+
 func normalizeDocumentReferences(values []string) []string {
 	normalized := make([]string, len(values))
 	for index, value := range values {

@@ -24,14 +24,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const indexSchemaVersion = 14
+const indexSchemaVersion = 15
 const rawPageSizeBytes = 12_000
 
 type Target string
 
+// The index table named "documents" stores every indexed record regardless of
+// kind; TargetDocument marks the rows sourced from distilled Subject documents
+// under <root>/documents.
 const (
 	TargetKnowledge Target = "knowledge"
 	TargetFeedstock Target = "feedstock"
+	TargetDocument  Target = "document"
 )
 
 type SearchOptions struct {
@@ -43,6 +47,7 @@ type SearchOptions struct {
 	Until          *time.Time
 	IncludePending bool
 	Trigger        string
+	Template       string
 	Session        string
 	Agent          string
 	Last           int
@@ -151,8 +156,8 @@ func Search(ctx context.Context, dataStore *store.Store, options SearchOptions) 
 }
 
 func validateOptions(options *SearchOptions) error {
-	if options.Target != TargetKnowledge && options.Target != TargetFeedstock {
-		return errors.New("search target must be knowledge or feedstock")
+	if options.Target != TargetKnowledge && options.Target != TargetFeedstock && options.Target != TargetDocument {
+		return errors.New("search target must be knowledge, feedstock, or document")
 	}
 	if options.Limit <= 0 {
 		options.Limit = 20
@@ -161,10 +166,17 @@ func validateOptions(options *SearchOptions) error {
 		options.MaxTokens = 2000
 	}
 	if options.Type != "" {
+		if options.Target == TargetDocument {
+			return errors.New("--type is not valid for document")
+		}
 		options.Type = domain.KnowledgeType(strings.TrimSpace(string(options.Type)))
 		if err := domain.ValidateKnowledgeTypeName(options.Type); err != nil {
 			return fmt.Errorf("invalid --type: %w", err)
 		}
+	}
+	options.Template = strings.TrimSpace(options.Template)
+	if options.Template != "" && options.Target != TargetDocument {
+		return errors.New("--template is only valid for document")
 	}
 	if options.Trigger != "" {
 		if options.Target != TargetKnowledge {
@@ -183,6 +195,15 @@ func validateOptions(options *SearchOptions) error {
 	if options.Target == TargetKnowledge {
 		if options.Session != "" || options.Agent != "" || options.Last != 0 {
 			return errors.New("--session, --agent, and --last are only valid for feedstock")
+		}
+		return nil
+	}
+	if options.Target == TargetDocument {
+		if options.Session != "" || options.Agent != "" || options.Last != 0 {
+			return errors.New("--session, --agent, and --last are only valid for feedstock")
+		}
+		if options.IncludePending || options.IncludeRetired {
+			return errors.New("--include-pending and --include-retired are only valid for knowledge")
 		}
 		return nil
 	}
@@ -275,7 +296,7 @@ func schemaStatements() []string {
 		`CREATE TABLE IF NOT EXISTS documents (
 			record_key TEXT PRIMARY KEY,
 			id TEXT NOT NULL,
-			kind TEXT NOT NULL CHECK(kind IN ('feedstock','knowledge')),
+			kind TEXT NOT NULL CHECK(kind IN ('feedstock','knowledge','document')),
 			session TEXT NOT NULL,
 			agent TEXT NOT NULL,
 			timestamp TEXT NOT NULL,
@@ -375,6 +396,11 @@ func incrementalSync(
 	}
 	knowledgeWarnings, err := syncKnowledge(ctx, transaction, dataStore)
 	warnings := append(feedstockWarnings, knowledgeWarnings...)
+	if err != nil {
+		return warnings, err
+	}
+	documentWarnings, err := syncDocuments(ctx, transaction, dataStore)
+	warnings = append(warnings, documentWarnings...)
 	if err != nil {
 		return warnings, err
 	}
@@ -592,6 +618,114 @@ func syncKnowledge(
 	return warnings, nil
 }
 
+type indexedDistilled struct {
+	RecordKey string
+	ModTime   int64
+	Size      int64
+}
+
+func syncDocuments(
+	ctx context.Context,
+	transaction *sql.Tx,
+	dataStore *store.Store,
+) ([]diagnostic.Warning, error) {
+	indexed := map[string]indexedDistilled{}
+	rows, err := transaction.QueryContext(
+		ctx,
+		`SELECT record_key,path,source_mtime_ns,source_size FROM documents WHERE kind=?`,
+		string(TargetDocument),
+	)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var path string
+		var value indexedDistilled
+		if err := rows.Scan(&value.RecordKey, &path, &value.ModTime, &value.Size); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		indexed[path] = value
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	files, walkWarnings, err := enumerateMarkdown(filepath.Join(dataStore.Root, "documents"))
+	if err != nil {
+		return walkWarnings, err
+	}
+	warnings := append([]diagnostic.Warning(nil), walkWarnings...)
+	current := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		current[file.Path] = struct{}{}
+		previous, exists := indexed[file.Path]
+		if exists && previous.ModTime == file.ModTime && previous.Size == file.Size {
+			continue
+		}
+		distilled, err := dataStore.ReadDistilledDocumentFile(file.Path)
+		if err != nil {
+			warnings = append(warnings, diagnostic.FromError(file.Path, err))
+			if exists {
+				if err := deleteDocument(ctx, transaction, previous.RecordKey); err != nil {
+					return warnings, err
+				}
+			}
+			continue
+		}
+		subjects, _ := json.Marshal([]string{distilled.Subject})
+		templates, _ := json.Marshal([]string{distilled.Template})
+		supersedes, _ := json.Marshal([]string{})
+		timestamp := time.Unix(0, file.ModTime).UTC()
+		if err := upsertDocument(ctx, transaction, document{
+			ID: distilled.Subject + "/" + distilled.Template, Kind: TargetDocument,
+			Timestamp: timestamp.Format(time.RFC3339Nano), TimestampNS: file.ModTime,
+			Subjects: string(subjects), Type: string(templates),
+			Supersedes: string(supersedes), Claim: documentExcerpt(distilled.Body),
+			Path: file.Path, Status: string(domain.StatusActive),
+			Searchable: strings.Join([]string{
+				distilled.Body,
+				distilled.Subject,
+				distilled.Template,
+			}, "\n"),
+			SourceMtimeNS: file.ModTime, SourceSize: file.Size,
+		}); err != nil {
+			return warnings, err
+		}
+	}
+	for path, value := range indexed {
+		if _, exists := current[path]; exists {
+			continue
+		}
+		if err := deleteDocument(ctx, transaction, value.RecordKey); err != nil {
+			return warnings, err
+		}
+	}
+	return warnings, nil
+}
+
+const documentExcerptBytes = 500
+
+// documentExcerpt selects the first non-heading paragraph as the record's
+// representative text, mirroring how knowledge uses its claim for embedding.
+func documentExcerpt(body string) string {
+	for _, block := range strings.Split(body, "\n\n") {
+		block = strings.TrimSpace(block)
+		if block == "" || strings.HasPrefix(block, "#") {
+			continue
+		}
+		if len(block) <= documentExcerptBytes {
+			return block
+		}
+		end := documentExcerptBytes
+		for end > 0 && !utf8.RuneStart(block[end]) {
+			end--
+		}
+		return block[:end]
+	}
+	return ""
+}
+
 func enumerateMarkdown(base string) ([]fileReference, []diagnostic.Warning, error) {
 	var files []fileReference
 	var warnings []diagnostic.Warning
@@ -763,7 +897,8 @@ func queryIndex(ctx context.Context, database *sql.DB, options SearchOptions) (S
 		_ = json.Unmarshal([]byte(supersedesJSON), &result.Supersedes)
 		var resultTypes []domain.KnowledgeType
 		_ = json.Unmarshal([]byte(typesJSON), &resultTypes)
-		if options.Target == TargetKnowledge {
+		switch options.Target {
+		case TargetKnowledge:
 			if len(resultTypes) == 1 {
 				result.Type = resultTypes[0]
 			}
@@ -776,7 +911,17 @@ func queryIndex(ctx context.Context, database *sql.DB, options SearchOptions) (S
 			result.Summary = ""
 			result.Subjects = nil
 			result.Status = domain.Status(status)
-		} else {
+		case TargetDocument:
+			result.Types = resultTypes
+			result.ID = id
+			if len(result.Subjects) == 1 {
+				result.Subject = result.Subjects[0]
+			}
+			result.Summary = ""
+			result.Subjects = nil
+			result.Status = ""
+			result.Supersedes = nil
+		default:
 			result.Types = resultTypes
 			result.ID = id
 			result.Claim = ""
@@ -812,7 +957,8 @@ func queryIndex(ctx context.Context, database *sql.DB, options SearchOptions) (S
 func filters(options SearchOptions) (string, []any) {
 	var where strings.Builder
 	var args []any
-	if options.Target == TargetKnowledge {
+	switch options.Target {
+	case TargetKnowledge:
 		where.WriteString(` AND d.kind=?`)
 		args = append(args, string(TargetKnowledge))
 		switch {
@@ -840,7 +986,10 @@ func filters(options SearchOptions) (string, []any) {
 			where.WriteString(` AND d.status=?`)
 			args = append(args, string(domain.StatusActive))
 		}
-	} else {
+	case TargetDocument:
+		where.WriteString(` AND d.kind=?`)
+		args = append(args, string(TargetDocument))
+	default:
 		where.WriteString(` AND d.kind=?`)
 		args = append(args, string(TargetFeedstock))
 	}
@@ -863,6 +1012,10 @@ func filters(options SearchOptions) (string, []any) {
 	if options.Trigger != "" {
 		where.WriteString(` AND d.trigger=?`)
 		args = append(args, options.Trigger)
+	}
+	if options.Template != "" {
+		where.WriteString(` AND EXISTS (SELECT 1 FROM json_each(d.type) WHERE value=?)`)
+		args = append(args, options.Template)
 	}
 	if options.Session != "" {
 		where.WriteString(` AND d.session=?`)
