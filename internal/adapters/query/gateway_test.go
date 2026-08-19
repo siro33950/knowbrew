@@ -21,7 +21,7 @@ func TestGatewaySynchronizesAndSearchesVectors(t *testing.T) {
 	)
 	writeKnowledge(
 		t, dataStore, "rollback-knowledge", feedstock.ID,
-		domain.StatusActive, "deployments must support rollback", "",
+		domain.StatusActive, "deployments must support rollback",
 	)
 	service := searchapp.Service{Gateway: Gateway{Store: dataStore, Encoder: semanticFakeEncoder{}}}
 	response, err := service.Search(context.Background(), searchapp.Options{
@@ -145,7 +145,7 @@ func TestVectorIndexEmbedsOnlyRepresentativeTextPerKind(t *testing.T) {
 	real := writeFeedstock(t, dataStore, "z-real-feedstock", now.Add(time.Second), "rollback policy")
 	hiddenPath := writeKnowledge(
 		t, dataStore, "a-hidden-knowledge", hidden.ID,
-		domain.StatusActive, "weather forecast", "",
+		domain.StatusActive, "weather forecast",
 	)
 	knowledge, _, err := dataStore.ReadKnowledge(hiddenPath)
 	if err != nil {
@@ -157,7 +157,7 @@ func TestVectorIndexEmbedsOnlyRepresentativeTextPerKind(t *testing.T) {
 	}
 	writeKnowledge(
 		t, dataStore, "z-real-knowledge", real.ID,
-		domain.StatusActive, "rollback policy", "",
+		domain.StatusActive, "rollback policy",
 	)
 	writeDistilledDocumentFile(t, dataStore, "a-hidden-doc", "concept",
 		"# hidden\n\nweather forecast\n\nrollback appears only in a later paragraph.\n")
@@ -204,7 +204,7 @@ func TestVectorSyncUpdatesDeletesAndReportsPersistentFailure(t *testing.T) {
 	feedstock := writeFeedstock(t, dataStore, "fs-source", time.Now().UTC(), "source summary")
 	path := writeKnowledge(
 		t, dataStore, "changing-knowledge", feedstock.ID,
-		domain.StatusActive, "original claim", "",
+		domain.StatusActive, "original claim",
 	)
 	good := searchapp.Service{Gateway: Gateway{Store: dataStore, Encoder: semanticFakeEncoder{}}}
 	initial, _, err := good.Synchronize(context.Background(), false)

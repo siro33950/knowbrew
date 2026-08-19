@@ -116,9 +116,12 @@ Review what was created, and promote what you want your agent to use:
 approved: true   # was: false
 ```
 
-Records marked `trigger: always` are injected at the start of every session
-through the SessionStart hook that `init` registers. Everything else your agent
-finds by searching.
+The SessionStart hook that `init` registers runs `knowbrew context`: it
+injects distilled Subject documents whose template declares `inject: always`,
+plus the documents of the subject whose aliases match the current working
+directory (`inject: subject` — the default `decisions` template opts in).
+Documents distill only approved knowledge, and the injected budget is bounded
+by `[context] max_tokens`. Everything else your agent finds by searching.
 
 ## Daily use
 
@@ -329,7 +332,7 @@ knowbrew index sync|rebuild|status maintain the derived search indexes
 
 Shared search flags: `--subject`, `--type`, `--since`, `--until`, `--limit`,
 `--max-tokens`, `--reindex`, `--search-mode`. `knowledge` adds `--include-pending`,
-`--include-retired`, and `--trigger always`. `feedstock` adds `--session`,
+and `--include-retired`. `feedstock` adds `--session`,
 `--agent`, and `--last N`. `document` searches distilled Subject documents and
 adds `--template` instead of `--type`.
 

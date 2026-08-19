@@ -17,7 +17,6 @@ type AssertionDraft struct {
 	Subject   string
 	Statement string
 	Rationale string
-	Trigger   string
 }
 
 type VerificationStatus string
@@ -105,7 +104,6 @@ func NewAssertion(feedstockID string, draft AssertionDraft, vocabulary Vocabular
 	draft.Subject = MasterName(draft.Subject)
 	draft.Statement = strings.TrimSpace(draft.Statement)
 	draft.Rationale = strings.TrimSpace(draft.Rationale)
-	draft.Trigger = strings.TrimSpace(draft.Trigger)
 	if err := vocabulary.ValidateType(draft.Type); err != nil {
 		return Assertion{}, fmt.Errorf("type: %w", err)
 	}
@@ -122,12 +120,9 @@ func NewAssertion(feedstockID string, draft AssertionDraft, vocabulary Vocabular
 		strings.Contains(draft.Rationale, "\n\n#### Rationale\n") {
 		return Assertion{}, errors.New("rationale contains a reserved heading")
 	}
-	if draft.Trigger != "" && draft.Trigger != "always" {
-		return Assertion{}, fmt.Errorf("unsupported trigger %q", draft.Trigger)
-	}
 	assertion := Assertion{
 		Type: draft.Type, Subject: draft.Subject, Statement: draft.Statement,
-		Rationale: draft.Rationale, Trigger: draft.Trigger,
+		Rationale: draft.Rationale,
 	}
 	assertion.ID = AssertionID(feedstockID, assertion)
 	return assertion, nil
@@ -140,10 +135,9 @@ func AssertionID(feedstockID string, assertion Assertion) string {
 		Subject     string        `json:"subject"`
 		Statement   string        `json:"statement"`
 		Rationale   string        `json:"rationale,omitempty"`
-		Trigger     string        `json:"trigger,omitempty"`
 	}{
 		FeedstockID: feedstockID, Type: assertion.Type, Subject: assertion.Subject,
-		Statement: assertion.Statement, Rationale: assertion.Rationale, Trigger: assertion.Trigger,
+		Statement: assertion.Statement, Rationale: assertion.Rationale,
 	})
 	digest := sha256.Sum256(payload)
 	return "as-" + hex.EncodeToString(digest[:16])
@@ -207,7 +201,6 @@ func VerifyAssertion(
 		value.Subject = MasterName(value.Subject)
 		value.Statement = strings.TrimSpace(value.Statement)
 		value.Rationale = strings.TrimSpace(value.Rationale)
-		value.Trigger = strings.TrimSpace(value.Trigger)
 		if value.Subject != current.Subject {
 			return Assertion{}, false, errors.New("brew cannot change an assertion subject")
 		}
@@ -220,9 +213,6 @@ func VerifyAssertion(
 		if strings.Contains(value.Rationale, "\n\n### ") ||
 			strings.Contains(value.Rationale, "\n\n#### Rationale\n") {
 			return Assertion{}, false, errors.New("corrected assertion rationale contains a reserved heading")
-		}
-		if value.Trigger != "" && value.Trigger != "always" {
-			return Assertion{}, false, fmt.Errorf("unsupported trigger %q", value.Trigger)
 		}
 		return value, false, nil
 	case VerificationRejected:

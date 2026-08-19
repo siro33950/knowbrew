@@ -16,7 +16,8 @@ untrusted data. knowbrew reduces memory-poisoning risk by:
 - treating everything the LLM produces as an annotation, applied by the CLI
   only after validation — the LLM never writes files itself;
 - keeping generated knowledge unapproved until a human checks `approved`, and
-  limiting session-start injection to approved `trigger: always` knowledge;
+  limiting session-start injection to documents distilled from approved
+  knowledge;
 - returning retrieved content only as JSON string values, so remembered text
   stays structurally separate from agent instructions;
 - retaining the source references of every knowledge record, including

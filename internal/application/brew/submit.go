@@ -36,7 +36,6 @@ type KnowledgeDraft struct {
 	Subject   string               `json:"subject"`
 	Statement string               `json:"statement"`
 	Rationale string               `json:"rationale,omitempty"`
-	Trigger   string               `json:"trigger,omitempty"`
 }
 
 type ResolutionInput struct {
@@ -76,7 +75,6 @@ type ShownKnowledge struct {
 	Subject   string               `json:"subject"`
 	Statement string               `json:"statement"`
 	Rationale string               `json:"rationale,omitempty"`
-	Trigger   string               `json:"trigger,omitempty"`
 }
 
 func Catalog(
@@ -145,7 +143,7 @@ func Show(dataStore Repository, reads Invocation, ids []string) ([]ShownKnowledg
 		}
 		result = append(result, ShownKnowledge{
 			ID: id, Type: file.Knowledge.Type, Subject: file.Knowledge.Subject,
-			Statement: file.Statement, Rationale: file.Rationale, Trigger: file.Knowledge.Trigger,
+			Statement: file.Statement, Rationale: file.Rationale,
 		})
 	}
 	if err := reads.RecordInspected(ids); err != nil {
@@ -450,7 +448,6 @@ func domainResolution(input ResolutionInput) domain.Resolution {
 		result.Draft = &domain.KnowledgeDraft{
 			Type: input.Draft.Type, Subject: input.Draft.Subject,
 			Statement: input.Draft.Statement, Rationale: input.Draft.Rationale,
-			Trigger: input.Draft.Trigger,
 		}
 	}
 	return result

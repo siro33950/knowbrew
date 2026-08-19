@@ -108,8 +108,12 @@ Subject文書を数えます。上限付きDistillは次回、次のSubjectとTe
 approved: true   # 変更前: false
 ```
 
-`trigger: always` が付いたレコードは、`init` が登録する SessionStart フックに
-よって毎セッションの冒頭に注入されます。それ以外はエージェントが検索で見つけます。
+`init` が登録する SessionStart フックは `knowbrew context` を実行します。
+テンプレートが `inject: always` を宣言するdistill済み文書と、現在の作業ディレク
+トリにaliasesが一致したsubjectの文書(`inject: subject`。デフォルトでは
+`decisions` テンプレートが宣言)が毎セッションの冒頭に注入されます。文書は承認
+済みknowledgeのみから生成され、注入量は `[context] max_tokens` で制限されます。
+それ以外はエージェントが検索で見つけます。
 
 ## 日常の使い方
 
@@ -314,7 +318,7 @@ knowbrew index sync|rebuild|status 派生検索索引の保守
 
 検索の共通フラグ: `--subject`・`--type`・`--since`・`--until`・`--limit`・
 `--max-tokens`・`--reindex`・`--search-mode`。`knowledge` にはさらに `--include-pending`・
-`--include-retired`・`--trigger always`。`feedstock` にはさらに `--session`・
+`--include-retired`。`feedstock` にはさらに `--session`・
 `--agent`・`--last N`。`document` はdistill済みsubject文書を検索し、`--type` の
 代わりに `--template` を持ちます。
 

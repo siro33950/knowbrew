@@ -45,7 +45,6 @@ type Options struct {
 	Since          *time.Time
 	Until          *time.Time
 	IncludePending bool
-	Trigger        string
 	Template       string
 	Session        string
 	Agent          string
@@ -351,20 +350,6 @@ func ValidateOptions(options *Options) error {
 	options.Template = strings.TrimSpace(options.Template)
 	if options.Template != "" && options.Target != TargetDocument {
 		return errors.New("--template is only valid for document")
-	}
-	if options.Trigger != "" {
-		if options.Target != TargetKnowledge {
-			return errors.New("--trigger is only valid for knowledge")
-		}
-		if options.Trigger != "always" {
-			return errors.New("--trigger must be always")
-		}
-		if options.IncludePending {
-			return errors.New("--trigger and --include-pending cannot be used together")
-		}
-		if options.IncludeRetired {
-			return errors.New("--trigger and --include-retired cannot be used together")
-		}
 	}
 	if options.Target == TargetKnowledge {
 		if options.Session != "" || options.Agent != "" || options.Last != 0 {

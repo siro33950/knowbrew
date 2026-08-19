@@ -1131,9 +1131,8 @@ func legacyOptions(options searchapp.Options) SearchOptions {
 	return SearchOptions{
 		Target: Target(options.Target), Keywords: options.Keywords,
 		Subject: options.Subject, Type: options.Type, Since: options.Since, Until: options.Until,
-		IncludePending: options.IncludePending, Trigger: options.Trigger,
-		Template: options.Template,
-		Session:  options.Session, Agent: options.Agent, Last: options.Last,
+		IncludePending: options.IncludePending, Template: options.Template,
+		Session: options.Session, Agent: options.Agent, Last: options.Last,
 		Limit: options.Limit, MaxTokens: options.MaxTokens, Reindex: options.Reindex,
 		IncludeRetired: options.IncludeRetired,
 	}

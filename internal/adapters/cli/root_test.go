@@ -543,7 +543,7 @@ func TestSearchFlagsAndHookOutputUsePlainMasterNames(t *testing.T) {
 	if err := dataStore.WriteNewKnowledge("linked-rule", domain.Knowledge{
 		Created: annotatedAt, Updated: annotatedAt, Type: domain.KnowledgeType("property"),
 		Subject: "subject", Feedstocks: []string{feedstock.ID},
-		Status: domain.StatusPending, Trigger: "always",
+		Status: domain.StatusPending,
 	}, "# Linked rule"); err != nil {
 		t.Fatal(err)
 	}
@@ -573,7 +573,7 @@ func TestSearchFlagsAndHookOutputUsePlainMasterNames(t *testing.T) {
 	t.Setenv(config.ConfigEnvironment, configPath)
 
 	args := []string{
-		"knowledge", "--trigger", "always",
+		"knowledge",
 		"--subject", "subject",
 	}
 	var output bytes.Buffer
@@ -584,8 +584,8 @@ func TestSearchFlagsAndHookOutputUsePlainMasterNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(output.String(), "[[") ||
-		!strings.Contains(output.String(), `"approved_rules"`) {
-		t.Fatalf("hook returned non-normalized JSON: %s", output.String())
+		!strings.Contains(output.String(), `"results"`) {
+		t.Fatalf("search returned non-normalized JSON: %s", output.String())
 	}
 }
 
@@ -1028,7 +1028,7 @@ func TestKnowledgeCommandsUseFeedstockTerminologyOnly(t *testing.T) {
 	}
 }
 
-func TestInternalInvocationTriggerReturnsEmptyRulesWithoutIndex(t *testing.T) {
+func TestKnowledgeSearchBuildsIndex(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
@@ -1036,64 +1036,17 @@ func TestInternalInvocationTriggerReturnsEmptyRulesWithoutIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(config.ConfigEnvironment, configPath)
-	t.Setenv(config.InvocationIDEnvironment, "internal-invocation")
 
 	var output bytes.Buffer
 	command := newRootCommand()
 	command.SetOut(&output)
-	command.SetArgs([]string{"knowledge", "--trigger", "always"})
-	if err := command.Execute(); err != nil {
-		t.Fatal(err)
-	}
-	var response struct {
-		ApprovedRules []json.RawMessage `json:"approved_rules"`
-		Total         int               `json:"total"`
-		Returned      int               `json:"returned"`
-		Truncated     bool              `json:"truncated"`
-	}
-	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if response.ApprovedRules == nil || len(response.ApprovedRules) != 0 ||
-		response.Total != 0 || response.Returned != 0 || response.Truncated {
-		t.Fatalf("response = %#v; JSON = %s", response, output.String())
-	}
-	indexPath := filepath.Join(rootDir, ".knowbrew", "state", "index.sqlite")
-	if _, err := os.Stat(indexPath); !os.IsNotExist(err) {
-		t.Fatalf("internal trigger created an index at %s: %v", indexPath, err)
-	}
-}
-
-func TestNormalTriggerSearchStillBuildsIndex(t *testing.T) {
-	previous, existed := os.LookupEnv(config.InvocationIDEnvironment)
-	if err := os.Unsetenv(config.InvocationIDEnvironment); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if existed {
-			_ = os.Setenv(config.InvocationIDEnvironment, previous)
-		} else {
-			_ = os.Unsetenv(config.InvocationIDEnvironment)
-		}
-	})
-	rootDir := t.TempDir()
-	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n\n[embedding]\nmodel = \"" + config.EmbeddingRuri + "\"\n"
-	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(config.ConfigEnvironment, configPath)
-
-	var output bytes.Buffer
-	command := newRootCommand()
-	command.SetOut(&output)
-	command.SetArgs([]string{"knowledge", "--trigger", "always"})
+	command.SetArgs([]string{"knowledge"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
 	indexPath := filepath.Join(rootDir, ".knowbrew", "state", "index.sqlite")
 	if _, err := os.Stat(indexPath); err != nil {
-		t.Fatalf("normal trigger did not create the index at %s: %v", indexPath, err)
+		t.Fatalf("knowledge search did not create the index at %s: %v", indexPath, err)
 	}
 }
 

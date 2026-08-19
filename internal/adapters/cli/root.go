@@ -501,10 +501,6 @@ func runSearch(
 	options.MaxTokens = flags.maxTokens
 	options.Reindex = flags.reindex
 	options.Mode = searchapp.Mode(flags.mode)
-	if options.Trigger != "" {
-		service := searchapp.Service{Gateway: query.Gateway{Store: dataStore}}
-		return service.Search(command.Context(), options)
-	}
 	encoder, err := embeddingadapter.Open(cfg.Root, cfg.Embedding)
 	if err != nil {
 		return searchapp.Response{}, err
@@ -790,7 +786,6 @@ func newKnowledgeCommand() *cobra.Command {
 	var (
 		flags                          searchFlags
 		includePending, includeRetired bool
-		trigger                        string
 	)
 	parent := &cobra.Command{
 		Use:     "knowledge [keywords...]",
@@ -798,49 +793,12 @@ func newKnowledgeCommand() *cobra.Command {
 		Short:   "Search knowledge as JSON or apply validated knowledge operations",
 		Args:    cobra.ArbitraryArgs,
 		RunE: func(command *cobra.Command, keywords []string) error {
-			if trigger != "" {
-				if trigger != "always" {
-					return errors.New("--trigger must be always")
-				}
-				if includePending {
-					return errors.New("--trigger and --include-pending cannot be used together")
-				}
-				if includeRetired {
-					return errors.New("--trigger and --include-retired cannot be used together")
-				}
-				if _, internalInvocation := os.LookupEnv(config.InvocationIDEnvironment); internalInvocation {
-					return writeJSON(command.OutOrStdout(), map[string]any{
-						"approved_rules": make([]approvedRule, 0),
-						"total":          0,
-						"returned":       0,
-						"has_more":       false,
-						"truncated":      false,
-					})
-				}
-			}
 			response, err := runSearch(command, searchapp.TargetKnowledge, keywords, flags, searchapp.Options{
 				IncludePending: includePending,
-				IncludeRetired: includeRetired, Trigger: trigger,
+				IncludeRetired: includeRetired,
 			})
 			if err != nil {
 				return err
-			}
-			if trigger != "" {
-				rules := make([]approvedRule, len(response.Results))
-				for index, result := range response.Results {
-					rules[index] = approvedRule{ID: result.ID, Claim: result.Claim, Subject: result.Subject}
-				}
-				output := map[string]any{
-					"approved_rules": rules,
-					"total":          response.Total,
-					"returned":       response.Returned,
-					"has_more":       response.HasMore,
-					"truncated":      response.Truncated,
-				}
-				if len(response.Warnings) > 0 {
-					output["warnings"] = response.Warnings
-				}
-				return writeJSON(command.OutOrStdout(), output)
 			}
 			return writeJSON(command.OutOrStdout(), response)
 		},
@@ -848,15 +806,8 @@ func newKnowledgeCommand() *cobra.Command {
 	addSearchFlags(parent, &flags)
 	parent.Flags().BoolVar(&includePending, "include-pending", false, "Include pending knowledge")
 	parent.Flags().BoolVar(&includeRetired, "include-retired", false, "Include invalidated and superseded knowledge")
-	parent.Flags().StringVar(&trigger, "trigger", "", "Filter active knowledge by trigger; currently only always")
 	parent.AddCommand(newKnowledgeCatalogCommand(), newKnowledgeShowCommand(), newKnowledgeSubmitCommand())
 	return parent
-}
-
-type approvedRule struct {
-	ID      string `json:"id"`
-	Claim   string `json:"claim"`
-	Subject string `json:"subject,omitempty"`
 }
 
 func newKnowledgeCatalogCommand() *cobra.Command {

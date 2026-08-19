@@ -139,7 +139,6 @@ func TestValidateOptionsDocumentTarget(t *testing.T) {
 	}
 	for _, invalid := range []Options{
 		{Target: TargetDocument, Type: domain.KnowledgeType("decision")},
-		{Target: TargetDocument, Trigger: "always"},
 		{Target: TargetDocument, Session: "session"},
 		{Target: TargetDocument, Agent: "claude"},
 		{Target: TargetDocument, Last: 3},

@@ -62,8 +62,11 @@ type knowledgeFrontmatter struct {
 	SupersededBy  string               `yaml:"superseded_by,omitempty"`
 	SupersededAt  *time.Time           `yaml:"superseded_at,omitempty"`
 	InvalidatedAt *time.Time           `yaml:"invalidated_at,omitempty"`
-	Trigger       string               `yaml:"trigger,omitempty"`
-	Status        domain.Status        `yaml:"status,omitempty"`
+	// DeprecatedTrigger absorbs the retired trigger key from existing files;
+	// the strict frontmatter decoder would otherwise reject them. The value
+	// is discarded.
+	DeprecatedTrigger string        `yaml:"trigger,omitempty"`
+	Status            domain.Status `yaml:"status,omitempty"`
 }
 
 type readableFeedstockFrontmatter struct {
@@ -115,7 +118,6 @@ type writableKnowledgeFrontmatter struct {
 	SupersededBy  string               `yaml:"superseded_by,omitempty"`
 	SupersededAt  *time.Time           `yaml:"superseded_at,omitempty"`
 	InvalidatedAt *time.Time           `yaml:"invalidated_at,omitempty"`
-	Trigger       string               `yaml:"trigger,omitempty"`
 }
 
 func New(root string) (*Store, error) {
@@ -986,7 +988,6 @@ func (s *Store) normalizeAssertions(
 		assertion.Subject = domain.MasterName(assertion.Subject)
 		assertion.Statement = strings.TrimSpace(assertion.Statement)
 		assertion.Rationale = strings.TrimSpace(assertion.Rationale)
-		assertion.Trigger = strings.TrimSpace(assertion.Trigger)
 		if err := s.ValidateKnowledgeType(assertion.Type); err != nil {
 			return nil, nil, fmt.Errorf("assertion %d type: %w", index+1, err)
 		}
@@ -1053,7 +1054,7 @@ func knowledgeFromFrontmatter(header knowledgeFrontmatter) (domain.Knowledge, er
 		Feedstocks: header.Feedstocks, Assertions: header.Assertions,
 		Approved: approved, Supersedes: header.Supersedes,
 		SupersededBy: header.SupersededBy, SupersededAt: header.SupersededAt,
-		InvalidatedAt: header.InvalidatedAt, Trigger: header.Trigger,
+		InvalidatedAt: header.InvalidatedAt,
 	}
 	knowledge.Status = domain.EffectiveKnowledgeStatus(knowledge)
 	return knowledge, nil
@@ -1069,7 +1070,6 @@ func encodeKnowledge(knowledge domain.Knowledge, body string) ([]byte, error) {
 		Approved:   knowledge.Approved,
 		Supersedes: knowledge.Supersedes, SupersededBy: knowledge.SupersededBy,
 		SupersededAt: knowledge.SupersededAt, InvalidatedAt: knowledge.InvalidatedAt,
-		Trigger: knowledge.Trigger,
 	}
 	return encodeWithWikilinks(
 		header,

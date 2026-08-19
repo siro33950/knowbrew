@@ -30,9 +30,9 @@ func TestTargetedSearchVisibilityAndShow(t *testing.T) {
 	dataStore := newStore(t)
 	now := time.Date(2026, 7, 30, 1, 0, 0, 0, time.UTC)
 	feedstock := writeFeedstock(t, dataStore, "claude-session-t000001", now, "focused testing")
-	writeKnowledge(t, dataStore, "active-claim", feedstock.ID, domain.StatusActive, "focused testing", "always")
-	writeKnowledge(t, dataStore, "pending-claim", feedstock.ID, domain.StatusPending, "focused pending", "")
-	writeKnowledge(t, dataStore, "invalidated-claim", feedstock.ID, domain.StatusInvalidated, "focused invalidated", "")
+	writeKnowledge(t, dataStore, "active-claim", feedstock.ID, domain.StatusActive, "focused testing")
+	writeKnowledge(t, dataStore, "pending-claim", feedstock.ID, domain.StatusPending, "focused pending")
+	writeKnowledge(t, dataStore, "invalidated-claim", feedstock.ID, domain.StatusInvalidated, "focused invalidated")
 
 	active, err := Search(context.Background(), dataStore, SearchOptions{
 		Target: TargetKnowledge, Keywords: []string{"focused"}, Limit: 10, MaxTokens: 1000,
@@ -121,21 +121,6 @@ func TestTargetedSearchVisibilityAndShow(t *testing.T) {
 	}
 	if strings.Contains(string(filterJSON), "[[") {
 		t.Fatalf("wikilink leaked into search JSON: %s", filterJSON)
-	}
-
-	triggered, err := Search(context.Background(), dataStore, SearchOptions{
-		Target: TargetKnowledge, Subject: "subject", Trigger: "always", Limit: 10, MaxTokens: 1000,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if triggered.Total != 1 || triggered.Results[0].ID != "active-claim" {
-		t.Fatalf("trigger search = %#v", triggered)
-	}
-	if _, err := Search(context.Background(), dataStore, SearchOptions{
-		Target: TargetKnowledge, Trigger: "always", IncludePending: true,
-	}); err == nil || !strings.Contains(err.Error(), "cannot be used together") {
-		t.Fatalf("trigger/include-pending error = %v", err)
 	}
 
 	shown, err := Show(dataStore, []string{feedstock.ID})
@@ -253,7 +238,6 @@ func TestKnowledgeAndFeedstockTypeFilters(t *testing.T) {
 		feedstock.ID,
 		domain.StatusActive,
 		"typed claim",
-		"",
 	)
 	feedstocks, err := Search(context.Background(), dataStore, SearchOptions{
 		Target: TargetFeedstock, Type: domain.KnowledgeType("property"), Limit: 10, MaxTokens: 1000,
@@ -542,7 +526,7 @@ func TestKnowledgeMtimeUpdateAndDeletionAreImmediate(t *testing.T) {
 	dataStore := newStore(t)
 	now := time.Now().UTC()
 	feedstock := writeFeedstock(t, dataStore, "claude-session-t000001", now, "source")
-	path := writeKnowledge(t, dataStore, "status-change", feedstock.ID, domain.StatusPending, "status claim", "")
+	path := writeKnowledge(t, dataStore, "status-change", feedstock.ID, domain.StatusPending, "status claim")
 
 	hidden, err := Search(context.Background(), dataStore, SearchOptions{
 		Target: TargetKnowledge, Keywords: []string{"status"}, Limit: 10, MaxTokens: 1000,
@@ -602,7 +586,6 @@ func TestSearchReconcilesDirectApprovalAndHidesSupersededKnowledge(t *testing.T)
 		feedstock.ID,
 		domain.StatusActive,
 		"lifecycle old rule",
-		"",
 	)
 	if err := dataStore.WriteNewKnowledge("new-lifecycle-rule", domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
@@ -672,7 +655,6 @@ func TestSearchHidesPendingPredecessorOfPendingSuccessor(t *testing.T) {
 		feedstock.ID,
 		domain.StatusPending,
 		"pending lifecycle old rule",
-		"",
 	)
 	if err := dataStore.WriteNewKnowledge("new-pending-rule", domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
@@ -766,7 +748,6 @@ func TestIndexSchemaUsesKindsAndExternalContentFTS(t *testing.T) {
 		feedstock.ID,
 		domain.StatusActive,
 		"schema vocabulary",
-		"",
 	)
 	writeDistilledDocumentFile(
 		t,
@@ -1083,14 +1064,14 @@ func writeKnowledge(
 	dataStore *store.Store,
 	slug, source string,
 	status domain.Status,
-	claim, trigger string,
+	claim string,
 ) string {
 	t.Helper()
 	now := time.Now().UTC()
 	if err := dataStore.WriteNewKnowledge(slug, domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
 		Subject: "subject", Feedstocks: []string{source},
-		Status: domain.StatusPending, Trigger: trigger,
+		Status: domain.StatusPending,
 	}, "## Claim\n\n"+claim); err != nil {
 		t.Fatal(err)
 	}

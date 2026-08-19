@@ -24,7 +24,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const indexSchemaVersion = 15
+const indexSchemaVersion = 16
 const rawPageSizeBytes = 12_000
 
 type Target string
@@ -46,7 +46,6 @@ type SearchOptions struct {
 	Since          *time.Time
 	Until          *time.Time
 	IncludePending bool
-	Trigger        string
 	Template       string
 	Session        string
 	Agent          string
@@ -178,20 +177,6 @@ func validateOptions(options *SearchOptions) error {
 	if options.Template != "" && options.Target != TargetDocument {
 		return errors.New("--template is only valid for document")
 	}
-	if options.Trigger != "" {
-		if options.Target != TargetKnowledge {
-			return errors.New("--trigger is only valid for knowledge")
-		}
-		if options.Trigger != "always" {
-			return errors.New("--trigger must be always")
-		}
-		if options.IncludePending {
-			return errors.New("--trigger and --include-pending cannot be used together")
-		}
-		if options.IncludeRetired {
-			return errors.New("--trigger and --include-retired cannot be used together")
-		}
-	}
 	if options.Target == TargetKnowledge {
 		if options.Session != "" || options.Agent != "" || options.Last != 0 {
 			return errors.New("--session, --agent, and --last are only valid for feedstock")
@@ -307,7 +292,6 @@ func schemaStatements() []string {
 			supersedes TEXT NOT NULL,
 			claim TEXT NOT NULL,
 			path TEXT NOT NULL,
-			trigger TEXT NOT NULL,
 			status TEXT NOT NULL,
 			searchable TEXT NOT NULL,
 			source_mtime_ns INTEGER NOT NULL,
@@ -593,7 +577,7 @@ func syncKnowledge(
 			Timestamp: establishedAt.Format(time.RFC3339Nano), TimestampNS: establishedAt.UnixNano(),
 			Subjects: string(subjects), Type: string(types),
 			Supersedes: string(supersedes), Claim: claim,
-			Path: file.Path, Trigger: knowledge.Trigger,
+			Path:   file.Path,
 			Status: string(knowledge.Status),
 			Searchable: strings.Join([]string{
 				claim,
@@ -762,7 +746,7 @@ func enumerateMarkdown(base string) ([]fileReference, []diagnostic.Warning, erro
 type document struct {
 	ID, Session, Agent, Timestamp, Summary, Subjects, Type string
 	Supersedes                                             string
-	Claim, Path, Trigger, Status, Searchable               string
+	Claim, Path, Status, Searchable                        string
 	Kind                                                   Target
 	TimestampNS, SourceMtimeNS, SourceSize                 int64
 }
@@ -775,8 +759,8 @@ func upsertDocument(ctx context.Context, transaction *sql.Tx, value document) er
 	key := value.recordKey()
 	_, err := transaction.ExecContext(ctx, `INSERT INTO documents (
 		record_key,id,kind,session,agent,timestamp,timestamp_ns,summary,subjects,
-		type,supersedes,claim,path,trigger,status,searchable,source_mtime_ns,source_size
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		type,supersedes,claim,path,status,searchable,source_mtime_ns,source_size
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	ON CONFLICT(record_key) DO UPDATE SET
 		id=excluded.id,
 		kind=excluded.kind,
@@ -790,14 +774,13 @@ func upsertDocument(ctx context.Context, transaction *sql.Tx, value document) er
 		supersedes=excluded.supersedes,
 		claim=excluded.claim,
 		path=excluded.path,
-		trigger=excluded.trigger,
 		status=excluded.status,
 		searchable=excluded.searchable,
 		source_mtime_ns=excluded.source_mtime_ns,
 		source_size=excluded.source_size`,
 		key, value.ID, string(value.Kind), value.Session, value.Agent, value.Timestamp,
 		value.TimestampNS, value.Summary, value.Subjects, value.Type,
-		value.Supersedes, value.Claim, value.Path, value.Trigger, value.Status, value.Searchable,
+		value.Supersedes, value.Claim, value.Path, value.Status, value.Searchable,
 		value.SourceMtimeNS, value.SourceSize,
 	)
 	return err
@@ -1008,10 +991,6 @@ func filters(options SearchOptions) (string, []any) {
 	if options.Until != nil {
 		where.WriteString(` AND d.timestamp_ns<=?`)
 		args = append(args, options.Until.UnixNano())
-	}
-	if options.Trigger != "" {
-		where.WriteString(` AND d.trigger=?`)
-		args = append(args, options.Trigger)
 	}
 	if options.Template != "" {
 		where.WriteString(` AND EXISTS (SELECT 1 FROM json_each(d.type) WHERE value=?)`)

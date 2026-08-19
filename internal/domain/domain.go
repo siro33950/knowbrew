@@ -37,7 +37,6 @@ type Assertion struct {
 	Subject   string        `json:"subject"`
 	Statement string        `json:"statement"`
 	Rationale string        `json:"rationale,omitempty"`
-	Trigger   string        `json:"trigger,omitempty"`
 }
 
 type Feedstock struct {
@@ -73,7 +72,6 @@ type Knowledge struct {
 	SupersededBy  string        `yaml:"superseded_by,omitempty" json:"superseded_by,omitempty"`
 	SupersededAt  *time.Time    `yaml:"superseded_at,omitempty" json:"superseded_at,omitempty"`
 	InvalidatedAt *time.Time    `yaml:"invalidated_at,omitempty" json:"invalidated_at,omitempty"`
-	Trigger       string        `yaml:"trigger,omitempty" json:"trigger,omitempty"`
 	Status        Status        `yaml:"-" json:"status"`
 }
 
@@ -249,9 +247,6 @@ func ValidateFeedstock(feedstock Feedstock) error {
 				return err
 			}
 			assertionSubjects = append(assertionSubjects, assertion.Subject)
-		}
-		if assertion.Trigger != "" && assertion.Trigger != "always" {
-			return fmt.Errorf("assertion %s has unsupported trigger %q", assertion.ID, assertion.Trigger)
 		}
 		assertionTypes = append(assertionTypes, assertion.Type)
 	}
