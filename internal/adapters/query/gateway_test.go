@@ -21,7 +21,7 @@ func TestGatewaySynchronizesAndSearchesVectors(t *testing.T) {
 	)
 	writeKnowledge(
 		t, dataStore, "rollback-knowledge", feedstock.ID,
-		domain.StatusActive, "deployments must support rollback", "",
+		domain.StatusActive, "deployments must support rollback",
 	)
 	service := searchapp.Service{Gateway: Gateway{Store: dataStore, Encoder: semanticFakeEncoder{}}}
 	response, err := service.Search(context.Background(), searchapp.Options{
@@ -125,7 +125,7 @@ func TestGatewayRebuildReplacesCorruptVectorDatabase(t *testing.T) {
 	}
 }
 
-func TestVectorIndexUsesOnlyKnowledgeClaimAndFeedstockSummary(t *testing.T) {
+func TestVectorIndexEmbedsOnlyRepresentativeTextPerKind(t *testing.T) {
 	dataStore := newStore(t)
 	now := time.Now().UTC()
 	hidden := domain.Feedstock{
@@ -145,7 +145,7 @@ func TestVectorIndexUsesOnlyKnowledgeClaimAndFeedstockSummary(t *testing.T) {
 	real := writeFeedstock(t, dataStore, "z-real-feedstock", now.Add(time.Second), "rollback policy")
 	hiddenPath := writeKnowledge(
 		t, dataStore, "a-hidden-knowledge", hidden.ID,
-		domain.StatusActive, "weather forecast", "",
+		domain.StatusActive, "weather forecast",
 	)
 	knowledge, _, err := dataStore.ReadKnowledge(hiddenPath)
 	if err != nil {
@@ -157,8 +157,12 @@ func TestVectorIndexUsesOnlyKnowledgeClaimAndFeedstockSummary(t *testing.T) {
 	}
 	writeKnowledge(
 		t, dataStore, "z-real-knowledge", real.ID,
-		domain.StatusActive, "rollback policy", "",
+		domain.StatusActive, "rollback policy",
 	)
+	writeDistilledDocumentFile(t, dataStore, "a-hidden-doc", "concept",
+		"# hidden\n\nweather forecast\n\nrollback appears only in a later paragraph.\n")
+	writeDistilledDocumentFile(t, dataStore, "z-real-doc", "concept",
+		"# real\n\nrollback policy\n")
 	service := searchapp.Service{Gateway: Gateway{Store: dataStore, Encoder: semanticFakeEncoder{}}}
 	for _, test := range []struct {
 		target searchapp.Target
@@ -166,6 +170,7 @@ func TestVectorIndexUsesOnlyKnowledgeClaimAndFeedstockSummary(t *testing.T) {
 	}{
 		{target: searchapp.TargetKnowledge, want: "z-real-knowledge"},
 		{target: searchapp.TargetFeedstock, want: "z-real-feedstock"},
+		{target: searchapp.TargetDocument, want: "z-real-doc/concept"},
 	} {
 		response, err := service.Search(context.Background(), searchapp.Options{
 			Target: test.target, Keywords: []string{"undo a release"},
@@ -180,6 +185,10 @@ func TestVectorIndexUsesOnlyKnowledgeClaimAndFeedstockSummary(t *testing.T) {
 		if test.target == searchapp.TargetFeedstock &&
 			(response.Results[0].Agent != "claude" || response.Results[0].Session != "session") {
 			t.Fatalf("feedstock search metadata = %#v", response.Results[0])
+		}
+		if test.target == searchapp.TargetDocument &&
+			(response.Results[0].Template != "concept" || response.Results[0].Subject != "z-real-doc") {
+			t.Fatalf("document search metadata = %#v", response.Results[0])
 		}
 	}
 	filtered, err := service.Search(context.Background(), searchapp.Options{
@@ -199,7 +208,7 @@ func TestVectorSyncUpdatesDeletesAndReportsPersistentFailure(t *testing.T) {
 	feedstock := writeFeedstock(t, dataStore, "fs-source", time.Now().UTC(), "source summary")
 	path := writeKnowledge(
 		t, dataStore, "changing-knowledge", feedstock.ID,
-		domain.StatusActive, "original claim", "",
+		domain.StatusActive, "original claim",
 	)
 	good := searchapp.Service{Gateway: Gateway{Store: dataStore, Encoder: semanticFakeEncoder{}}}
 	initial, _, err := good.Synchronize(context.Background(), false)

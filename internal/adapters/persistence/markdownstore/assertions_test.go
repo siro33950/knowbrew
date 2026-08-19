@@ -10,6 +10,17 @@ import (
 	"github.com/siro33950/knowbrew/internal/domain"
 )
 
+func TestDecodeAssertionsToleratesLegacyTriggerLine(t *testing.T) {
+	body := "## Assertions\n\n### as-legacy\n\n" +
+		"- Type: [[property]]\n- Subject: [[knowbrew]]\n- Trigger: always\n\n" +
+		"Legacy assertions stay readable."
+	assertions, err := decodeAssertions(body)
+	if err != nil || len(assertions) != 1 ||
+		assertions[0].Statement != "Legacy assertions stay readable." {
+		t.Fatalf("assertions = %#v, error = %v", assertions, err)
+	}
+}
+
 func TestFeedstockAssertionsRoundTripAsGeneratedMarkdown(t *testing.T) {
 	dataStore, err := New(t.TempDir())
 	if err != nil {
@@ -19,7 +30,6 @@ func TestFeedstockAssertionsRoundTripAsGeneratedMarkdown(t *testing.T) {
 	assertions := []domain.Assertion{
 		{
 			ID: "as-property", Type: "property", Subject: "knowbrew",
-			Trigger:   "always",
 			Statement: "Feedstock assertions are searchable.",
 			Rationale: "They are stored as generated Markdown in the feedstock body.",
 		},
@@ -52,7 +62,6 @@ func TestFeedstockAssertionsRoundTripAsGeneratedMarkdown(t *testing.T) {
 		"### as-property",
 		`- Type: [[property]]`,
 		`- Subject: [[knowbrew]]`,
-		"- Trigger: always",
 		"Feedstock assertions are searchable.",
 		"#### Rationale",
 		"### as-decision",
@@ -62,7 +71,7 @@ func TestFeedstockAssertionsRoundTripAsGeneratedMarkdown(t *testing.T) {
 			t.Fatalf("feedstock Markdown does not contain %q:\n%s", required, text)
 		}
 	}
-	for _, removed := range []string{"user_quote:", "speech_acts:", "commands:", "files_changed:", "errors:", "Applies when:"} {
+	for _, removed := range []string{"user_quote:", "speech_acts:", "commands:", "files_changed:", "errors:", "Applies when:", "- Trigger:"} {
 		if strings.Contains(text, removed) {
 			t.Fatalf("feedstock contains removed field %q:\n%s", removed, text)
 		}

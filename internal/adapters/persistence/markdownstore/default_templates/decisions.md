@@ -1,4 +1,5 @@
 ---
+inject: subject
 description: Organizes the decisions currently in effect for the subject and their established rationale.
 output: decisions.md
 purpose: Help readers identify what is currently adopted and, when evidence exists, why it was adopted.

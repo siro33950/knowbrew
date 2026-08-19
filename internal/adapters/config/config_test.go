@@ -280,6 +280,46 @@ func TestLoadRejectsExplicitNonPositiveDrawConcurrency(t *testing.T) {
 	}
 }
 
+func TestLoadContextMaxTokensDefaultsAndValidation(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		section string
+		want    int
+		wantErr bool
+	}{
+		{name: "default", section: "", want: DefaultContextMaxTokens},
+		{name: "explicit", section: "\n[context]\nmax_tokens = 500\n", want: 500},
+		{name: "zero", section: "\n[context]\nmax_tokens = 0\n", wantErr: true},
+		{name: "negative", section: "\n[context]\nmax_tokens = -1\n", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := DefaultConfigPath(root)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			data := []byte("root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\n" + test.section)
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(ConfigEnvironment, path)
+			loaded, err := Load()
+			if test.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "context max_tokens must be at least 1") {
+					t.Fatalf("error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.Context.MaxTokens != test.want {
+				t.Fatalf("max_tokens = %d, want %d", loaded.Context.MaxTokens, test.want)
+			}
+		})
+	}
+}
+
 func TestLoadAcceptsZeroAndRejectsNegativeDrawContextTurns(t *testing.T) {
 	for _, test := range []struct {
 		name    string

@@ -23,7 +23,7 @@ import (
 	"github.com/siro33950/knowbrew/internal/domain"
 )
 
-const vectorIndexSchemaVersion = 1
+const vectorIndexSchemaVersion = 2
 const vectorEmbeddingBatchSize = 64
 
 func init() {
@@ -475,7 +475,7 @@ func (gateway Gateway) Load(
 		args = append(args, id)
 	}
 	rows, err := database.QueryContext(ctx, `SELECT
-		id,timestamp,agent,session,summary,subjects,type,claim
+		id,timestamp,agent,session,summary,subjects,type,claim,path
 		FROM documents WHERE kind=? AND id IN (`+placeholders+`)`, args...)
 	if err != nil {
 		return nil, err
@@ -483,9 +483,9 @@ func (gateway Gateway) Load(
 	defer func() { _ = rows.Close() }()
 	var results []searchapp.Result
 	for rows.Next() {
-		var id, timestamp, agent, session, summary, subjectsJSON, typesJSON, claim string
+		var id, timestamp, agent, session, summary, subjectsJSON, typesJSON, claim, path string
 		if err := rows.Scan(
-			&id, &timestamp, &agent, &session, &summary, &subjectsJSON, &typesJSON, &claim,
+			&id, &timestamp, &agent, &session, &summary, &subjectsJSON, &typesJSON, &claim, &path,
 		); err != nil {
 			return nil, err
 		}
@@ -493,7 +493,8 @@ func (gateway Gateway) Load(
 		_ = json.Unmarshal([]byte(subjectsJSON), &result.Subjects)
 		var types []domain.KnowledgeType
 		_ = json.Unmarshal([]byte(typesJSON), &types)
-		if target == searchapp.TargetKnowledge {
+		switch target {
+		case searchapp.TargetKnowledge:
 			result.Claim = claim
 			if len(result.Subjects) == 1 {
 				result.Subject = result.Subjects[0]
@@ -502,7 +503,18 @@ func (gateway Gateway) Load(
 				result.Type = types[0]
 			}
 			result.Subjects = nil
-		} else {
+		case searchapp.TargetDocument:
+			result.Timestamp = timestamp
+			result.Claim = claim
+			result.Path = path
+			if len(result.Subjects) == 1 {
+				result.Subject = result.Subjects[0]
+			}
+			if len(types) == 1 {
+				result.Template = string(types[0])
+			}
+			result.Subjects = nil
+		default:
 			result.Timestamp = timestamp
 			result.Agent = agent
 			result.Session = session
@@ -639,10 +651,10 @@ func (gateway Gateway) syncVectors(
 			_ = rows.Close()
 			return 0, 0, err
 		}
-		if source.kind == string(searchapp.TargetKnowledge) {
-			source.text = strings.TrimSpace(claim)
-		} else {
+		if source.kind == string(searchapp.TargetFeedstock) {
 			source.text = strings.TrimSpace(summary)
+		} else {
+			source.text = strings.TrimSpace(claim)
 		}
 		sources = append(sources, source)
 	}
@@ -864,6 +876,7 @@ func ensureVectorSchema(
 		for _, statement := range []string{
 			`DROP TABLE IF EXISTS knowledge_vectors`,
 			`DROP TABLE IF EXISTS feedstock_vectors`,
+			`DROP TABLE IF EXISTS document_vectors`,
 			`DROP TABLE IF EXISTS vector_documents`,
 			`DROP TABLE IF EXISTS vector_metadata`,
 		} {
@@ -887,6 +900,9 @@ func ensureVectorSchema(
 			embedding float[%d] distance_metric=cosine
 		)`, encoder.Dimension()),
 		fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS feedstock_vectors USING vec0(
+			embedding float[%d] distance_metric=cosine
+		)`, encoder.Dimension()),
+		fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS document_vectors USING vec0(
 			embedding float[%d] distance_metric=cosine
 		)`, encoder.Dimension()),
 		`INSERT INTO vector_metadata(key,value) VALUES('model_id',?)
@@ -931,6 +947,8 @@ func vectorTable(target searchapp.Target) (string, error) {
 		return "knowledge_vectors", nil
 	case searchapp.TargetFeedstock:
 		return "feedstock_vectors", nil
+	case searchapp.TargetDocument:
+		return "document_vectors", nil
 	default:
 		return "", fmt.Errorf("unsupported vector target %q", target)
 	}
@@ -973,8 +991,9 @@ func (gateway Gateway) vectorStatus(
 		}
 		var count int
 		err = textIndex.QueryRowContext(ctx, `SELECT count(*) FROM documents WHERE
-			(kind=? AND trim(claim)<>'') OR (kind=? AND trim(summary)<>'')`,
-			string(searchapp.TargetKnowledge), string(searchapp.TargetFeedstock),
+			(kind=? AND trim(summary)<>'') OR (kind IN (?,?) AND trim(claim)<>'')`,
+			string(searchapp.TargetFeedstock),
+			string(searchapp.TargetKnowledge), string(searchapp.TargetDocument),
 		).Scan(&count)
 		return 0, count, time.Time{}, err
 	}
@@ -1020,9 +1039,9 @@ func (gateway Gateway) vectorStatus(
 			_ = textRows.Close()
 			return 0, 0, time.Time{}, err
 		}
-		text := summary
-		if kind == string(searchapp.TargetKnowledge) {
-			text = claim
+		text := claim
+		if kind == string(searchapp.TargetFeedstock) {
+			text = summary
 		}
 		if strings.TrimSpace(text) == "" {
 			continue
@@ -1052,7 +1071,7 @@ func (gateway Gateway) vectorStatus(
 func (gateway Gateway) unindexedSourceFiles() (int, []diagnostic.Warning, error) {
 	count := 0
 	var warnings []diagnostic.Warning
-	for _, directory := range []string{"feedstocks", "knowledge"} {
+	for _, directory := range []string{"feedstocks", "knowledge", "documents"} {
 		files, foundWarnings, err := enumerateMarkdown(filepath.Join(gateway.Store.Root, directory))
 		warnings = append(warnings, foundWarnings...)
 		if err != nil {
@@ -1083,7 +1102,7 @@ func (gateway Gateway) unsynchronized(database *sql.DB) (int, []diagnostic.Warni
 	}
 	var files []fileReference
 	var warnings []diagnostic.Warning
-	for _, directory := range []string{"feedstocks", "knowledge"} {
+	for _, directory := range []string{"feedstocks", "knowledge", "documents"} {
 		values, foundWarnings, err := enumerateMarkdown(filepath.Join(gateway.Store.Root, directory))
 		warnings = append(warnings, foundWarnings...)
 		if err != nil {
@@ -1112,7 +1131,7 @@ func legacyOptions(options searchapp.Options) SearchOptions {
 	return SearchOptions{
 		Target: Target(options.Target), Keywords: options.Keywords,
 		Subject: options.Subject, Type: options.Type, Since: options.Since, Until: options.Until,
-		IncludePending: options.IncludePending, Trigger: options.Trigger,
+		IncludePending: options.IncludePending, Template: options.Template,
 		Session: options.Session, Agent: options.Agent, Last: options.Last,
 		Limit: options.Limit, MaxTokens: options.MaxTokens, Reindex: options.Reindex,
 		IncludeRetired: options.IncludeRetired,

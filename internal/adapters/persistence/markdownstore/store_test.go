@@ -1151,3 +1151,55 @@ func validFeedstock() domain.Feedstock {
 		}},
 	}
 }
+
+func TestReadKnowledgeToleratesLegacyTriggerKey(t *testing.T) {
+	dataStore, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	feedstock := domain.Feedstock{
+		Schema: domain.SchemaVersion, ID: "fs-legacy", TurnID: "turn-legacy",
+		Session:   domain.SessionRef{ID: "session"},
+		Timestamp: now, Agent: "claude",
+		Types:    []domain.KnowledgeType{"property"},
+		Subjects: []string{"subject"},
+		Summary:  "Legacy trigger fixture.", AnnotatedAt: &now,
+		Assertions: []domain.Assertion{{
+			ID: "as-legacy", Type: "property", Subject: "subject",
+			Statement: "Legacy trigger fixture statement.",
+		}},
+	}
+	if err := dataStore.WriteFeedstock(feedstock); err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.WriteNewKnowledge("legacy-rule", domain.Knowledge{
+		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
+		Subject: "subject", Feedstocks: []string{"fs-legacy"},
+		Status: domain.StatusPending,
+	}, "## Claim\n\nLegacy trigger files stay readable."); err != nil {
+		t.Fatal(err)
+	}
+	path, err := dataStore.KnowledgePath("legacy-rule")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := strings.Replace(string(data), "approved: false", "approved: false\ntrigger: always", 1)
+	if updated == string(data) {
+		t.Fatalf("fixture did not gain a trigger key:\n%s", data)
+	}
+	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	knowledge, _, err := dataStore.ReadKnowledge(path)
+	if err != nil || knowledge.ID != "legacy-rule" {
+		t.Fatalf("knowledge = %#v, error = %v", knowledge, err)
+	}
+}

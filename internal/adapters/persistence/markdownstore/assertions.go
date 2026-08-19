@@ -30,11 +30,6 @@ func encodeAssertions(assertions []domain.Assertion) (string, error) {
 			output.WriteString(assertion.Subject)
 			output.WriteString("]]\n")
 		}
-		if assertion.Trigger != "" {
-			output.WriteString("- Trigger: ")
-			output.WriteString(assertion.Trigger)
-			output.WriteByte('\n')
-		}
 		output.WriteByte('\n')
 		output.WriteString(assertion.Statement)
 		if assertion.Rationale != "" {
@@ -80,10 +75,11 @@ func decodeAssertion(section string) (domain.Assertion, error) {
 		switch {
 		case strings.HasPrefix(line, "- Type: "):
 			assertion.Type = domain.KnowledgeType(domain.MasterName(strings.TrimPrefix(line, "- Type: ")))
+		case strings.HasPrefix(line, "- Trigger: "):
+			// Retired metadata written by earlier releases; discard the value
+			// so existing feedstocks keep decoding.
 		case strings.HasPrefix(line, "- Subject: "):
 			assertion.Subject = domain.MasterName(strings.TrimPrefix(line, "- Subject: "))
-		case strings.HasPrefix(line, "- Trigger: "):
-			assertion.Trigger = strings.TrimSpace(strings.TrimPrefix(line, "- Trigger: "))
 		default:
 			return domain.Assertion{}, fmt.Errorf("unsupported metadata line %q", line)
 		}

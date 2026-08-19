@@ -26,6 +26,7 @@ type Target string
 const (
 	TargetKnowledge Target = "knowledge"
 	TargetFeedstock Target = "feedstock"
+	TargetDocument  Target = "document"
 )
 
 type Mode string
@@ -44,7 +45,7 @@ type Options struct {
 	Since          *time.Time
 	Until          *time.Time
 	IncludePending bool
-	Trigger        string
+	Template       string
 	Session        string
 	Agent          string
 	Last           int
@@ -66,6 +67,8 @@ type Result struct {
 	Type      domain.KnowledgeType   `json:"type,omitempty"`
 	Types     []domain.KnowledgeType `json:"types,omitempty"`
 	Claim     string                 `json:"claim,omitempty"`
+	Template  string                 `json:"template,omitempty"`
+	Path      string                 `json:"path,omitempty"`
 }
 
 type Response struct {
@@ -317,8 +320,8 @@ func (service Service) response(
 }
 
 func ValidateOptions(options *Options) error {
-	if options.Target != TargetKnowledge && options.Target != TargetFeedstock {
-		return errors.New("search target must be knowledge or feedstock")
+	if options.Target != TargetKnowledge && options.Target != TargetFeedstock && options.Target != TargetDocument {
+		return errors.New("search target must be knowledge, feedstock, or document")
 	}
 	if options.Limit == 0 {
 		options.Limit = DefaultLimit
@@ -336,28 +339,30 @@ func ValidateOptions(options *Options) error {
 		return errors.New("search mode must be hybrid, text, or vector")
 	}
 	if options.Type != "" {
+		if options.Target == TargetDocument {
+			return errors.New("--type is not valid for document")
+		}
 		options.Type = domain.KnowledgeType(strings.TrimSpace(string(options.Type)))
 		if err := domain.ValidateKnowledgeTypeName(options.Type); err != nil {
 			return fmt.Errorf("invalid --type: %w", err)
 		}
 	}
-	if options.Trigger != "" {
-		if options.Target != TargetKnowledge {
-			return errors.New("--trigger is only valid for knowledge")
-		}
-		if options.Trigger != "always" {
-			return errors.New("--trigger must be always")
-		}
-		if options.IncludePending {
-			return errors.New("--trigger and --include-pending cannot be used together")
-		}
-		if options.IncludeRetired {
-			return errors.New("--trigger and --include-retired cannot be used together")
-		}
+	options.Template = strings.TrimSpace(options.Template)
+	if options.Template != "" && options.Target != TargetDocument {
+		return errors.New("--template is only valid for document")
 	}
 	if options.Target == TargetKnowledge {
 		if options.Session != "" || options.Agent != "" || options.Last != 0 {
 			return errors.New("--session, --agent, and --last are only valid for feedstock")
+		}
+		return nil
+	}
+	if options.Target == TargetDocument {
+		if options.Session != "" || options.Agent != "" || options.Last != 0 {
+			return errors.New("--session, --agent, and --last are only valid for feedstock")
+		}
+		if options.IncludePending || options.IncludeRetired {
+			return errors.New("--include-pending and --include-retired are only valid for knowledge")
 		}
 		return nil
 	}

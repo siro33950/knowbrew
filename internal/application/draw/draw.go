@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -742,10 +740,10 @@ Follow this staged decision process without skipping or reordering stages:
 6. Type qualification. Treat knowledge_type_master as the sole authority for semantic assertion eligibility and apply the master field semantics above. Evaluate every listed excludes value as a hard veto before using definition, example, or includes. Keep a meaning only when it fits exactly one remaining Type. Do not apply a separate hard-coded category or exclusion list. If no type fits, emit no assertion for that meaning.
 7. Atomic assertions. Form the smallest complete set of independently maintainable assertions that survived type qualification. Split only when one assertion could later be corrected, replaced, approved, or invalidated while another remains true. Keep every condition, scope limit, qualifier, and exception in the statement it constrains. Do not atomize an approved explanation or enumerate derived definitions that were not independently established.
 8. Subject expansion. Match each atomic assertion independently against every subject_master entry and apply the master field semantics above. A subject name is only a fallback cue: when definition, includes, or excludes are present, those fields govern the boundary and an exclusion vetoes every positive match. Duplicate the same atomic assertion once for every matching subject, changing only subject. If no subject matches, emit one copy without subject. Never combine multiple subjects in one assertion.
-9. Coverage audit and return. Re-read target_user_input clause by clause. Confirm that every direct persistent requirement or claim was either retained through type qualification or deliberately excluded because no type fits, and that every acknowledgement was resolved or deliberately omitted as unresolved. Never omit a direct clause merely because another clause approved a long prior response. Preserve the selected type. Supply trigger only when it is exactly "always". Every assertion must contain a subject string; use the empty string when no subject matches. Return the complete structured result exactly once.
+9. Coverage audit and return. Re-read target_user_input clause by clause. Confirm that every direct persistent requirement or claim was either retained through type qualification or deliberately excluded because no type fits, and that every acknowledgement was resolved or deliberately omitted as unresolved. Never omit a direct clause merely because another clause approved a long prior response. Preserve the selected type. Every assertion must contain a subject string; use the empty string when no subject matches. Return the complete structured result exactly once.
 
 Assertion rules:
-- Each assertions item is one JSON object with type, subject, statement, rationale, and trigger. Use the empty string for rationale or trigger when absent. subject must be an existing subject name or the explicit empty string.
+- Each assertions item is one JSON object with type, subject, statement, and rationale. Use the empty string for rationale when absent. subject must be an existing subject name or the explicit empty string.
 - statement is one self-contained assertion on one line. Do not join independently changeable meanings as A and B and C.
 - Include rationale only when the dialogue supplies one; never invent it.
 - A prior agent proposal becomes established only when target_user_input approves it. An approval such as "OK" may establish resolved content from a prior agent_response; assert the approved content, not the acknowledgement word.
@@ -851,7 +849,7 @@ func ensureRepositorySubject(
 	}
 	for _, master := range masters {
 		for _, alias := range master.Aliases {
-			if aliasMatch(alias, candidate.Repo) || aliasMatch(alias, candidate.CWD) {
+			if domain.AliasMatch(alias, candidate.Repo) || domain.AliasMatch(alias, candidate.CWD) {
 				if candidate.Repo == "" {
 					return 0, warnings, nil
 				}
@@ -871,7 +869,7 @@ func ensureRepositorySubject(
 		return 0, warnings, nil
 	}
 	source := candidate.Repo
-	name := subjectName(source)
+	name := domain.SubjectNameFromSource(source)
 	for _, master := range masters {
 		if master.Name != name {
 			continue
@@ -913,9 +911,9 @@ func ensureRepositorySubject(
 }
 
 func subjectMasterConflictsWithRepo(master domain.MasterEntry, repo string) bool {
-	repoIdentity := canonicalRepo(repo)
+	repoIdentity := domain.CanonicalRepo(repo)
 	for _, alias := range master.Aliases {
-		aliasIdentity := canonicalRepo(alias)
+		aliasIdentity := domain.CanonicalRepo(alias)
 		if aliasIdentity == "" {
 			continue
 		}
@@ -924,67 +922,6 @@ func subjectMasterConflictsWithRepo(master domain.MasterEntry, repo string) bool
 		}
 	}
 	return false
-}
-
-func aliasMatch(pattern, value string) bool {
-	if pattern == "" || value == "" {
-		return false
-	}
-	if pattern == value {
-		return true
-	}
-	if left, right := canonicalRepo(pattern), canonicalRepo(value); left != "" && left == right {
-		return true
-	}
-	matched, err := filepath.Match(pattern, value)
-	return err == nil && matched
-}
-
-func canonicalRepo(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	if at := strings.Index(value, "@"); at > 0 {
-		after := value[at+1:]
-		if colon := strings.Index(after, ":"); colon > 0 && !strings.Contains(after[:colon], "/") {
-			value = "ssh://" + after[:colon] + "/" + after[colon+1:]
-		}
-	}
-	if !strings.Contains(value, "://") {
-		return ""
-	}
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.Hostname() == "" {
-		return ""
-	}
-	path := strings.Trim(strings.TrimSuffix(parsed.Path, ".git"), "/")
-	if path == "" {
-		return ""
-	}
-	return strings.ToLower(parsed.Hostname() + "/" + path)
-}
-
-func subjectName(source string) string {
-	source = strings.TrimSuffix(source, "/")
-	base := strings.TrimSuffix(filepath.Base(source), ".git")
-	base = strings.ToLower(base)
-	var result strings.Builder
-	lastDash := false
-	for _, r := range base {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
-			result.WriteRune(r)
-			lastDash = false
-		} else if !lastDash {
-			result.WriteByte('-')
-			lastDash = true
-		}
-	}
-	name := strings.Trim(result.String(), "-")
-	if name == "" {
-		return "unknown-subject"
-	}
-	return name
 }
 
 func masterCount(dataStore Repository) (int, []diagnostic.Warning, error) {

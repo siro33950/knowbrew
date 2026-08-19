@@ -8,6 +8,11 @@ import (
 	"strings"
 )
 
+const (
+	InjectAlways  = "always"
+	InjectSubject = "subject"
+)
+
 type DocumentTemplate struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
@@ -17,7 +22,10 @@ type DocumentTemplate struct {
 	Covers      []string `json:"covers,omitempty"`
 	Excludes    []string `json:"excludes,omitempty"`
 	Completion  []string `json:"completion,omitempty"`
-	Structure   string   `json:"structure"`
+	// Inject controls session-start injection of this template's documents;
+	// it is not part of the distillation prompt payload.
+	Inject    string `json:"-"`
+	Structure string `json:"structure"`
 }
 
 type DistilledDocument struct {
@@ -47,6 +55,11 @@ func ValidateDocumentTemplate(template DocumentTemplate) error {
 	}
 	if strings.TrimSpace(template.Structure) == "" {
 		return errors.New("template structure is required")
+	}
+	switch template.Inject {
+	case "", InjectAlways, InjectSubject:
+	default:
+		return fmt.Errorf("template inject %q must be always or subject", template.Inject)
 	}
 	return nil
 }

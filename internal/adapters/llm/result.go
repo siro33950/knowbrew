@@ -93,12 +93,11 @@ func resolutionResultSchema(typeNames []string) map[string]any {
 		}
 	}
 	draft := objectSchema(
-		[]string{"type", "subject", "statement", "rationale", "trigger"},
+		[]string{"type", "subject", "statement", "rationale"},
 		map[string]any{
 			"type": typeSchema(typeNames), "subject": map[string]any{"type": "string"},
 			"statement": map[string]any{"type": "string", "minLength": 1},
 			"rationale": map[string]any{"type": "string"},
-			"trigger":   map[string]any{"type": "string", "enum": []string{"", "always"}},
 		},
 	)
 	variant := func(kind string, count int, draftSchema map[string]any) map[string]any {
@@ -119,13 +118,12 @@ func resolutionResultSchema(typeNames []string) map[string]any {
 }
 
 func assertionResultSchema(typeNames []string, includeID bool) map[string]any {
-	required := []string{"type", "subject", "statement", "rationale", "trigger"}
+	required := []string{"type", "subject", "statement", "rationale"}
 	properties := map[string]any{
 		"type":      typeSchema(typeNames),
 		"subject":   map[string]any{"type": "string"},
 		"statement": map[string]any{"type": "string"},
 		"rationale": map[string]any{"type": "string"},
-		"trigger":   map[string]any{"type": "string", "enum": []string{"", "always"}},
 	}
 	if includeID {
 		required = append([]string{"id"}, required...)

@@ -30,6 +30,7 @@ import (
 	"github.com/siro33950/knowbrew/internal/application/diagnostic"
 	"github.com/siro33950/knowbrew/internal/application/distill"
 	"github.com/siro33950/knowbrew/internal/application/draw"
+	"github.com/siro33950/knowbrew/internal/application/inject"
 	knowledgeapp "github.com/siro33950/knowbrew/internal/application/knowledge"
 	searchapp "github.com/siro33950/knowbrew/internal/application/search"
 	"github.com/siro33950/knowbrew/internal/domain"
@@ -61,6 +62,8 @@ func newRootCommand() *cobra.Command {
 		newShowCommand(),
 		newFeedstockCommand(),
 		newKnowledgeCommand(),
+		newDocumentCommand(),
+		newContextCommand(),
 		newIndexCommand(),
 	)
 	return root
@@ -498,10 +501,6 @@ func runSearch(
 	options.MaxTokens = flags.maxTokens
 	options.Reindex = flags.reindex
 	options.Mode = searchapp.Mode(flags.mode)
-	if options.Trigger != "" {
-		service := searchapp.Service{Gateway: query.Gateway{Store: dataStore}}
-		return service.Search(command.Context(), options)
-	}
 	encoder, err := embeddingadapter.Open(cfg.Root, cfg.Embedding)
 	if err != nil {
 		return searchapp.Response{}, err
@@ -512,6 +511,120 @@ func runSearch(
 		return response, searchErr
 	}
 	return response, errors.Join(searchErr, encoder.Close())
+}
+
+func newContextCommand() *cobra.Command {
+	var hook bool
+	var maxTokens int
+	command := &cobra.Command{
+		Use:   "context",
+		Short: "Print session-start context assembled from distilled Subject documents",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			if command.Flags().Changed("max-tokens") && maxTokens < 1 {
+				return errors.New("--max-tokens must be at least 1")
+			}
+			if _, internalInvocation := os.LookupEnv(config.InvocationIDEnvironment); internalInvocation {
+				return nil
+			}
+			cwd := ""
+			if hook {
+				payloadCWD, err := contextHookCWD(command.InOrStdin())
+				if err != nil {
+					return err
+				}
+				cwd = payloadCWD
+			}
+			if cwd == "" {
+				if value, err := os.Getwd(); err == nil {
+					cwd = value
+				}
+			}
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			dataStore, err := store.New(cfg.Root)
+			if err != nil {
+				return err
+			}
+			if !command.Flags().Changed("max-tokens") {
+				maxTokens = cfg.Context.MaxTokens
+			}
+			discover := func() string {
+				return sourceadapter.Gateway{}.DiscoverRepository(command.Context(), cwd)
+			}
+			output, warnings, err := inject.Build(repositoryFor(dataStore), cwd, discover, maxTokens)
+			if err != nil {
+				return err
+			}
+			for _, warning := range warnings {
+				_, _ = fmt.Fprintf(command.ErrOrStderr(), "warning: %s: %s\n", warning.Path, warning.Reason)
+			}
+			if output != "" {
+				_, _ = fmt.Fprint(command.OutOrStdout(), output)
+			}
+			return nil
+		},
+	}
+	command.Flags().BoolVar(&hook, "hook", false, "Read the SessionStart hook payload from stdin")
+	command.Flags().IntVar(&maxTokens, "max-tokens", 0, "Approximate token budget for injected document bodies (defaults to [context] max_tokens)")
+	return command
+}
+
+func contextHookCWD(reader io.Reader) (string, error) {
+	var input struct {
+		Event string  `json:"hook_event_name"`
+		CWD   *string `json:"cwd"`
+	}
+	decoder := json.NewDecoder(reader)
+	if err := decoder.Decode(&input); err != nil {
+		if errors.Is(err, io.EOF) {
+			return "", nil
+		}
+		return "", fmt.Errorf("decode context hook input: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
+		return "", fmt.Errorf("decode context hook input: %w", err)
+	}
+	if input.Event != "SessionStart" {
+		return "", fmt.Errorf("context hook requires a SessionStart event, got %q", input.Event)
+	}
+	if input.CWD == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(*input.CWD), nil
+}
+
+func newDocumentCommand() *cobra.Command {
+	var flags searchFlags
+	var template string
+	command := &cobra.Command{
+		Use:   "document [keywords...]",
+		Short: "Search distilled Subject documents as JSON",
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(command *cobra.Command, keywords []string) error {
+			response, err := runSearch(command, searchapp.TargetDocument, keywords, flags, searchapp.Options{
+				Template: template,
+			})
+			if err != nil {
+				return err
+			}
+			return writeJSON(command.OutOrStdout(), response)
+		},
+	}
+	command.Flags().StringVar(&flags.subject, "subject", "", "Filter by exact subject")
+	command.Flags().StringVar(&template, "template", "", "Filter by exact template name")
+	command.Flags().StringVar(&flags.since, "since", "", "Filter at or after an RFC3339 timestamp or YYYY-MM-DD date")
+	command.Flags().StringVar(&flags.until, "until", "", "Filter at or before an RFC3339 timestamp or YYYY-MM-DD date")
+	command.Flags().IntVar(&flags.limit, "limit", 20, "Maximum returned results")
+	command.Flags().IntVar(&flags.maxTokens, "max-tokens", 2000, "Approximate maximum JSON result tokens")
+	command.Flags().BoolVar(&flags.reindex, "reindex", false, "Fully rebuild the derived search index")
+	command.Flags().StringVar(&flags.mode, "search-mode", string(searchapp.ModeHybrid), "Search mode: hybrid, text, or vector")
+	return command
 }
 
 func newFeedstockCommand() *cobra.Command {
@@ -676,7 +789,6 @@ func newKnowledgeCommand() *cobra.Command {
 	var (
 		flags                          searchFlags
 		includePending, includeRetired bool
-		trigger                        string
 	)
 	parent := &cobra.Command{
 		Use:     "knowledge [keywords...]",
@@ -684,49 +796,12 @@ func newKnowledgeCommand() *cobra.Command {
 		Short:   "Search knowledge as JSON or apply validated knowledge operations",
 		Args:    cobra.ArbitraryArgs,
 		RunE: func(command *cobra.Command, keywords []string) error {
-			if trigger != "" {
-				if trigger != "always" {
-					return errors.New("--trigger must be always")
-				}
-				if includePending {
-					return errors.New("--trigger and --include-pending cannot be used together")
-				}
-				if includeRetired {
-					return errors.New("--trigger and --include-retired cannot be used together")
-				}
-				if _, internalInvocation := os.LookupEnv(config.InvocationIDEnvironment); internalInvocation {
-					return writeJSON(command.OutOrStdout(), map[string]any{
-						"approved_rules": make([]approvedRule, 0),
-						"total":          0,
-						"returned":       0,
-						"has_more":       false,
-						"truncated":      false,
-					})
-				}
-			}
 			response, err := runSearch(command, searchapp.TargetKnowledge, keywords, flags, searchapp.Options{
 				IncludePending: includePending,
-				IncludeRetired: includeRetired, Trigger: trigger,
+				IncludeRetired: includeRetired,
 			})
 			if err != nil {
 				return err
-			}
-			if trigger != "" {
-				rules := make([]approvedRule, len(response.Results))
-				for index, result := range response.Results {
-					rules[index] = approvedRule{ID: result.ID, Claim: result.Claim, Subject: result.Subject}
-				}
-				output := map[string]any{
-					"approved_rules": rules,
-					"total":          response.Total,
-					"returned":       response.Returned,
-					"has_more":       response.HasMore,
-					"truncated":      response.Truncated,
-				}
-				if len(response.Warnings) > 0 {
-					output["warnings"] = response.Warnings
-				}
-				return writeJSON(command.OutOrStdout(), output)
 			}
 			return writeJSON(command.OutOrStdout(), response)
 		},
@@ -734,15 +809,8 @@ func newKnowledgeCommand() *cobra.Command {
 	addSearchFlags(parent, &flags)
 	parent.Flags().BoolVar(&includePending, "include-pending", false, "Include pending knowledge")
 	parent.Flags().BoolVar(&includeRetired, "include-retired", false, "Include invalidated and superseded knowledge")
-	parent.Flags().StringVar(&trigger, "trigger", "", "Filter active knowledge by trigger; currently only always")
 	parent.AddCommand(newKnowledgeCatalogCommand(), newKnowledgeShowCommand(), newKnowledgeSubmitCommand())
 	return parent
-}
-
-type approvedRule struct {
-	ID      string `json:"id"`
-	Claim   string `json:"claim"`
-	Subject string `json:"subject,omitempty"`
 }
 
 func newKnowledgeCatalogCommand() *cobra.Command {

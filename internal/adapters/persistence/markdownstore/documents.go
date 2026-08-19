@@ -22,6 +22,7 @@ type templateFrontmatter struct {
 	Covers      []string `yaml:"covers,omitempty"`
 	Excludes    []string `yaml:"excludes,omitempty"`
 	Completion  []string `yaml:"completion,omitempty"`
+	Inject      string   `yaml:"inject,omitempty"`
 }
 
 type distilledFrontmatter struct {
@@ -65,7 +66,8 @@ func (s *Store) LoadTemplates() (
 			Description: strings.TrimSpace(header.Description), Output: strings.TrimSpace(header.Output),
 			Purpose: strings.TrimSpace(header.Purpose), Readers: normalizeScopeEntries(header.Readers),
 			Covers: normalizeScopeEntries(header.Covers), Excludes: normalizeScopeEntries(header.Excludes),
-			Completion: normalizeScopeEntries(header.Completion), Structure: strings.TrimSpace(body),
+			Completion: normalizeScopeEntries(header.Completion),
+			Inject:     strings.TrimSpace(header.Inject), Structure: strings.TrimSpace(body),
 		}
 		if err := domain.ValidateDocumentTemplate(template); err != nil {
 			warnings = append(warnings, diagnostic.FromError(path, err))
@@ -129,6 +131,26 @@ func (s *Store) ReadDistilledDocument(
 		return domain.DistilledDocument{}, true, fmt.Errorf("validate distilled document %s: %w", path, err)
 	}
 	return document, true, nil
+}
+
+func (s *Store) ReadDistilledDocumentFile(path string) (domain.DistilledDocument, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return domain.DistilledDocument{}, err
+	}
+	var header distilledFrontmatter
+	body, err := frontmatter.Decode(data, &header)
+	if err != nil {
+		return domain.DistilledDocument{}, fmt.Errorf("read distilled document %s: %w", path, err)
+	}
+	document := domain.DistilledDocument{
+		Subject: domain.MasterName(header.Subject), Template: domain.MasterName(header.Template),
+		KnowledgeIDs: normalizeDocumentReferences(header.Knowledge), Body: body,
+	}
+	if err := domain.ValidateDistilledDocument(document); err != nil {
+		return domain.DistilledDocument{}, fmt.Errorf("validate distilled document %s: %w", path, err)
+	}
+	return document, nil
 }
 
 func normalizeDocumentReferences(values []string) []string {

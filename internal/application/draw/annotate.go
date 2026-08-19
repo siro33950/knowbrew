@@ -20,7 +20,6 @@ type AssertionInput struct {
 	Subject   string               `json:"subject"`
 	Statement string               `json:"statement"`
 	Rationale string               `json:"rationale,omitempty"`
-	Trigger   string               `json:"trigger,omitempty"`
 }
 
 func Annotate(
@@ -133,7 +132,7 @@ func buildAssertions(
 	for _, input := range inputs {
 		drafts = append(drafts, domain.AssertionDraft{
 			Type: input.Type, Subject: input.Subject, Statement: input.Statement,
-			Rationale: input.Rationale, Trigger: input.Trigger,
+			Rationale: input.Rationale,
 		})
 	}
 	return domain.BuildAssertions(feedstockID, drafts, vocabulary)

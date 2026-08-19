@@ -116,9 +116,14 @@ Review what was created, and promote what you want your agent to use:
 approved: true   # was: false
 ```
 
-Records marked `trigger: always` are injected at the start of every session
-through the SessionStart hook that `init` registers. Everything else your agent
-finds by searching.
+The SessionStart hook that `init` registers runs `knowbrew context`: it
+injects distilled Subject documents whose template declares `inject: always`,
+plus the documents of the subject whose aliases match the current working
+directory (`inject: subject` — the default `decisions` template opts in).
+Documents distill only approved knowledge. `[context] max_tokens` bounds how
+much document body is injected; the fixed preamble that marks the documents as
+untrusted data, and the closing note listing anything left out, are always
+emitted on top of it. Everything else your agent finds by searching.
 
 ## Daily use
 
@@ -243,6 +248,9 @@ concurrency = 5           # parallel LLM workers
 context_turns = 3         # earlier dialogue turns given to the extractor
 max_context_turns = 20    # bounded fallback window
 
+[context]
+max_tokens = 2000         # approximate token budget for injected document bodies
+
 [embedding]
 model = "ruri-v3-130m-int8-onnx" # or snowflake..., qwen3..., disabled, custom
 # path = "/absolute/path/to/model" # required only for custom
@@ -321,14 +329,17 @@ knowbrew distill [flags]           approved knowledge → Subject documents
 knowbrew knowledge [keywords...]   search knowledge (alias: kn)
 knowbrew knowledge show <id...>    inspect knowledge in any lifecycle state
 knowbrew feedstock [keywords...]   search or replay feedstock
+knowbrew document [keywords...]    search distilled Subject documents
+knowbrew context                   print session-start context from distilled documents
 knowbrew show <id...>              one feedstock record; --raw for the dialogue
 knowbrew index sync|rebuild|status maintain the derived search indexes
 ```
 
 Shared search flags: `--subject`, `--type`, `--since`, `--until`, `--limit`,
 `--max-tokens`, `--reindex`, `--search-mode`. `knowledge` adds `--include-pending`,
-`--include-retired`, and `--trigger always`. `feedstock` adds `--session`,
-`--agent`, and `--last N`.
+and `--include-retired`. `feedstock` adds `--session`,
+`--agent`, and `--last N`. `document` searches distilled Subject documents and
+adds `--template` instead of `--type`.
 
 `draw` flags: `--max N`, `--since`, `--until`, `--source claude|codex`,
 `--verbose`. Explicit files and directories must be inside a configured source

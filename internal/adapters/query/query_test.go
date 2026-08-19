@@ -30,9 +30,9 @@ func TestTargetedSearchVisibilityAndShow(t *testing.T) {
 	dataStore := newStore(t)
 	now := time.Date(2026, 7, 30, 1, 0, 0, 0, time.UTC)
 	feedstock := writeFeedstock(t, dataStore, "claude-session-t000001", now, "focused testing")
-	writeKnowledge(t, dataStore, "active-claim", feedstock.ID, domain.StatusActive, "focused testing", "always")
-	writeKnowledge(t, dataStore, "pending-claim", feedstock.ID, domain.StatusPending, "focused pending", "")
-	writeKnowledge(t, dataStore, "invalidated-claim", feedstock.ID, domain.StatusInvalidated, "focused invalidated", "")
+	writeKnowledge(t, dataStore, "active-claim", feedstock.ID, domain.StatusActive, "focused testing")
+	writeKnowledge(t, dataStore, "pending-claim", feedstock.ID, domain.StatusPending, "focused pending")
+	writeKnowledge(t, dataStore, "invalidated-claim", feedstock.ID, domain.StatusInvalidated, "focused invalidated")
 
 	active, err := Search(context.Background(), dataStore, SearchOptions{
 		Target: TargetKnowledge, Keywords: []string{"focused"}, Limit: 10, MaxTokens: 1000,
@@ -121,21 +121,6 @@ func TestTargetedSearchVisibilityAndShow(t *testing.T) {
 	}
 	if strings.Contains(string(filterJSON), "[[") {
 		t.Fatalf("wikilink leaked into search JSON: %s", filterJSON)
-	}
-
-	triggered, err := Search(context.Background(), dataStore, SearchOptions{
-		Target: TargetKnowledge, Subject: "subject", Trigger: "always", Limit: 10, MaxTokens: 1000,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if triggered.Total != 1 || triggered.Results[0].ID != "active-claim" {
-		t.Fatalf("trigger search = %#v", triggered)
-	}
-	if _, err := Search(context.Background(), dataStore, SearchOptions{
-		Target: TargetKnowledge, Trigger: "always", IncludePending: true,
-	}); err == nil || !strings.Contains(err.Error(), "cannot be used together") {
-		t.Fatalf("trigger/include-pending error = %v", err)
 	}
 
 	shown, err := Show(dataStore, []string{feedstock.ID})
@@ -253,7 +238,6 @@ func TestKnowledgeAndFeedstockTypeFilters(t *testing.T) {
 		feedstock.ID,
 		domain.StatusActive,
 		"typed claim",
-		"",
 	)
 	feedstocks, err := Search(context.Background(), dataStore, SearchOptions{
 		Target: TargetFeedstock, Type: domain.KnowledgeType("property"), Limit: 10, MaxTokens: 1000,
@@ -542,7 +526,7 @@ func TestKnowledgeMtimeUpdateAndDeletionAreImmediate(t *testing.T) {
 	dataStore := newStore(t)
 	now := time.Now().UTC()
 	feedstock := writeFeedstock(t, dataStore, "claude-session-t000001", now, "source")
-	path := writeKnowledge(t, dataStore, "status-change", feedstock.ID, domain.StatusPending, "status claim", "")
+	path := writeKnowledge(t, dataStore, "status-change", feedstock.ID, domain.StatusPending, "status claim")
 
 	hidden, err := Search(context.Background(), dataStore, SearchOptions{
 		Target: TargetKnowledge, Keywords: []string{"status"}, Limit: 10, MaxTokens: 1000,
@@ -602,7 +586,6 @@ func TestSearchReconcilesDirectApprovalAndHidesSupersededKnowledge(t *testing.T)
 		feedstock.ID,
 		domain.StatusActive,
 		"lifecycle old rule",
-		"",
 	)
 	if err := dataStore.WriteNewKnowledge("new-lifecycle-rule", domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
@@ -672,7 +655,6 @@ func TestSearchHidesPendingPredecessorOfPendingSuccessor(t *testing.T) {
 		feedstock.ID,
 		domain.StatusPending,
 		"pending lifecycle old rule",
-		"",
 	)
 	if err := dataStore.WriteNewKnowledge("new-pending-rule", domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
@@ -766,7 +748,13 @@ func TestIndexSchemaUsesKindsAndExternalContentFTS(t *testing.T) {
 		feedstock.ID,
 		domain.StatusActive,
 		"schema vocabulary",
-		"",
+	)
+	writeDistilledDocumentFile(
+		t,
+		dataStore,
+		"schema-subject",
+		"concept",
+		"# schema-subject\n\nschema vocabulary body.\n",
 	)
 	if _, err := Search(context.Background(), dataStore, SearchOptions{
 		Target: TargetFeedstock, Limit: 10, MaxTokens: 1000,
@@ -809,6 +797,7 @@ func TestIndexSchemaUsesKindsAndExternalContentFTS(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantRecords := []string{
+		"document=document:schema-subject/concept",
 		"feedstock=feedstock:" + feedstock.ID,
 		"knowledge=knowledge:schema-knowledge",
 	}
@@ -866,6 +855,107 @@ func TestIndexSchemaUsesKindsAndExternalContentFTS(t *testing.T) {
 	}
 	if triggerCount != 3 {
 		t.Fatalf("FTS trigger count = %d, want 3", triggerCount)
+	}
+}
+
+func TestDocumentSyncSearchAndDeletion(t *testing.T) {
+	dataStore := newStore(t)
+	conceptPath := writeDistilledDocumentFile(t, dataStore, "alpha", "concept",
+		"# alpha\n\nRollback procedures for alpha deployments.\n")
+	writeDistilledDocumentFile(t, dataStore, "alpha", "decisions", "# alpha\n\nDecision history.\n")
+	writeDistilledDocumentFile(t, dataStore, "beta", "concept", "# beta\n\nUnrelated body.\n")
+
+	all, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || all.Total != 3 || len(all.Results) != 3 {
+		t.Fatalf("all = %#v, error = %v", all, err)
+	}
+	bySubject, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Subject: "alpha", Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || bySubject.Total != 2 {
+		t.Fatalf("bySubject = %#v, error = %v", bySubject, err)
+	}
+	byTemplate, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Template: "concept", Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || byTemplate.Total != 2 {
+		t.Fatalf("byTemplate = %#v, error = %v", byTemplate, err)
+	}
+	keyword, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Keywords: []string{"rollback"}, Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || keyword.Total != 1 || len(keyword.Results) != 1 {
+		t.Fatalf("keyword = %#v, error = %v", keyword, err)
+	}
+	result := keyword.Results[0]
+	if result.ID != "alpha/concept" || result.Subject != "alpha" || result.Path != conceptPath ||
+		len(result.Types) != 1 || string(result.Types[0]) != "concept" ||
+		!strings.Contains(result.Claim, "Rollback procedures") {
+		t.Fatalf("result = %#v", result)
+	}
+
+	writeDistilledDocumentFile(t, dataStore, "beta", "concept",
+		"# beta\n\nRollback steps now live in the beta document body.\n")
+	keyword, err = Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Keywords: []string{"rollback"}, Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || keyword.Total != 2 {
+		t.Fatalf("after update = %#v, error = %v", keyword, err)
+	}
+
+	if err := os.Remove(conceptPath); err != nil {
+		t.Fatal(err)
+	}
+	all, err = Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || all.Total != 2 {
+		t.Fatalf("after delete = %#v, error = %v", all, err)
+	}
+}
+
+func TestDocumentSyncExcludesDuplicateIDsAndPreservesSurvivor(t *testing.T) {
+	dataStore := newStore(t)
+	original := writeDistilledDocumentFile(t, dataStore, "alpha", "decisions",
+		"# alpha\n\nOriginal decisions body.\n")
+	duplicate := filepath.Join(dataStore.Root, "documents", "alpha", "stale-copy.md")
+	data, err := os.ReadFile(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(duplicate, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || first.Total != 1 {
+		t.Fatalf("first = %#v, error = %v", first, err)
+	}
+	duplicateWarned := false
+	for _, warning := range first.Warnings {
+		if strings.Contains(warning.Reason, "already indexed") {
+			duplicateWarned = true
+		}
+	}
+	if !duplicateWarned {
+		t.Fatalf("duplicate warning missing: %#v", first.Warnings)
+	}
+
+	if err := os.Remove(original); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetDocument, Limit: 10, MaxTokens: 4000,
+	})
+	if err != nil || second.Total != 1 || second.Results[0].ID != "alpha/decisions" {
+		t.Fatalf("second = %#v, error = %v", second, err)
+	}
+	if len(second.Warnings) != 0 {
+		t.Fatalf("survivor sync still warns: %#v", second.Warnings)
 	}
 }
 
@@ -1017,14 +1107,14 @@ func writeKnowledge(
 	dataStore *store.Store,
 	slug, source string,
 	status domain.Status,
-	claim, trigger string,
+	claim string,
 ) string {
 	t.Helper()
 	now := time.Now().UTC()
 	if err := dataStore.WriteNewKnowledge(slug, domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
 		Subject: "subject", Feedstocks: []string{source},
-		Status: domain.StatusPending, Trigger: trigger,
+		Status: domain.StatusPending,
 	}, "## Claim\n\n"+claim); err != nil {
 		t.Fatal(err)
 	}
@@ -1050,4 +1140,27 @@ func writeKnowledgeForTest(path string, knowledge domain.Knowledge, body string)
 		return err
 	}
 	return fsutil.AtomicWrite(path, data, 0o644)
+}
+
+func writeDistilledDocumentFile(
+	t *testing.T,
+	dataStore *store.Store,
+	subject, template, body string,
+) string {
+	t.Helper()
+	directory := filepath.Join(dataStore.Root, "documents", subject)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, template+".md")
+	data := "---\n" +
+		"subject: \"[[" + subject + "]]\"\n" +
+		"template: \"[[" + template + "]]\"\n" +
+		"knowledge:\n" +
+		"  - \"[[kn-0123456789abcdef]]\"\n" +
+		"---\n\n" + body
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

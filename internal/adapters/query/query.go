@@ -24,14 +24,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const indexSchemaVersion = 14
+const indexSchemaVersion = 16
 const rawPageSizeBytes = 12_000
 
 type Target string
 
+// The index table named "documents" stores every indexed record regardless of
+// kind; TargetDocument marks the rows sourced from distilled Subject documents
+// under <root>/documents.
 const (
 	TargetKnowledge Target = "knowledge"
 	TargetFeedstock Target = "feedstock"
+	TargetDocument  Target = "document"
 )
 
 type SearchOptions struct {
@@ -42,7 +46,7 @@ type SearchOptions struct {
 	Since          *time.Time
 	Until          *time.Time
 	IncludePending bool
-	Trigger        string
+	Template       string
 	Session        string
 	Agent          string
 	Last           int
@@ -151,8 +155,8 @@ func Search(ctx context.Context, dataStore *store.Store, options SearchOptions) 
 }
 
 func validateOptions(options *SearchOptions) error {
-	if options.Target != TargetKnowledge && options.Target != TargetFeedstock {
-		return errors.New("search target must be knowledge or feedstock")
+	if options.Target != TargetKnowledge && options.Target != TargetFeedstock && options.Target != TargetDocument {
+		return errors.New("search target must be knowledge, feedstock, or document")
 	}
 	if options.Limit <= 0 {
 		options.Limit = 20
@@ -161,28 +165,30 @@ func validateOptions(options *SearchOptions) error {
 		options.MaxTokens = 2000
 	}
 	if options.Type != "" {
+		if options.Target == TargetDocument {
+			return errors.New("--type is not valid for document")
+		}
 		options.Type = domain.KnowledgeType(strings.TrimSpace(string(options.Type)))
 		if err := domain.ValidateKnowledgeTypeName(options.Type); err != nil {
 			return fmt.Errorf("invalid --type: %w", err)
 		}
 	}
-	if options.Trigger != "" {
-		if options.Target != TargetKnowledge {
-			return errors.New("--trigger is only valid for knowledge")
-		}
-		if options.Trigger != "always" {
-			return errors.New("--trigger must be always")
-		}
-		if options.IncludePending {
-			return errors.New("--trigger and --include-pending cannot be used together")
-		}
-		if options.IncludeRetired {
-			return errors.New("--trigger and --include-retired cannot be used together")
-		}
+	options.Template = strings.TrimSpace(options.Template)
+	if options.Template != "" && options.Target != TargetDocument {
+		return errors.New("--template is only valid for document")
 	}
 	if options.Target == TargetKnowledge {
 		if options.Session != "" || options.Agent != "" || options.Last != 0 {
 			return errors.New("--session, --agent, and --last are only valid for feedstock")
+		}
+		return nil
+	}
+	if options.Target == TargetDocument {
+		if options.Session != "" || options.Agent != "" || options.Last != 0 {
+			return errors.New("--session, --agent, and --last are only valid for feedstock")
+		}
+		if options.IncludePending || options.IncludeRetired {
+			return errors.New("--include-pending and --include-retired are only valid for knowledge")
 		}
 		return nil
 	}
@@ -275,7 +281,7 @@ func schemaStatements() []string {
 		`CREATE TABLE IF NOT EXISTS documents (
 			record_key TEXT PRIMARY KEY,
 			id TEXT NOT NULL,
-			kind TEXT NOT NULL CHECK(kind IN ('feedstock','knowledge')),
+			kind TEXT NOT NULL CHECK(kind IN ('feedstock','knowledge','document')),
 			session TEXT NOT NULL,
 			agent TEXT NOT NULL,
 			timestamp TEXT NOT NULL,
@@ -286,7 +292,6 @@ func schemaStatements() []string {
 			supersedes TEXT NOT NULL,
 			claim TEXT NOT NULL,
 			path TEXT NOT NULL,
-			trigger TEXT NOT NULL,
 			status TEXT NOT NULL,
 			searchable TEXT NOT NULL,
 			source_mtime_ns INTEGER NOT NULL,
@@ -375,6 +380,11 @@ func incrementalSync(
 	}
 	knowledgeWarnings, err := syncKnowledge(ctx, transaction, dataStore)
 	warnings := append(feedstockWarnings, knowledgeWarnings...)
+	if err != nil {
+		return warnings, err
+	}
+	documentWarnings, err := syncDocuments(ctx, transaction, dataStore)
+	warnings = append(warnings, documentWarnings...)
 	if err != nil {
 		return warnings, err
 	}
@@ -567,7 +577,7 @@ func syncKnowledge(
 			Timestamp: establishedAt.Format(time.RFC3339Nano), TimestampNS: establishedAt.UnixNano(),
 			Subjects: string(subjects), Type: string(types),
 			Supersedes: string(supersedes), Claim: claim,
-			Path: file.Path, Trigger: knowledge.Trigger,
+			Path:   file.Path,
 			Status: string(knowledge.Status),
 			Searchable: strings.Join([]string{
 				claim,
@@ -590,6 +600,150 @@ func syncKnowledge(
 		}
 	}
 	return warnings, nil
+}
+
+type indexedDistilled struct {
+	RecordKey string
+	ModTime   int64
+	Size      int64
+}
+
+func syncDocuments(
+	ctx context.Context,
+	transaction *sql.Tx,
+	dataStore *store.Store,
+) ([]diagnostic.Warning, error) {
+	indexed := map[string]indexedDistilled{}
+	rows, err := transaction.QueryContext(
+		ctx,
+		`SELECT record_key,path,source_mtime_ns,source_size FROM documents WHERE kind=?`,
+		string(TargetDocument),
+	)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var path string
+		var value indexedDistilled
+		if err := rows.Scan(&value.RecordKey, &path, &value.ModTime, &value.Size); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		indexed[path] = value
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	files, walkWarnings, err := enumerateMarkdown(filepath.Join(dataStore.Root, "documents"))
+	if err != nil {
+		return walkWarnings, err
+	}
+	warnings := append([]diagnostic.Warning(nil), walkWarnings...)
+	current := make(map[string]struct{}, len(files))
+	// Duplicate frontmatter across paths maps to one record key; track which
+	// live file owns each key so a stale duplicate can never delete the
+	// surviving document's record.
+	claimed := make(map[string]string, len(files))
+	var stale []string
+	for _, file := range files {
+		current[file.Path] = struct{}{}
+		previous, exists := indexed[file.Path]
+		if exists && previous.ModTime == file.ModTime && previous.Size == file.Size {
+			if _, taken := claimed[previous.RecordKey]; !taken {
+				claimed[previous.RecordKey] = file.Path
+			}
+			continue
+		}
+		distilled, err := dataStore.ReadDistilledDocumentFile(file.Path)
+		if err != nil {
+			warnings = append(warnings, diagnostic.FromError(file.Path, err))
+			if exists {
+				stale = append(stale, previous.RecordKey)
+			}
+			continue
+		}
+		value := document{
+			ID: distilled.Subject + "/" + distilled.Template, Kind: TargetDocument,
+		}
+		key := value.recordKey()
+		if owner, taken := claimed[key]; taken {
+			warnings = append(warnings, diagnostic.FromError(file.Path, fmt.Errorf(
+				"distilled document %s/%s is already indexed from %s",
+				distilled.Subject, distilled.Template, owner,
+			)))
+			if exists && previous.RecordKey != key {
+				stale = append(stale, previous.RecordKey)
+			}
+			continue
+		}
+		claimed[key] = file.Path
+		subjects, _ := json.Marshal([]string{distilled.Subject})
+		templates, _ := json.Marshal([]string{distilled.Template})
+		supersedes, _ := json.Marshal([]string{})
+		timestamp := time.Unix(0, file.ModTime).UTC()
+		value = document{
+			ID: distilled.Subject + "/" + distilled.Template, Kind: TargetDocument,
+			Timestamp: timestamp.Format(time.RFC3339Nano), TimestampNS: file.ModTime,
+			Subjects: string(subjects), Type: string(templates),
+			Supersedes: string(supersedes), Claim: documentExcerpt(distilled.Body),
+			Path: file.Path, Status: string(domain.StatusActive),
+			Searchable: strings.Join([]string{
+				distilled.Body,
+				distilled.Subject,
+				distilled.Template,
+			}, "\n"),
+			SourceMtimeNS: file.ModTime, SourceSize: file.Size,
+		}
+		if err := upsertDocument(ctx, transaction, value); err != nil {
+			return warnings, err
+		}
+		if exists && previous.RecordKey != key {
+			stale = append(stale, previous.RecordKey)
+		}
+	}
+	for _, key := range stale {
+		if _, taken := claimed[key]; taken {
+			continue
+		}
+		if err := deleteDocument(ctx, transaction, key); err != nil {
+			return warnings, err
+		}
+	}
+	for path, value := range indexed {
+		if _, exists := current[path]; exists {
+			continue
+		}
+		if _, taken := claimed[value.RecordKey]; taken {
+			continue
+		}
+		if err := deleteDocument(ctx, transaction, value.RecordKey); err != nil {
+			return warnings, err
+		}
+	}
+	return warnings, nil
+}
+
+const documentExcerptBytes = 500
+
+// documentExcerpt selects the first non-heading paragraph as the record's
+// representative text, mirroring how knowledge uses its claim for embedding.
+func documentExcerpt(body string) string {
+	for _, block := range strings.Split(body, "\n\n") {
+		block = strings.TrimSpace(block)
+		if block == "" || strings.HasPrefix(block, "#") {
+			continue
+		}
+		if len(block) <= documentExcerptBytes {
+			return block
+		}
+		end := documentExcerptBytes
+		for end > 0 && !utf8.RuneStart(block[end]) {
+			end--
+		}
+		return block[:end]
+	}
+	return ""
 }
 
 func enumerateMarkdown(base string) ([]fileReference, []diagnostic.Warning, error) {
@@ -628,7 +782,7 @@ func enumerateMarkdown(base string) ([]fileReference, []diagnostic.Warning, erro
 type document struct {
 	ID, Session, Agent, Timestamp, Summary, Subjects, Type string
 	Supersedes                                             string
-	Claim, Path, Trigger, Status, Searchable               string
+	Claim, Path, Status, Searchable                        string
 	Kind                                                   Target
 	TimestampNS, SourceMtimeNS, SourceSize                 int64
 }
@@ -641,8 +795,8 @@ func upsertDocument(ctx context.Context, transaction *sql.Tx, value document) er
 	key := value.recordKey()
 	_, err := transaction.ExecContext(ctx, `INSERT INTO documents (
 		record_key,id,kind,session,agent,timestamp,timestamp_ns,summary,subjects,
-		type,supersedes,claim,path,trigger,status,searchable,source_mtime_ns,source_size
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		type,supersedes,claim,path,status,searchable,source_mtime_ns,source_size
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	ON CONFLICT(record_key) DO UPDATE SET
 		id=excluded.id,
 		kind=excluded.kind,
@@ -656,14 +810,13 @@ func upsertDocument(ctx context.Context, transaction *sql.Tx, value document) er
 		supersedes=excluded.supersedes,
 		claim=excluded.claim,
 		path=excluded.path,
-		trigger=excluded.trigger,
 		status=excluded.status,
 		searchable=excluded.searchable,
 		source_mtime_ns=excluded.source_mtime_ns,
 		source_size=excluded.source_size`,
 		key, value.ID, string(value.Kind), value.Session, value.Agent, value.Timestamp,
 		value.TimestampNS, value.Summary, value.Subjects, value.Type,
-		value.Supersedes, value.Claim, value.Path, value.Trigger, value.Status, value.Searchable,
+		value.Supersedes, value.Claim, value.Path, value.Status, value.Searchable,
 		value.SourceMtimeNS, value.SourceSize,
 	)
 	return err
@@ -763,7 +916,8 @@ func queryIndex(ctx context.Context, database *sql.DB, options SearchOptions) (S
 		_ = json.Unmarshal([]byte(supersedesJSON), &result.Supersedes)
 		var resultTypes []domain.KnowledgeType
 		_ = json.Unmarshal([]byte(typesJSON), &resultTypes)
-		if options.Target == TargetKnowledge {
+		switch options.Target {
+		case TargetKnowledge:
 			if len(resultTypes) == 1 {
 				result.Type = resultTypes[0]
 			}
@@ -776,7 +930,17 @@ func queryIndex(ctx context.Context, database *sql.DB, options SearchOptions) (S
 			result.Summary = ""
 			result.Subjects = nil
 			result.Status = domain.Status(status)
-		} else {
+		case TargetDocument:
+			result.Types = resultTypes
+			result.ID = id
+			if len(result.Subjects) == 1 {
+				result.Subject = result.Subjects[0]
+			}
+			result.Summary = ""
+			result.Subjects = nil
+			result.Status = ""
+			result.Supersedes = nil
+		default:
 			result.Types = resultTypes
 			result.ID = id
 			result.Claim = ""
@@ -812,7 +976,8 @@ func queryIndex(ctx context.Context, database *sql.DB, options SearchOptions) (S
 func filters(options SearchOptions) (string, []any) {
 	var where strings.Builder
 	var args []any
-	if options.Target == TargetKnowledge {
+	switch options.Target {
+	case TargetKnowledge:
 		where.WriteString(` AND d.kind=?`)
 		args = append(args, string(TargetKnowledge))
 		switch {
@@ -840,7 +1005,10 @@ func filters(options SearchOptions) (string, []any) {
 			where.WriteString(` AND d.status=?`)
 			args = append(args, string(domain.StatusActive))
 		}
-	} else {
+	case TargetDocument:
+		where.WriteString(` AND d.kind=?`)
+		args = append(args, string(TargetDocument))
+	default:
 		where.WriteString(` AND d.kind=?`)
 		args = append(args, string(TargetFeedstock))
 	}
@@ -860,9 +1028,9 @@ func filters(options SearchOptions) (string, []any) {
 		where.WriteString(` AND d.timestamp_ns<=?`)
 		args = append(args, options.Until.UnixNano())
 	}
-	if options.Trigger != "" {
-		where.WriteString(` AND d.trigger=?`)
-		args = append(args, options.Trigger)
+	if options.Template != "" {
+		where.WriteString(` AND EXISTS (SELECT 1 FROM json_each(d.type) WHERE value=?)`)
+		args = append(args, options.Template)
 	}
 	if options.Session != "" {
 		where.WriteString(` AND d.session=?`)

@@ -24,7 +24,6 @@ type KnowledgeDraft struct {
 	Subject   string
 	Statement string
 	Rationale string
-	Trigger   string
 }
 
 type Resolution struct {
@@ -133,8 +132,8 @@ func ResolveKnowledge(
 			Type: draft.Type, Subject: MasterName(draft.Subject),
 			Feedstocks: UniqueSorted(append(append([]string{}, target.Knowledge.Feedstocks...), source.ID)),
 			Assertions: UniqueSorted(append(append([]string{}, target.Knowledge.Assertions...), reference)),
-			Supersedes: replacementPredecessors(target, working), Trigger: strings.TrimSpace(draft.Trigger),
-			Status: StatusPending,
+			Supersedes: replacementPredecessors(target, working),
+			Status:     StatusPending,
 		}
 		record := KnowledgeRecord{
 			Knowledge: knowledge, Statement: strings.TrimSpace(draft.Statement),
@@ -433,9 +432,6 @@ func validateKnowledgeDraft(subject string, draft KnowledgeDraft, vocabulary Voc
 	if strings.Contains(draft.Statement, "\r") {
 		return errors.New("knowledge statement must use LF line endings")
 	}
-	if draft.Trigger != "" && draft.Trigger != "always" {
-		return fmt.Errorf("unsupported trigger %q", draft.Trigger)
-	}
 	return nil
 }
 
@@ -447,7 +443,7 @@ func newKnowledgeRecord(source Feedstock, assertion Assertion, supersedes []stri
 			ID: id, Created: now, Updated: now, EstablishedBy: source.ID,
 			Type: assertion.Type, Subject: assertion.Subject, Feedstocks: []string{source.ID},
 			Assertions: []string{reference}, Supersedes: UniqueSorted(supersedes),
-			Trigger: assertion.Trigger, Status: StatusPending,
+			Status: StatusPending,
 		},
 		Statement: assertion.Statement, Rationale: assertion.Rationale, Established: source,
 	}

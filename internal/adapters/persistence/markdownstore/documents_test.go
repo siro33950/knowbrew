@@ -128,6 +128,83 @@ completion:
 	}
 }
 
+func TestLoadTemplatesReadsInjectDeclaration(t *testing.T) {
+	dataStore, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, inject string) {
+		data := "---\ndescription: " + name + " document.\noutput: " + name + ".md\n" +
+			"purpose: Explain.\ninject: " + inject + "\n---\n\n# {{subject}}\n"
+		path := filepath.Join(dataStore.Root, "masters", "templates", name+".md")
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("decisions", "subject")
+	write("persona", "always")
+	write("broken", "everywhere")
+	templates, warnings, err := dataStore.LoadTemplates()
+	if err != nil || len(templates) != 2 || len(warnings) != 1 {
+		t.Fatalf("templates = %#v, warnings = %#v, error = %v", templates, warnings, err)
+	}
+	byName := map[string]string{}
+	for _, template := range templates {
+		byName[template.Name] = template.Inject
+	}
+	if byName["decisions"] != domain.InjectSubject || byName["persona"] != domain.InjectAlways {
+		t.Fatalf("inject values = %#v", byName)
+	}
+	if !strings.Contains(warnings[0].Reason, "must be always or subject") {
+		t.Fatalf("warning = %#v", warnings[0])
+	}
+}
+
+func TestReadDistilledDocumentFileByPath(t *testing.T) {
+	dataStore, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	template := validDocumentTemplate()
+	document := domain.DistilledDocument{
+		Subject: "knowbrew", Template: "concept",
+		KnowledgeIDs: []string{"kn-0123456789abcdef"}, Body: "# knowbrew\n\nBody.",
+	}
+	if err := dataStore.WriteDistilledDocument(template, document); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dataStore.Root, "documents", "knowbrew", "concept.md")
+	loaded, err := dataStore.ReadDistilledDocumentFile(path)
+	if err != nil || loaded.Subject != "knowbrew" || loaded.Template != "concept" ||
+		loaded.Body != "# knowbrew\n\nBody.\n" ||
+		len(loaded.KnowledgeIDs) != 1 || loaded.KnowledgeIDs[0] != "kn-0123456789abcdef" {
+		t.Fatalf("loaded = %#v, error = %v", loaded, err)
+	}
+
+	broken := filepath.Join(dataStore.Root, "documents", "knowbrew", "broken.md")
+	brokenData := `---
+subject: "[[knowbrew]]"
+template: "[[concept]]"
+knowledge: []
+---
+
+# knowbrew
+`
+	if err := os.WriteFile(broken, []byte(brokenData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dataStore.ReadDistilledDocumentFile(broken); err == nil ||
+		!strings.Contains(err.Error(), "at least one Knowledge reference") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestReadDistilledDocumentRejectsDuplicateKnowledgeReferences(t *testing.T) {
 	dataStore, err := New(t.TempDir())
 	if err != nil {

@@ -108,8 +108,14 @@ Subject文書を数えます。上限付きDistillは次回、次のSubjectとTe
 approved: true   # 変更前: false
 ```
 
-`trigger: always` が付いたレコードは、`init` が登録する SessionStart フックに
-よって毎セッションの冒頭に注入されます。それ以外はエージェントが検索で見つけます。
+`init` が登録する SessionStart フックは `knowbrew context` を実行します。
+テンプレートが `inject: always` を宣言するdistill済み文書と、現在の作業ディレク
+トリにaliasesが一致したsubjectの文書(`inject: subject`。デフォルトでは
+`decisions` テンプレートが宣言)が毎セッションの冒頭に注入されます。文書は承認
+済みknowledgeのみから生成されます。`[context] max_tokens` は注入する文書本文の
+量を制限するもので、文書を参考データとして扱う旨の冒頭の注意書きと、載せきれな
+かった文書を知らせる末尾の案内は、これとは別に必ず出力されます。
+それ以外はエージェントが検索で見つけます。
 
 ## 日常の使い方
 
@@ -229,6 +235,9 @@ concurrency = 5           # 並列LLMワーカー数
 context_turns = 3         # 抽出時に渡す先行ターン数
 max_context_turns = 20    # 上限付きのフォールバック窓
 
+[context]
+max_tokens = 2000         # 注入する文書本文の上限（近似トークン数）
+
 [embedding]
 model = "ruri-v3-130m-int8-onnx" # または snowflake..., qwen3..., disabled, custom
 # path = "/absolute/path/to/model" # custom の場合のみ必須
@@ -306,14 +315,17 @@ knowbrew distill [flags]           承認済みknowledge → subject文書
 knowbrew knowledge [keywords...]   knowledgeを検索（別名: kn）
 knowbrew knowledge show <id...>    任意の状態のknowledgeを表示
 knowbrew feedstock [keywords...]   feedstockを検索・再生
+knowbrew document [keywords...]    distill済みsubject文書を検索
+knowbrew context                   distill済み文書からセッション開始文脈を出力
 knowbrew show <id...>              feedstock 1件; --raw で元の対話
 knowbrew index sync|rebuild|status 派生検索索引の保守
 ```
 
 検索の共通フラグ: `--subject`・`--type`・`--since`・`--until`・`--limit`・
 `--max-tokens`・`--reindex`・`--search-mode`。`knowledge` にはさらに `--include-pending`・
-`--include-retired`・`--trigger always`。`feedstock` にはさらに `--session`・
-`--agent`・`--last N`。
+`--include-retired`。`feedstock` にはさらに `--session`・
+`--agent`・`--last N`。`document` はdistill済みsubject文書を検索し、`--type` の
+代わりに `--template` を持ちます。
 
 `draw` のフラグ: `--max N`・`--since`・`--until`・`--source claude|codex`・
 `--verbose`。明示するファイルまたはディレクトリは、設定済みsourceの配下である

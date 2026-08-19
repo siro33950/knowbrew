@@ -24,7 +24,7 @@ func TestCommandSurfaceExposesDistill(t *testing.T) {
 	for _, command := range root.Commands() {
 		got[command.Name()] = true
 	}
-	for _, name := range []string{"init", "draw", "brew", "distill", "show", "feedstock", "knowledge", "index"} {
+	for _, name := range []string{"init", "draw", "brew", "distill", "show", "feedstock", "knowledge", "document", "index"} {
 		if !got[name] {
 			t.Errorf("missing command %q", name)
 		}
@@ -356,6 +356,7 @@ func TestSearchCommandsDoNotExposeTopicFlag(t *testing.T) {
 	for _, args := range [][]string{
 		{"feedstock", "--topic", "testing"},
 		{"knowledge", "--topic", "testing"},
+		{"document", "--topic", "testing"},
 	} {
 		command := newRootCommand()
 		command.SetArgs(args)
@@ -363,6 +364,165 @@ func TestSearchCommandsDoNotExposeTopicFlag(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "unknown flag: --topic") {
 			t.Fatalf("%v error = %v", args, err)
 		}
+	}
+}
+
+func TestDocumentCommandRejectsKnowledgeOnlyFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"document", "--type", "decision"},
+		{"document", "--trigger", "always"},
+		{"document", "--include-pending"},
+		{"document", "--session", "session"},
+	} {
+		command := newRootCommand()
+		command.SetArgs(args)
+		err := command.Execute()
+		if err == nil || !strings.Contains(err.Error(), "unknown flag") {
+			t.Fatalf("%v error = %v", args, err)
+		}
+	}
+}
+
+func TestContextHookInjectsMatchedSubjectDocuments(t *testing.T) {
+	rootDir := t.TempDir()
+	dataStore, err := store.New(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	templateData := `---
+description: Decisions document.
+output: decisions.md
+purpose: Record decisions.
+inject: subject
+---
+
+# {{subject}}
+`
+	templatePath := filepath.Join(rootDir, "masters", "templates", "decisions.md")
+	if err := os.WriteFile(templatePath, []byte(templateData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	if _, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{
+		Name: "alpha", Definition: "Alpha.", Documents: []string{"decisions"},
+		Aliases: []string{workDir},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	documentDir := filepath.Join(rootDir, "documents", "alpha")
+	if err := os.MkdirAll(documentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	documentData := `---
+subject: "[[alpha]]"
+template: "[[decisions]]"
+knowledge:
+  - "[[kn-0123456789abcdef]]"
+---
+
+# alpha
+
+Alpha decisions body.
+`
+	if err := os.WriteFile(filepath.Join(documentDir, "decisions.md"), []byte(documentData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.ConfigEnvironment, configPath)
+
+	payload, err := json.Marshal(map[string]string{
+		"hook_event_name": "SessionStart", "cwd": workDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	command := newRootCommand()
+	command.SetOut(&output)
+	command.SetIn(bytes.NewReader(payload))
+	command.SetArgs([]string{"context", "--hook"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"untrusted reference data",
+		"## Working context: alpha",
+		"Alpha decisions body.",
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("context output does not contain %q:\n%s", expected, output.String())
+		}
+	}
+}
+
+func TestContextHookFallsBackToProcessCwdOnEmptyStdin(t *testing.T) {
+	rootDir := t.TempDir()
+	dataStore, err := store.New(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.ConfigEnvironment, configPath)
+
+	var output bytes.Buffer
+	command := newRootCommand()
+	command.SetOut(&output)
+	command.SetIn(strings.NewReader(""))
+	command.SetArgs([]string{"context", "--hook"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != "" {
+		t.Fatalf("empty root produced context output: %s", output.String())
+	}
+}
+
+func TestContextRejectsNonPositiveExplicitMaxTokens(t *testing.T) {
+	command := newRootCommand()
+	command.SetArgs([]string{"context", "--max-tokens", "0"})
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--max-tokens must be at least 1") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestContextHookRejectsNonSessionStartEvents(t *testing.T) {
+	command := newRootCommand()
+	command.SetIn(strings.NewReader(`{"hook_event_name":"Stop","cwd":"/tmp"}`))
+	command.SetArgs([]string{"context", "--hook"})
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "requires a SessionStart event") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestContextHookSuppressedInsideKnowbrewInvocation(t *testing.T) {
+	t.Setenv(config.InvocationIDEnvironment, "invocation")
+	var output bytes.Buffer
+	command := newRootCommand()
+	command.SetOut(&output)
+	command.SetIn(strings.NewReader("not json"))
+	command.SetArgs([]string{"context", "--hook"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != "" {
+		t.Fatalf("internal invocation produced output: %s", output.String())
 	}
 }
 
@@ -392,7 +552,7 @@ func TestSearchFlagsAndHookOutputUsePlainMasterNames(t *testing.T) {
 	if err := dataStore.WriteNewKnowledge("linked-rule", domain.Knowledge{
 		Created: annotatedAt, Updated: annotatedAt, Type: domain.KnowledgeType("property"),
 		Subject: "subject", Feedstocks: []string{feedstock.ID},
-		Status: domain.StatusPending, Trigger: "always",
+		Status: domain.StatusPending,
 	}, "# Linked rule"); err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +582,7 @@ func TestSearchFlagsAndHookOutputUsePlainMasterNames(t *testing.T) {
 	t.Setenv(config.ConfigEnvironment, configPath)
 
 	args := []string{
-		"knowledge", "--trigger", "always",
+		"knowledge",
 		"--subject", "subject",
 	}
 	var output bytes.Buffer
@@ -433,8 +593,8 @@ func TestSearchFlagsAndHookOutputUsePlainMasterNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(output.String(), "[[") ||
-		!strings.Contains(output.String(), `"approved_rules"`) {
-		t.Fatalf("hook returned non-normalized JSON: %s", output.String())
+		!strings.Contains(output.String(), `"results"`) {
+		t.Fatalf("search returned non-normalized JSON: %s", output.String())
 	}
 }
 
@@ -877,7 +1037,7 @@ func TestKnowledgeCommandsUseFeedstockTerminologyOnly(t *testing.T) {
 	}
 }
 
-func TestInternalInvocationTriggerReturnsEmptyRulesWithoutIndex(t *testing.T) {
+func TestKnowledgeSearchBuildsIndex(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
@@ -885,64 +1045,17 @@ func TestInternalInvocationTriggerReturnsEmptyRulesWithoutIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(config.ConfigEnvironment, configPath)
-	t.Setenv(config.InvocationIDEnvironment, "internal-invocation")
 
 	var output bytes.Buffer
 	command := newRootCommand()
 	command.SetOut(&output)
-	command.SetArgs([]string{"knowledge", "--trigger", "always"})
-	if err := command.Execute(); err != nil {
-		t.Fatal(err)
-	}
-	var response struct {
-		ApprovedRules []json.RawMessage `json:"approved_rules"`
-		Total         int               `json:"total"`
-		Returned      int               `json:"returned"`
-		Truncated     bool              `json:"truncated"`
-	}
-	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if response.ApprovedRules == nil || len(response.ApprovedRules) != 0 ||
-		response.Total != 0 || response.Returned != 0 || response.Truncated {
-		t.Fatalf("response = %#v; JSON = %s", response, output.String())
-	}
-	indexPath := filepath.Join(rootDir, ".knowbrew", "state", "index.sqlite")
-	if _, err := os.Stat(indexPath); !os.IsNotExist(err) {
-		t.Fatalf("internal trigger created an index at %s: %v", indexPath, err)
-	}
-}
-
-func TestNormalTriggerSearchStillBuildsIndex(t *testing.T) {
-	previous, existed := os.LookupEnv(config.InvocationIDEnvironment)
-	if err := os.Unsetenv(config.InvocationIDEnvironment); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if existed {
-			_ = os.Setenv(config.InvocationIDEnvironment, previous)
-		} else {
-			_ = os.Unsetenv(config.InvocationIDEnvironment)
-		}
-	})
-	rootDir := t.TempDir()
-	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n\n[embedding]\nmodel = \"" + config.EmbeddingRuri + "\"\n"
-	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(config.ConfigEnvironment, configPath)
-
-	var output bytes.Buffer
-	command := newRootCommand()
-	command.SetOut(&output)
-	command.SetArgs([]string{"knowledge", "--trigger", "always"})
+	command.SetArgs([]string{"knowledge"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
 	indexPath := filepath.Join(rootDir, ".knowbrew", "state", "index.sqlite")
 	if _, err := os.Stat(indexPath); err != nil {
-		t.Fatalf("normal trigger did not create the index at %s: %v", indexPath, err)
+		t.Fatalf("knowledge search did not create the index at %s: %v", indexPath, err)
 	}
 }
 
