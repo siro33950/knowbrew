@@ -39,6 +39,10 @@ type section struct {
 // templates declare inject: always, plus the documents of subjects whose
 // aliases match the working directory (inject: subject). The repository URL
 // is only discovered when the working directory alone matches no subject.
+//
+// maxTokens budgets the document bodies. The preamble that marks them as
+// untrusted data and the closing note about omitted documents are always
+// emitted, so the returned text can exceed the budget by those fixed parts.
 func Build(
 	repository Repository,
 	cwd string,

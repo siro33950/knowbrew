@@ -568,7 +568,7 @@ func newContextCommand() *cobra.Command {
 		},
 	}
 	command.Flags().BoolVar(&hook, "hook", false, "Read the SessionStart hook payload from stdin")
-	command.Flags().IntVar(&maxTokens, "max-tokens", 0, "Approximate maximum injected context tokens (defaults to [context] max_tokens)")
+	command.Flags().IntVar(&maxTokens, "max-tokens", 0, "Approximate token budget for injected document bodies (defaults to [context] max_tokens)")
 	return command
 }
 

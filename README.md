@@ -120,8 +120,10 @@ The SessionStart hook that `init` registers runs `knowbrew context`: it
 injects distilled Subject documents whose template declares `inject: always`,
 plus the documents of the subject whose aliases match the current working
 directory (`inject: subject` — the default `decisions` template opts in).
-Documents distill only approved knowledge, and the injected budget is bounded
-by `[context] max_tokens`. Everything else your agent finds by searching.
+Documents distill only approved knowledge. `[context] max_tokens` bounds how
+much document body is injected; the fixed preamble that marks the documents as
+untrusted data, and the closing note listing anything left out, are always
+emitted on top of it. Everything else your agent finds by searching.
 
 ## Daily use
 
@@ -247,7 +249,7 @@ context_turns = 3         # earlier dialogue turns given to the extractor
 max_context_turns = 20    # bounded fallback window
 
 [context]
-max_tokens = 2000         # session-start injection budget (approximate tokens)
+max_tokens = 2000         # approximate token budget for injected document bodies
 
 [embedding]
 model = "ruri-v3-130m-int8-onnx" # or snowflake..., qwen3..., disabled, custom

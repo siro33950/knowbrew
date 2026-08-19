@@ -112,7 +112,9 @@ approved: true   # 変更前: false
 テンプレートが `inject: always` を宣言するdistill済み文書と、現在の作業ディレク
 トリにaliasesが一致したsubjectの文書(`inject: subject`。デフォルトでは
 `decisions` テンプレートが宣言)が毎セッションの冒頭に注入されます。文書は承認
-済みknowledgeのみから生成され、注入量は `[context] max_tokens` で制限されます。
+済みknowledgeのみから生成されます。`[context] max_tokens` は注入する文書本文の
+量を制限するもので、文書を参考データとして扱う旨の冒頭の注意書きと、載せきれな
+かった文書を知らせる末尾の案内は、これとは別に必ず出力されます。
 それ以外はエージェントが検索で見つけます。
 
 ## 日常の使い方
@@ -234,7 +236,7 @@ context_turns = 3         # 抽出時に渡す先行ターン数
 max_context_turns = 20    # 上限付きのフォールバック窓
 
 [context]
-max_tokens = 2000         # セッション開始時の注入上限（近似トークン数）
+max_tokens = 2000         # 注入する文書本文の上限（近似トークン数）
 
 [embedding]
 model = "ruri-v3-130m-int8-onnx" # または snowflake..., qwen3..., disabled, custom
