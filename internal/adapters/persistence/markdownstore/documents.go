@@ -22,6 +22,7 @@ type templateFrontmatter struct {
 	Covers      []string `yaml:"covers,omitempty"`
 	Excludes    []string `yaml:"excludes,omitempty"`
 	Completion  []string `yaml:"completion,omitempty"`
+	Inject      string   `yaml:"inject,omitempty"`
 }
 
 type distilledFrontmatter struct {
@@ -65,7 +66,8 @@ func (s *Store) LoadTemplates() (
 			Description: strings.TrimSpace(header.Description), Output: strings.TrimSpace(header.Output),
 			Purpose: strings.TrimSpace(header.Purpose), Readers: normalizeScopeEntries(header.Readers),
 			Covers: normalizeScopeEntries(header.Covers), Excludes: normalizeScopeEntries(header.Excludes),
-			Completion: normalizeScopeEntries(header.Completion), Structure: strings.TrimSpace(body),
+			Completion: normalizeScopeEntries(header.Completion),
+			Inject:     strings.TrimSpace(header.Inject), Structure: strings.TrimSpace(body),
 		}
 		if err := domain.ValidateDocumentTemplate(template); err != nil {
 			warnings = append(warnings, diagnostic.FromError(path, err))

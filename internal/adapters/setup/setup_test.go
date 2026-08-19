@@ -12,7 +12,7 @@ import (
 
 func TestMergeClaudeSettingsPreservesExistingContentAndIsIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	existing := `{"permissions":{"allow":["Read"]},"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"echo existing"}]},{"matcher":"startup","hooks":[{"type":"command","command":"knowbrew search --trigger always"}]}],"Stop":[{"hooks":[{"type":"command","command":"echo stopped"}]}]}}`
+	existing := `{"permissions":{"allow":["Read"]},"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"echo existing"}]},{"matcher":"startup","hooks":[{"type":"command","command":"knowbrew search --trigger always"}]},{"matcher":"startup","hooks":[{"type":"command","command":"knowbrew knowledge --trigger always"}]}],"Stop":[{"hooks":[{"type":"command","command":"echo stopped"}]}]}}`
 	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestMergeClaudeSettingsPreservesExistingContentAndIsIdempotent(t *testing.T
 	if root["permissions"] == nil {
 		t.Fatal("existing permissions were lost")
 	}
-	if count := strings.Count(string(data), "Loading approved knowbrew rules"); count != 1 {
+	if count := strings.Count(string(data), "Loading knowbrew context"); count != 1 {
 		t.Fatalf("knowbrew hook count = %d", count)
 	}
 	if count := strings.Count(string(data), "Drawing completed turn"); count != 1 {
@@ -41,11 +41,11 @@ func TestMergeClaudeSettingsPreservesExistingContentAndIsIdempotent(t *testing.T
 	if !strings.Contains(string(data), "echo stopped") {
 		t.Fatal("existing Stop hook was lost")
 	}
-	if strings.Contains(string(data), "search --trigger always") {
+	if strings.Contains(string(data), "--trigger always") {
 		t.Fatalf("legacy hook was not removed:\n%s", data)
 	}
-	if !strings.Contains(string(data), "/opt/bin/knowbrew knowledge --trigger always") {
-		t.Fatalf("new knowledge hook was not installed:\n%s", data)
+	if !strings.Contains(string(data), "/opt/bin/knowbrew context --hook") {
+		t.Fatalf("new context hook was not installed:\n%s", data)
 	}
 	if !strings.Contains(string(data), "/opt/bin/knowbrew draw --hook") {
 		t.Fatalf("new draw hook was not installed:\n%s", data)
@@ -97,9 +97,10 @@ func TestMergeCodexConfigAndInstructionsAreIdempotent(t *testing.T) {
 	for _, expected := range []string{
 		"knowbrew knowledge [filters] -- <keywords>",
 		"knowbrew feedstock --subject <name> <keywords...>",
+		"knowbrew document [filters] -- <keywords>",
 		"Always place search keywords after `--`",
-		"approved: true",
-		"trigger: always",
+		"human-approved knowledge",
+		"knowbrew context",
 	} {
 		if !strings.Contains(string(instructions), expected) {
 			t.Fatalf("instructions do not contain %q:\n%s", expected, instructions)

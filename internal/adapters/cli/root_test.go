@@ -383,6 +383,140 @@ func TestDocumentCommandRejectsKnowledgeOnlyFlags(t *testing.T) {
 	}
 }
 
+func TestContextHookInjectsMatchedSubjectDocuments(t *testing.T) {
+	rootDir := t.TempDir()
+	dataStore, err := store.New(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	templateData := `---
+description: Decisions document.
+output: decisions.md
+purpose: Record decisions.
+inject: subject
+---
+
+# {{subject}}
+`
+	templatePath := filepath.Join(rootDir, "masters", "templates", "decisions.md")
+	if err := os.WriteFile(templatePath, []byte(templateData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	if _, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{
+		Name: "alpha", Definition: "Alpha.", Documents: []string{"decisions"},
+		Aliases: []string{workDir},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	documentDir := filepath.Join(rootDir, "documents", "alpha")
+	if err := os.MkdirAll(documentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	documentData := `---
+subject: "[[alpha]]"
+template: "[[decisions]]"
+knowledge:
+  - "[[kn-0123456789abcdef]]"
+---
+
+# alpha
+
+Alpha decisions body.
+`
+	if err := os.WriteFile(filepath.Join(documentDir, "decisions.md"), []byte(documentData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.ConfigEnvironment, configPath)
+
+	payload, err := json.Marshal(map[string]string{
+		"hook_event_name": "SessionStart", "cwd": workDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	command := newRootCommand()
+	command.SetOut(&output)
+	command.SetIn(bytes.NewReader(payload))
+	command.SetArgs([]string{"context", "--hook"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"untrusted reference data",
+		"## Working context: alpha",
+		"Alpha decisions body.",
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("context output does not contain %q:\n%s", expected, output.String())
+		}
+	}
+}
+
+func TestContextHookFallsBackToProcessCwdOnEmptyStdin(t *testing.T) {
+	rootDir := t.TempDir()
+	dataStore, err := store.New(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.ConfigEnvironment, configPath)
+
+	var output bytes.Buffer
+	command := newRootCommand()
+	command.SetOut(&output)
+	command.SetIn(strings.NewReader(""))
+	command.SetArgs([]string{"context", "--hook"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != "" {
+		t.Fatalf("empty root produced context output: %s", output.String())
+	}
+}
+
+func TestContextHookRejectsNonSessionStartEvents(t *testing.T) {
+	command := newRootCommand()
+	command.SetIn(strings.NewReader(`{"hook_event_name":"Stop","cwd":"/tmp"}`))
+	command.SetArgs([]string{"context", "--hook"})
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "requires a SessionStart event") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestContextHookSuppressedInsideKnowbrewInvocation(t *testing.T) {
+	t.Setenv(config.InvocationIDEnvironment, "invocation")
+	var output bytes.Buffer
+	command := newRootCommand()
+	command.SetOut(&output)
+	command.SetIn(strings.NewReader("not json"))
+	command.SetArgs([]string{"context", "--hook"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != "" {
+		t.Fatalf("internal invocation produced output: %s", output.String())
+	}
+}
+
 func TestSearchFlagsAndHookOutputUsePlainMasterNames(t *testing.T) {
 	rootDir := t.TempDir()
 	dataStore, err := store.New(rootDir)

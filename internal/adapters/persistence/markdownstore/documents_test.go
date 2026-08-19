@@ -128,6 +128,41 @@ completion:
 	}
 }
 
+func TestLoadTemplatesReadsInjectDeclaration(t *testing.T) {
+	dataStore, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, inject string) {
+		data := "---\ndescription: " + name + " document.\noutput: " + name + ".md\n" +
+			"purpose: Explain.\ninject: " + inject + "\n---\n\n# {{subject}}\n"
+		path := filepath.Join(dataStore.Root, "masters", "templates", name+".md")
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("decisions", "subject")
+	write("persona", "always")
+	write("broken", "everywhere")
+	templates, warnings, err := dataStore.LoadTemplates()
+	if err != nil || len(templates) != 2 || len(warnings) != 1 {
+		t.Fatalf("templates = %#v, warnings = %#v, error = %v", templates, warnings, err)
+	}
+	byName := map[string]string{}
+	for _, template := range templates {
+		byName[template.Name] = template.Inject
+	}
+	if byName["decisions"] != domain.InjectSubject || byName["persona"] != domain.InjectAlways {
+		t.Fatalf("inject values = %#v", byName)
+	}
+	if !strings.Contains(warnings[0].Reason, "must be always or subject") {
+		t.Fatalf("warning = %#v", warnings[0])
+	}
+}
+
 func TestReadDistilledDocumentFileByPath(t *testing.T) {
 	dataStore, err := New(t.TempDir())
 	if err != nil {

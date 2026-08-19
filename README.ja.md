@@ -307,6 +307,7 @@ knowbrew knowledge [keywords...]   knowledgeを検索（別名: kn）
 knowbrew knowledge show <id...>    任意の状態のknowledgeを表示
 knowbrew feedstock [keywords...]   feedstockを検索・再生
 knowbrew document [keywords...]    distill済みsubject文書を検索
+knowbrew context                   distill済み文書からセッション開始文脈を出力
 knowbrew show <id...>              feedstock 1件; --raw で元の対話
 knowbrew index sync|rebuild|status 派生検索索引の保守
 ```

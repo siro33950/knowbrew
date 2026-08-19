@@ -21,6 +21,7 @@ const (
 	InvocationAssertionEnvironment = "KNOWBREW_INVOCATION_ASSERTION"
 	InvocationIDEnvironment        = "KNOWBREW_INVOCATION_ID"
 	DefaultLLMTimeout              = 5 * time.Minute
+	DefaultContextMaxTokens        = 2000
 	DefaultDrawConcurrency         = 5
 	DefaultDrawContextTurns        = 3
 	DefaultDrawMaxContextTurns     = 20
@@ -51,6 +52,10 @@ type Draw struct {
 	MaxContextTurns int `toml:"max_context_turns"`
 }
 
+type Context struct {
+	MaxTokens int `toml:"max_tokens"`
+}
+
 type Embedding struct {
 	Model string `toml:"model"`
 	Path  string `toml:"path,omitempty"`
@@ -67,10 +72,12 @@ type Config struct {
 	Root      string    `toml:"root"`
 	LLM       LLM       `toml:"llm"`
 	Draw      Draw      `toml:"draw"`
+	Context   Context   `toml:"context"`
 	Embedding Embedding `toml:"embedding"`
 	Sources   []Source  `toml:"sources"`
 
 	Path                string `toml:"-"`
+	contextMaxTokensSet bool   `toml:"-"`
 	drawConcurrencySet  bool   `toml:"-"`
 	drawContextTurnsSet bool   `toml:"-"`
 	drawMaxContextSet   bool   `toml:"-"`
@@ -145,6 +152,7 @@ func LoadPath(path string) (Config, error) {
 		)
 	}
 	cfg.Path = path
+	cfg.contextMaxTokensSet = metadata.IsDefined("context", "max_tokens")
 	cfg.drawConcurrencySet = metadata.IsDefined("draw", "concurrency")
 	cfg.drawContextTurnsSet = metadata.IsDefined("draw", "context_turns")
 	cfg.drawMaxContextSet = metadata.IsDefined("draw", "max_context_turns")
@@ -228,6 +236,12 @@ func (cfg *Config) Normalize() error {
 	}
 	if cfg.Draw.MaxContextTurns < cfg.Draw.ContextTurns {
 		return errors.New("draw max_context_turns must be at least context_turns")
+	}
+	if cfg.Context.MaxTokens == 0 && !cfg.contextMaxTokensSet {
+		cfg.Context.MaxTokens = DefaultContextMaxTokens
+	}
+	if cfg.Context.MaxTokens < 1 {
+		return errors.New("context max_tokens must be at least 1")
 	}
 	if strings.TrimSpace(cfg.LLM.Timeout) == "" {
 		cfg.LLM.Timeout = DefaultLLMTimeout.String()
@@ -335,6 +349,9 @@ func Save(root string, cfg Config) (string, error) {
 	}
 	if onDisk.Draw.MaxContextTurns == 0 {
 		onDisk.Draw.MaxContextTurns = DefaultDrawMaxContextTurns
+	}
+	if onDisk.Context.MaxTokens == 0 {
+		onDisk.Context.MaxTokens = DefaultContextMaxTokens
 	}
 	onDisk.Path = ""
 	onDisk.Root = ".."

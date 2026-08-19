@@ -322,6 +322,7 @@ knowbrew knowledge [keywords...]   search knowledge (alias: kn)
 knowbrew knowledge show <id...>    inspect knowledge in any lifecycle state
 knowbrew feedstock [keywords...]   search or replay feedstock
 knowbrew document [keywords...]    search distilled Subject documents
+knowbrew context                   print session-start context from distilled documents
 knowbrew show <id...>              one feedstock record; --raw for the dialogue
 knowbrew index sync|rebuild|status maintain the derived search indexes
 ```

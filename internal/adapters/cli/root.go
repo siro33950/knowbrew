@@ -30,6 +30,7 @@ import (
 	"github.com/siro33950/knowbrew/internal/application/diagnostic"
 	"github.com/siro33950/knowbrew/internal/application/distill"
 	"github.com/siro33950/knowbrew/internal/application/draw"
+	"github.com/siro33950/knowbrew/internal/application/inject"
 	knowledgeapp "github.com/siro33950/knowbrew/internal/application/knowledge"
 	searchapp "github.com/siro33950/knowbrew/internal/application/search"
 	"github.com/siro33950/knowbrew/internal/domain"
@@ -62,6 +63,7 @@ func newRootCommand() *cobra.Command {
 		newFeedstockCommand(),
 		newKnowledgeCommand(),
 		newDocumentCommand(),
+		newContextCommand(),
 		newIndexCommand(),
 	)
 	return root
@@ -513,6 +515,89 @@ func runSearch(
 		return response, searchErr
 	}
 	return response, errors.Join(searchErr, encoder.Close())
+}
+
+func newContextCommand() *cobra.Command {
+	var hook bool
+	var maxTokens int
+	command := &cobra.Command{
+		Use:   "context",
+		Short: "Print session-start context assembled from distilled Subject documents",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			if _, internalInvocation := os.LookupEnv(config.InvocationIDEnvironment); internalInvocation {
+				return nil
+			}
+			cwd := ""
+			if hook {
+				payloadCWD, err := contextHookCWD(command.InOrStdin())
+				if err != nil {
+					return err
+				}
+				cwd = payloadCWD
+			}
+			if cwd == "" {
+				if value, err := os.Getwd(); err == nil {
+					cwd = value
+				}
+			}
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			dataStore, err := store.New(cfg.Root)
+			if err != nil {
+				return err
+			}
+			if !command.Flags().Changed("max-tokens") {
+				maxTokens = cfg.Context.MaxTokens
+			}
+			discover := func() string {
+				return sourceadapter.Gateway{}.DiscoverRepository(command.Context(), cwd)
+			}
+			output, warnings, err := inject.Build(repositoryFor(dataStore), cwd, discover, maxTokens)
+			if err != nil {
+				return err
+			}
+			for _, warning := range warnings {
+				_, _ = fmt.Fprintf(command.ErrOrStderr(), "warning: %s: %s\n", warning.Path, warning.Reason)
+			}
+			if output != "" {
+				_, _ = fmt.Fprint(command.OutOrStdout(), output)
+			}
+			return nil
+		},
+	}
+	command.Flags().BoolVar(&hook, "hook", false, "Read the SessionStart hook payload from stdin")
+	command.Flags().IntVar(&maxTokens, "max-tokens", 0, "Approximate maximum injected context tokens (defaults to [context] max_tokens)")
+	return command
+}
+
+func contextHookCWD(reader io.Reader) (string, error) {
+	var input struct {
+		Event string  `json:"hook_event_name"`
+		CWD   *string `json:"cwd"`
+	}
+	decoder := json.NewDecoder(reader)
+	if err := decoder.Decode(&input); err != nil {
+		if errors.Is(err, io.EOF) {
+			return "", nil
+		}
+		return "", fmt.Errorf("decode context hook input: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
+		return "", fmt.Errorf("decode context hook input: %w", err)
+	}
+	if input.Event != "SessionStart" {
+		return "", fmt.Errorf("context hook requires a SessionStart event, got %q", input.Event)
+	}
+	if input.CWD == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(*input.CWD), nil
 }
 
 func newDocumentCommand() *cobra.Command {

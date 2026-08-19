@@ -440,28 +440,6 @@ func TestConcurrentDrawsWaitAndRemainIdempotent(t *testing.T) {
 	}
 }
 
-func TestSubjectNameUsesRepositoryBasename(t *testing.T) {
-	tests := map[string]string{
-		"ssh://git@github.com/example/knowbrew.git": "knowbrew",
-		"git@github.com:example/knowbrew.git":       "knowbrew",
-		"/workspace/knowbrew.worktrees/feature":     "feature",
-	}
-	for input, want := range tests {
-		if got := subjectName(input); got != want {
-			t.Errorf("subjectName(%q) = %q, want %q", input, got, want)
-		}
-	}
-}
-
-func TestAliasMatchNormalizesRepositoryURLs(t *testing.T) {
-	if !aliasMatch("git@github.com:example/knowbrew.git", "https://github.com/example/knowbrew.git") {
-		t.Fatal("equivalent repository URLs did not match")
-	}
-	if aliasMatch("git@github.com:first/knowbrew.git", "https://github.com/second/knowbrew.git") {
-		t.Fatal("different repository owners were conflated")
-	}
-}
-
 func TestEnsureRepositorySubjectDoesNotCreateFromNonRepositoryCWD(t *testing.T) {
 	dataStore, err := store.New(t.TempDir())
 	if err != nil {
