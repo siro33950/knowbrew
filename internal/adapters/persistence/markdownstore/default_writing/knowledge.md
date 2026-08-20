@@ -1,4 +1,4 @@
-# Assertion and Knowledge Writing Rules
+# Knowledge Writing Rules
 
 ## Statement phrasing
 

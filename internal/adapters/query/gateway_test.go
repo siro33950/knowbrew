@@ -132,11 +132,7 @@ func TestVectorIndexEmbedsOnlyRepresentativeTextPerKind(t *testing.T) {
 		Schema: domain.SchemaVersion, ID: "a-hidden-feedstock", TurnID: "turn-hidden",
 		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: now, Agent: "claude", Summary: "weather forecast",
-		Types: []domain.KnowledgeType{"property"}, Subjects: []string{"subject"},
-		Assertions: []domain.Assertion{{
-			ID: "as-hidden", Type: "property", Subject: "subject",
-			Statement: "rollback appears only in the assertion",
-		}},
+		Types:       []domain.KnowledgeType{"property"},
 		AnnotatedAt: benchmarkTime(now),
 	}
 	if err := dataStore.WriteFeedstock(hidden); err != nil {

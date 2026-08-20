@@ -52,10 +52,8 @@ func (s *Store) ReplacePendingKnowledgeEvidence(
 	replacement.Subject = domain.MasterName(replacement.Subject)
 	if inheritEvidence {
 		replacement.Feedstocks = append(current.Feedstocks, replacement.Feedstocks...)
-		replacement.Assertions = append(current.Assertions, replacement.Assertions...)
 	}
 	replacement.Feedstocks = normalizeFeedstockLinks(replacement.Feedstocks)
-	replacement.Assertions = normalizeAssertionLinks(replacement.Assertions)
 	replacement.Supersedes = normalizeKnowledgeLinks(replacement.Supersedes)
 	if slices.Contains(replacement.Supersedes, id) {
 		return errors.New("knowledge cannot supersede itself")

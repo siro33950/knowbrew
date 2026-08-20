@@ -44,10 +44,10 @@ type DialogueReader interface {
 
 type Invocation interface {
 	ValidateFeedstock(string) error
-	ValidateAssertion(string) error
-	IsAssertionInvocation() bool
+	IsBrewInvocation() bool
 	RecordCatalog(string, []string, string) error
 	RecordInspected([]string) error
+	RecordSubmitted(domain.KnowledgeCandidate) error
 	ReadState() (agent.ReadState, error)
 }
 

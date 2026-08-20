@@ -40,7 +40,7 @@ func TestDecodeToolArgumentsAcceptsOpenAIStringAndOllamaObject(t *testing.T) {
 	}
 }
 
-func TestCommandForToolMapsAssertionWorkflow(t *testing.T) {
+func TestCommandForToolMapsFeedstockWorkflow(t *testing.T) {
 	tests := []struct {
 		name      string
 		arguments map[string]any
@@ -62,6 +62,19 @@ func TestCommandForToolMapsAssertionWorkflow(t *testing.T) {
 			name: "knowledge_show", arguments: map[string]any{"knowledge_ids": []any{"kn-1", "kn-2"}},
 			want: []string{"/bin/knowbrew", "knowledge", "show", "kn-1", "kn-2"},
 		},
+		{
+			name: "knowledge_submit",
+			arguments: map[string]any{
+				"feedstock_id": "fs-1",
+				"knowledge": map[string]any{
+					"type": "property", "subject": "knowbrew", "statement": "A statement.",
+				},
+			},
+			want: []string{
+				"/bin/knowbrew", "knowledge", "submit", "fs-1", "--knowledge",
+				`{"statement":"A statement.","subject":"knowbrew","type":"property"}`,
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -76,7 +89,7 @@ func TestCommandForToolMapsAssertionWorkflow(t *testing.T) {
 	}
 }
 
-func TestToolSchemasExposeOnlyReadOperations(t *testing.T) {
+func TestToolSchemasExposeTaskSpecificOperations(t *testing.T) {
 	summarize := schemaNames(toolSchemas(TaskSummarize, testKnowledgeTypes))
 	if len(summarize) != 0 {
 		t.Fatalf("summarize schemas = %#v", summarize)
@@ -86,7 +99,9 @@ func TestToolSchemasExposeOnlyReadOperations(t *testing.T) {
 		t.Fatalf("annotate schemas = %#v", annotate)
 	}
 	brew := schemaNames(toolSchemas(TaskBrew, testKnowledgeTypes))
-	if !reflect.DeepEqual(brew, []string{"knowledge_catalog", "knowledge_show"}) {
+	if !reflect.DeepEqual(brew, []string{
+		"knowledge_catalog", "knowledge_show", "knowledge_submit", "feedstock_context",
+	}) {
 		t.Fatalf("brew schemas = %#v", brew)
 	}
 	for _, task := range []Task{TaskDistillSelect, TaskDistillGenerate} {
@@ -110,31 +125,38 @@ func TestToolSchemasExposeOnlyReadOperations(t *testing.T) {
 
 	annotationResult := resultSchema(TaskAnnotate, []string{"observation", "guideline"})
 	properties := annotationResult["properties"].(map[string]any)
-	items := properties["assertions"].(map[string]any)["items"].(map[string]any)
-	itemRequired := items["required"].([]string)
-	if !containsString(itemRequired, "subject") {
-		t.Fatalf("assertion required = %#v", itemRequired)
-	}
-	typeProperty := items["properties"].(map[string]any)["type"].(map[string]any)
-	if got := typeProperty["enum"]; !reflect.DeepEqual(got, []string{"observation", "guideline"}) {
+	items := properties["types"].(map[string]any)["items"].(map[string]any)
+	if got := items["enum"]; !reflect.DeepEqual(got, []string{"observation", "guideline"}) {
 		t.Fatalf("type enum = %#v", got)
 	}
-	for _, removed := range []string{"types", "subjects", "speech_acts", "topics", "new_subjects"} {
+	for _, removed := range []string{"assertions", "subjects", "speech_acts", "topics", "new_subjects"} {
 		if properties[removed] != nil {
 			t.Fatalf("annotation schema exposes %q", removed)
 		}
 	}
-	if items["properties"].(map[string]any)["applies_when"] != nil {
-		t.Fatal("annotation assertion schema exposes applies_when")
+
+	brewResult := resultSchema(TaskBrew, nil)
+	brewRequired := brewResult["required"].([]string)
+	brewProperties := brewResult["properties"].(map[string]any)
+	registered := brewProperties["registered"].(map[string]any)
+	if !reflect.DeepEqual(brewRequired, []string{"registered"}) ||
+		registered["type"] != "integer" || registered["minimum"] != 0 {
+		t.Fatalf("brew result schema = %#v", brewResult)
+	}
+	brewPrompt := toolSystemPrompt(TaskBrew)
+	for _, required := range []string{"registered", "stale decision", "catalog that subject again"} {
+		if !strings.Contains(brewPrompt, required) {
+			t.Fatalf("brew system prompt does not contain %q: %s", required, brewPrompt)
+		}
 	}
 
-	submit := resultSchema(TaskBrew, testKnowledgeTypes)
+	submit := toolSchemas(TaskBrew, testKnowledgeTypes)
 	encodedSubmit, err := json.Marshal(submit)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(encodedSubmit)
-	for _, field := range []string{"verification", "corrected_assertion", "resolution", "knowledge_ids"} {
+	for _, field := range []string{"knowledge_submit", "resolution", "knowledge_ids", "feedstock_id"} {
 		if !strings.Contains(text, `"`+field+`"`) {
 			t.Fatalf("submit schema missing %q: %s", field, text)
 		}
@@ -144,7 +166,7 @@ func TestToolSchemasExposeOnlyReadOperations(t *testing.T) {
 			t.Fatalf("submit schema missing resolution %q: %s", kind, text)
 		}
 	}
-	for _, forbidden := range []string{"feedstock_id", "assertion_id"} {
+	for _, forbidden := range []string{"verification", "corrected_assertion", "assertion_id"} {
 		if strings.Contains(text, `"`+forbidden+`"`) {
 			t.Fatalf("structured decision exposes %q", forbidden)
 		}
@@ -156,17 +178,17 @@ func TestInvocationEnvironmentReplacesAllInvocationScope(t *testing.T) {
 		"PATH=/bin",
 		config.ConfigEnvironment + "=/stale/config.toml",
 		config.InvocationFeedstockEnvironment + "=stale-feedstock",
-		config.InvocationAssertionEnvironment + "=stale-assertion",
 		config.InvocationIDEnvironment + "=stale-invocation",
+		config.InvocationTaskEnvironment + "=annotate",
 	}
 	environment := invocationEnvironment(
-		base, "/current/config.toml", "feedstock-1", "assertion-1", "invocation-1",
+		base, "/current/config.toml", "feedstock-1", "invocation-1", TaskBrew,
 	)
 	for _, test := range []struct{ key, want string }{
 		{config.ConfigEnvironment, "/current/config.toml"},
 		{config.InvocationFeedstockEnvironment, "feedstock-1"},
-		{config.InvocationAssertionEnvironment, "assertion-1"},
 		{config.InvocationIDEnvironment, "invocation-1"},
+		{config.InvocationTaskEnvironment, "brew"},
 	} {
 		var matches []string
 		for _, entry := range environment {
@@ -248,7 +270,7 @@ func TestToolRunnerStreamsCommandOutputOnlyWhenVerbose(t *testing.T) {
 			if rounds == 1 {
 				return jsonResponse(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"read-1","type":"function","function":{"name":"knowledge_catalog","arguments":{"subject":"knowbrew","query":"verified statement"}}}]}}]}`), nil
 			}
-			return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"{\"verification\":\"verified\",\"corrected_assertion\":null,\"resolution\":{\"kind\":\"new\",\"knowledge_ids\":[],\"draft\":null}}"}}]}`), nil
+			return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"{}"}}]}`), nil
 		})
 		root := t.TempDir()
 		var progress bytes.Buffer
@@ -257,10 +279,7 @@ func TestToolRunnerStreamsCommandOutputOnlyWhenVerbose(t *testing.T) {
 			LLM: config.LLM{Backend: "api", BrewModel: "brew", Timeout: "5s"},
 		}, binary, root, &progress, verbose)
 		runner.Client = &http.Client{Transport: transport}
-		_, err := runner.RunWithUsage(
-			WithAssertion(context.Background(), "assertion-1"),
-			TaskBrew, "feedstock-1", "brew",
-		)
+		_, err := runner.RunWithUsage(context.Background(), TaskBrew, "feedstock-1", "brew")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -270,7 +289,7 @@ func TestToolRunnerStreamsCommandOutputOnlyWhenVerbose(t *testing.T) {
 	}
 }
 
-func TestToolRunnerReturnsAssertionsWithoutMutationCommand(t *testing.T) {
+func TestToolRunnerReturnsTypeCandidatesWithoutMutationCommand(t *testing.T) {
 	root := t.TempDir()
 	binary := filepath.Join(t.TempDir(), "knowbrew")
 	capturePath := filepath.Join(t.TempDir(), "commands.txt")
@@ -279,7 +298,7 @@ func TestToolRunnerReturnsAssertionsWithoutMutationCommand(t *testing.T) {
 	rounds := 0
 	transport := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		rounds++
-		return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"{\"assertions\":[{\"type\":\"property\",\"subject\":\"subject\",\"statement\":\"The value is stable.\"}]}"}}]}`), nil
+		return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"{\"types\":[\"property\"]}"}}]}`), nil
 	})
 	runner := NewToolRunner(config.Config{
 		Root: root, Path: filepath.Join(root, "config.toml"),
@@ -294,7 +313,7 @@ func TestToolRunnerReturnsAssertionsWithoutMutationCommand(t *testing.T) {
 		t.Fatalf("rounds = %d", rounds)
 	}
 	if string(result.Output) == "" {
-		t.Fatal("structured assertions are empty")
+		t.Fatal("structured type candidates are empty")
 	}
 	if _, err := os.Stat(capturePath); !os.IsNotExist(err) {
 		t.Fatalf("mutation command was executed: %v", err)
@@ -344,7 +363,7 @@ func TestToolRunnerCanLoadContextOnceBeforeAnnotating(t *testing.T) {
 		if rounds == 1 {
 			return jsonResponse(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"read-1","type":"function","function":{"name":"feedstock_context","arguments":{"feedstock_id":"feedstock-1"}}}]}}]}`), nil
 		}
-		return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"{\"assertions\":[]}"}}]}`), nil
+		return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"{\"types\":[]}"}}]}`), nil
 	})
 	runner := NewToolRunner(config.Config{
 		Root: root, Path: filepath.Join(root, "config.toml"),

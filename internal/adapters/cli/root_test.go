@@ -11,6 +11,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/siro33950/knowbrew/internal/adapters/config"
+	invocationstate "github.com/siro33950/knowbrew/internal/adapters/invocation/state"
 	"github.com/siro33950/knowbrew/internal/adapters/persistence/markdownstore"
 	"github.com/siro33950/knowbrew/internal/adapters/source/parser"
 	"github.com/siro33950/knowbrew/internal/application/draw"
@@ -367,6 +368,15 @@ func TestSearchCommandsDoNotExposeTopicFlag(t *testing.T) {
 	}
 }
 
+func TestFeedstockSearchDoesNotExposeSubjectFlag(t *testing.T) {
+	command := newRootCommand()
+	command.SetArgs([]string{"feedstock", "--subject", "testing"})
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "unknown flag: --subject") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestDocumentCommandRejectsKnowledgeOnlyFlags(t *testing.T) {
 	for _, args := range [][]string{
 		{"document", "--type", "decision"},
@@ -538,13 +548,8 @@ func TestSearchFlagsAndHookOutputUsePlainMasterNames(t *testing.T) {
 		TurnID:    "turn-1",
 		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: annotatedAt, Agent: "claude",
-		Types:    []domain.KnowledgeType{domain.KnowledgeType("property")},
-		Subjects: []string{"subject"},
-		Summary:  "The linked masters were used.", AnnotatedAt: &annotatedAt,
-		Assertions: []domain.Assertion{{
-			ID: "as-linked", Type: "property", Subject: "subject",
-			Statement: "Linked masters remain plain in JSON.",
-		}},
+		Types:   []domain.KnowledgeType{domain.KnowledgeType("property")},
+		Summary: "The linked masters were used.", AnnotatedAt: &annotatedAt,
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
@@ -626,7 +631,7 @@ func TestShowRawFlagValidation(t *testing.T) {
 	}
 }
 
-func TestFeedstockAnnotateAssertionFlagsDeriveMultipleTypes(t *testing.T) {
+func TestFeedstockAnnotateTypeFlagsWriteMultipleCandidates(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
@@ -638,16 +643,11 @@ func TestFeedstockAnnotateAssertionFlagsDeriveMultipleTypes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{
-		Name: "subject", Definition: "The existing test subject.",
-	}); err != nil {
-		t.Fatal(err)
-	}
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "fs-type-flags", TurnID: "turn-type-flags",
 		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "claude",
-		Subjects: []string{"subject"}, Summary: "The user supplied an established property and relation.",
+		Summary: "The user supplied an established property and relation.",
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
@@ -656,8 +656,8 @@ func TestFeedstockAnnotateAssertionFlagsDeriveMultipleTypes(t *testing.T) {
 	command := newRootCommand()
 	command.SetArgs([]string{
 		"feedstock", "annotate", feedstock.ID,
-		"--assertion", `{"type":"property","subject":"subject","statement":"The value is stable."}`,
-		"--assertion", `{"type":"relation","subject":"","statement":"The first value depends on the second."}`,
+		"--type", "property",
+		"--type", "relation",
 	})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
@@ -682,27 +682,27 @@ func TestFeedstockAnnotateAssertionFlagsDeriveMultipleTypes(t *testing.T) {
 	invalid := newRootCommand()
 	invalid.SetArgs([]string{
 		"feedstock", "annotate", invalidFeedstock.ID,
-		"--assertion", `{"type":"other","subject":"","statement":"The value is stable."}`,
+		"--type", "other",
 	})
 	err = invalid.Execute()
 	if err == nil || !strings.Contains(err.Error(), "not defined in masters/types") {
 		t.Fatalf("invalid type error = %v", err)
 	}
 
-	missingSubject := feedstock
-	missingSubject.ID = "fs-missing-subject"
-	missingSubject.TurnID = "turn-missing-subject"
-	if err := dataStore.WriteFeedstock(missingSubject); err != nil {
+	removedFlagFeedstock := feedstock
+	removedFlagFeedstock.ID = "fs-removed-assertion-flag"
+	removedFlagFeedstock.TurnID = "turn-removed-assertion-flag"
+	if err := dataStore.WriteFeedstock(removedFlagFeedstock); err != nil {
 		t.Fatal(err)
 	}
-	missing := newRootCommand()
-	missing.SetArgs([]string{
-		"feedstock", "annotate", missingSubject.ID,
-		"--assertion", `{"type":"property","statement":"The value is stable."}`,
+	removed := newRootCommand()
+	removed.SetArgs([]string{
+		"feedstock", "annotate", removedFlagFeedstock.ID,
+		"--assertion", `{"type":"property"}`,
 	})
-	err = missing.Execute()
-	if err == nil || !strings.Contains(err.Error(), "subject is required") {
-		t.Fatalf("missing subject error = %v", err)
+	err = removed.Execute()
+	if err == nil || !strings.Contains(err.Error(), "unknown flag: --assertion") {
+		t.Fatalf("removed assertion flag error = %v", err)
 	}
 }
 
@@ -815,7 +815,7 @@ func TestSubjectCreationFlagIsUnavailable(t *testing.T) {
 		},
 		{
 			"knowledge", "submit", "fs-source",
-			"--resolution", `{"kind":"new","knowledge_ids":[],"draft":null}`,
+			"--knowledge", `{}`,
 			"--new-subject", "invented=Invented subject.",
 		},
 	} {
@@ -847,10 +847,6 @@ func TestKnowledgeSubmitRequiresInvocationAndValidatesType(t *testing.T) {
 		Timestamp: time.Now().UTC(), Agent: "claude",
 		Types: []domain.KnowledgeType{"property"}, Summary: "The user supplied a reusable property.",
 		AnnotatedAt: func() *time.Time { value := time.Now().UTC(); return &value }(),
-		Assertions: []domain.Assertion{{
-			ID: "as-source", Type: "property", Subject: "subject",
-			Statement: "Use the tested behavior.",
-		}},
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
@@ -858,21 +854,19 @@ func TestKnowledgeSubmitRequiresInvocationAndValidatesType(t *testing.T) {
 	outside := newRootCommand()
 	outside.SetArgs([]string{
 		"knowledge", "submit", feedstock.ID,
-		"--assertion", "as-source", "--verification", "verified",
+		"--knowledge", `{"type":"property","subject":"knowbrew","statement":"Use the tested behavior.","rationale":"","resolution":{"kind":"new","knowledge_ids":[],"draft":null}}`,
 	})
 	if err := outside.Execute(); err == nil ||
-		!strings.Contains(err.Error(), "only inside an assertion invocation") {
+		!strings.Contains(err.Error(), "only inside a Brew invocation") {
 		t.Fatalf("outside invocation error = %v", err)
 	}
 	t.Setenv(config.InvocationFeedstockEnvironment, feedstock.ID)
-	t.Setenv(config.InvocationAssertionEnvironment, "as-source")
 	t.Setenv(config.InvocationIDEnvironment, "submit-invalid-type")
+	t.Setenv(config.InvocationTaskEnvironment, "brew")
 	invalid := newRootCommand()
 	invalid.SetArgs([]string{
 		"knowledge", "submit", feedstock.ID,
-		"--assertion", "as-source", "--verification", "corrected",
-		"--corrected-assertion", `{"id":"as-source","type":"other","subject":"subject","statement":"Use the tested behavior."}`,
-		"--resolution", `{"kind":"new","knowledge_ids":[],"draft":null}`,
+		"--knowledge", `{"type":"other","subject":"knowbrew","statement":"Use the tested behavior.","rationale":"","resolution":{"kind":"new","knowledge_ids":[],"draft":null}}`,
 	})
 	if err := invalid.Execute(); err == nil ||
 		!strings.Contains(err.Error(), "not defined in masters/types") {
@@ -880,7 +874,7 @@ func TestKnowledgeSubmitRequiresInvocationAndValidatesType(t *testing.T) {
 	}
 }
 
-func TestKnowledgeSubmitCreatesIDBasedPendingKnowledgeWithSubject(t *testing.T) {
+func TestKnowledgeSubmitRegistersCandidateWithoutWritingKnowledge(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
@@ -905,17 +899,13 @@ func TestKnowledgeSubmitCreatesIDBasedPendingKnowledgeWithSubject(t *testing.T) 
 		Types:       []domain.KnowledgeType{domain.KnowledgeType("property")},
 		Summary:     "The user supplied a reusable fact.",
 		AnnotatedAt: &annotatedAt,
-		Assertions: []domain.Assertion{{
-			ID: "as-subject", Type: "property", Subject: "knowbrew",
-			Statement: "The subject flag preserves attribution.",
-		}},
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(config.InvocationFeedstockEnvironment, feedstock.ID)
-	t.Setenv(config.InvocationAssertionEnvironment, "as-subject")
 	t.Setenv(config.InvocationIDEnvironment, "submit-subject")
+	t.Setenv(config.InvocationTaskEnvironment, "brew")
 	catalog := newRootCommand()
 	catalog.SetArgs([]string{
 		"knowledge", "catalog", "--subject", "knowbrew",
@@ -929,71 +919,39 @@ func TestKnowledgeSubmitCreatesIDBasedPendingKnowledgeWithSubject(t *testing.T) 
 	command.SetOut(&submitOutput)
 	command.SetArgs([]string{
 		"knowledge", "submit", feedstock.ID,
-		"--assertion", "as-subject", "--verification", "verified",
-		"--resolution", `{"kind":"new","knowledge_ids":[],"draft":null}`,
+		"--knowledge", `{"type":"property","subject":"knowbrew","statement":"The subject flag preserves attribution.","rationale":"","resolution":{"kind":"new","knowledge_ids":[],"draft":null}}`,
 	})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
 	var submitted struct {
-		KnowledgeID string `json:"knowledge_id"`
+		Submitted int `json:"submitted"`
 	}
 	if err := json.Unmarshal(submitOutput.Bytes(), &submitted); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(submitted.KnowledgeID, "kn-") {
+	if submitted.Submitted != 1 {
 		t.Fatalf("submit output = %s", submitOutput.String())
 	}
-	path, err := dataStore.KnowledgePath(submitted.KnowledgeID)
+	state, err := invocationstate.ReadStateForInvocation(rootDir, "submit-subject")
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(path)
+	if len(state.Submitted) != 1 || state.Submitted[0].Subject != "knowbrew" {
+		t.Fatalf("invocation state = %#v", state)
+	}
+	files, _, err := dataStore.ListAllKnowledge()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `subject: "[[knowbrew]]"`) {
-		t.Fatalf("knowledge subject is not a wikilink:\n%s", data)
-	}
-	if !strings.Contains(string(data), `established_by: "[[`+feedstock.ID+`]]"`) {
-		t.Fatalf("knowledge established_by is not a feedstock link:\n%s", data)
-	}
-	if !strings.Contains(string(data), "approved: false") ||
-		strings.Contains(string(data), "\nstatus:") ||
-		!strings.Contains(string(data), "## Claim\n\nThe subject flag preserves attribution.") ||
-		!strings.Contains(string(data), `- "[[`+feedstock.ID+`#as-subject]]"`) {
-		t.Fatalf("knowledge was not rendered by the CLI:\n%s", data)
-	}
-	obsoleteKey := "pro" + "ject:"
-	if strings.Contains(string(data), obsoleteKey) {
-		t.Fatalf("knowledge contains obsolete key:\n%s", data)
-	}
-	var shown bytes.Buffer
-	for _, key := range []string{
-		config.InvocationIDEnvironment,
-		config.InvocationFeedstockEnvironment,
-		config.InvocationAssertionEnvironment,
-	} {
-		if err := os.Unsetenv(key); err != nil {
-			t.Fatal(err)
-		}
-	}
-	show := newRootCommand()
-	show.SetOut(&shown)
-	show.SetArgs([]string{"knowledge", "show", submitted.KnowledgeID})
-	if err := show.Execute(); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(shown.String(), `"status": "pending"`) ||
-		!strings.Contains(shown.String(), `"approved": false`) ||
-		!strings.Contains(shown.String(), `"id": "`+submitted.KnowledgeID+`"`) {
-		t.Fatalf("knowledge show output = %s", shown.String())
+	if len(files) != 0 {
+		t.Fatalf("submit wrote Knowledge: %#v", files)
 	}
 
 	legacy := newRootCommand()
 	legacy.SetArgs([]string{
 		"knowledge", "submit", feedstock.ID,
-		"--assertion", "as-subject", "--verification", "verified",
+		"--knowledge", `{}`,
 		"--slug", "legacy-subject-flag",
 		"--pro" + "ject", "knowbrew",
 	})

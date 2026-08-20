@@ -79,7 +79,7 @@ func (runner *ToolRunner) Run(
 	tools := toolSchemas(task, typeNames)
 	schema := resultSchema(task, typeNames)
 	var usage Usage
-	for round := 0; round < 12; round++ {
+	for round := 0; round < 64; round++ {
 		message, roundUsage, err := runner.complete(runContext, task, messages, tools, schema)
 		usage.Add(roundUsage)
 		if err != nil {
@@ -116,7 +116,7 @@ func (runner *ToolRunner) Run(
 			configureCommandTermination(command)
 			command.Dir = runner.WorkDir
 			command.Env = invocationEnvironment(
-				os.Environ(), runner.Config.Path, feedstockID, assertionFromContext(ctx), invocationID,
+				os.Environ(), runner.Config.Path, feedstockID, invocationID, task,
 			)
 			output, commandErr := command.CombinedOutput()
 			result := string(output)
@@ -284,7 +284,7 @@ func toolSystemPrompt(task Task) string {
 		return "Summarize exactly the target user input and target agent response supplied in the user prompt. Return only the required structured result. Do not infer from surrounding turns."
 	}
 	if task == TaskAnnotate {
-		return "Extract zero or more atomic assertions from the target user input and prior turns supplied in the user prompt. If an unresolved reference affects a possible assertion, feedstock_context may be called once for bounded earlier context. Return only the required structured result. Every assertion must contain an explicit subject string; use an empty string when none applies."
+		return "Select broad Knowledge type candidates from the target user input and prior turns supplied in the user prompt. If an unresolved reference affects a possible candidate, feedstock_context may be called once. Return only the types array in the required structured result."
 	}
 	if task == TaskDistillSelect {
 		return "Select only supplied invocation-local Knowledge references that can support the supplied document Template. Return only the required structured result. Never call tools or edit files."
@@ -292,7 +292,7 @@ func toolSystemPrompt(task Task) string {
 	if task == TaskDistillGenerate {
 		return "Generate one complete Markdown body from only the supplied Knowledge and return the exact invocation-local references used. Return only the required structured result. Never call tools or edit files."
 	}
-	return "Verify exactly one assertion against its supplied source, load its subject catalog, inspect every plausible Knowledge record in full, then return exactly one semantic resolution. The parent process handles time, lifecycle, and writes. Never edit files directly."
+	return "Extract independently maintainable meanings from the complete target turn. For each accepted meaning, catalog its subject, inspect every plausible Knowledge record, and register one candidate with knowledge_submit. If knowledge_submit reports a stale decision, catalog that subject again and retry the same candidate. feedstock_context may be called once for unresolved references. After all candidates are registered, return {\"registered\": N}, where N is the number of successfully registered candidates. Never edit files directly."
 }
 
 func toolSchemas(task Task, typeNames []string) []map[string]any {
@@ -311,7 +311,7 @@ func toolSchemas(task Task, typeNames []string) []map[string]any {
 		}
 	}
 	return []map[string]any{
-		toolDefinition("knowledge_catalog", "Search compact Knowledge candidates for the verified assertion statement and subject", map[string]any{
+		toolDefinition("knowledge_catalog", "Search compact Knowledge candidates for one candidate statement and subject", map[string]any{
 			"type": "object", "required": []string{"subject", "query"},
 			"properties": map[string]any{
 				"subject": map[string]any{"type": "string"},
@@ -324,7 +324,61 @@ func toolSchemas(task Task, typeNames []string) []map[string]any {
 				"type": "array", "minItems": 1, "items": map[string]any{"type": "string"},
 			}},
 		}),
+		toolDefinition("knowledge_submit", "Register one validated Knowledge candidate in invocation state", map[string]any{
+			"type": "object", "required": []string{"feedstock_id", "knowledge"},
+			"properties": map[string]any{
+				"feedstock_id": map[string]any{"type": "string"},
+				"knowledge":    knowledgeCandidateToolSchema(typeNames),
+			},
+		}),
+		toolDefinition("feedstock_context", "Load expanded earlier context for an unresolved target reference", map[string]any{
+			"type": "object", "required": []string{"feedstock_id"},
+			"properties": map[string]any{
+				"feedstock_id": map[string]any{"type": "string"},
+			},
+		}),
 	}
+}
+
+func knowledgeCandidateToolSchema(typeNames []string) map[string]any {
+	null := map[string]any{"type": "null"}
+	ids := func(count int) map[string]any {
+		return map[string]any{
+			"type": "array", "minItems": count, "maxItems": count,
+			"items": map[string]any{"type": "string"},
+		}
+	}
+	draft := objectSchema(
+		[]string{"type", "subject", "statement", "rationale"},
+		map[string]any{
+			"type": typeSchema(typeNames), "subject": map[string]any{"type": "string"},
+			"statement": map[string]any{"type": "string", "minLength": 1},
+			"rationale": map[string]any{"type": "string"},
+		},
+	)
+	resolution := func(kind string, count int, draftSchema map[string]any) map[string]any {
+		return objectSchema(
+			[]string{"kind", "knowledge_ids", "draft"},
+			map[string]any{
+				"kind":          map[string]any{"type": "string", "enum": []string{kind}},
+				"knowledge_ids": ids(count), "draft": draftSchema,
+			},
+		)
+	}
+	return objectSchema(
+		[]string{"type", "subject", "statement", "rationale", "resolution"},
+		map[string]any{
+			"type": typeSchema(typeNames), "subject": map[string]any{"type": "string"},
+			"statement": map[string]any{"type": "string", "minLength": 1},
+			"rationale": map[string]any{"type": "string"},
+			"resolution": map[string]any{"anyOf": []any{
+				resolution("new", 0, null),
+				resolution("equivalent", 1, null),
+				resolution("conflicts", 1, null),
+				resolution("complements", 1, draft),
+			}},
+		},
+	)
 }
 
 func toolAllowed(task Task, name string) bool {
@@ -335,7 +389,7 @@ func toolAllowed(task Task, name string) bool {
 		return name == "feedstock_context"
 	}
 	switch name {
-	case "knowledge_catalog", "knowledge_show":
+	case "knowledge_catalog", "knowledge_show", "knowledge_submit", "feedstock_context":
 		return true
 	default:
 		return false

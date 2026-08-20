@@ -2,18 +2,6 @@ package domain
 
 import "testing"
 
-// The golden value pins the identifier scheme: recomputing the ID of an
-// existing assertion must keep returning the stored value.
-func TestAssertionIDMatchesGoldenHash(t *testing.T) {
-	id := AssertionID("fs-golden", Assertion{
-		Type: "property", Subject: "knowbrew",
-		Statement: "Assertion IDs stay stable.", Rationale: "Golden.",
-	})
-	if id != "as-71040dc8130763f4ac52f8c38c9ccf5d" {
-		t.Fatalf("AssertionID = %s", id)
-	}
-}
-
 func TestSubjectNameFromSourceUsesRepositoryBasename(t *testing.T) {
 	tests := map[string]string{
 		"ssh://git@github.com/example/knowbrew.git": "knowbrew",

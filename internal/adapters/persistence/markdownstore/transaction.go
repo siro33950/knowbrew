@@ -51,7 +51,6 @@ func (tx *Transaction) StageKnowledge(knowledge domain.Knowledge, body string) e
 	knowledge.Subject = domain.MasterName(knowledge.Subject)
 	knowledge.EstablishedBy = domain.MasterName(knowledge.EstablishedBy)
 	knowledge.Feedstocks = normalizeFeedstockLinks(knowledge.Feedstocks)
-	knowledge.Assertions = normalizeAssertionLinks(knowledge.Assertions)
 	knowledge.Supersedes = normalizeKnowledgeLinks(knowledge.Supersedes)
 	knowledge.SupersededBy = domain.MasterName(knowledge.SupersededBy)
 	knowledge.Status = domain.EffectiveKnowledgeStatus(knowledge)
@@ -82,18 +81,10 @@ func (tx *Transaction) StageBrewedFeedstock(feedstock domain.Feedstock, when tim
 	if err != nil {
 		return err
 	}
-	assertions, _, err := tx.store.normalizeAssertions(feedstock.Assertions)
-	if err != nil {
-		return fmt.Errorf("feedstock assertions: %w", err)
-	}
-	if err := current.ApplyBrewProgress(assertions, feedstock.BrewedAssertions, when); err != nil {
+	if err := current.ApplyBrewProgress(when); err != nil {
 		return err
 	}
-	body, err := encodeAssertions(current.Assertions)
-	if err != nil {
-		return err
-	}
-	data, err := encodeWithWikilinks(current, body, "types", "subjects")
+	data, err := encodeWithWikilinks(current, "", "types")
 	if err != nil {
 		return err
 	}

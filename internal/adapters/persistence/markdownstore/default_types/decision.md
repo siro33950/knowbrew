@@ -6,4 +6,5 @@ excludes:
   - "One-time tasks, implementation steps, and instructions limited to the current work."
   - "Intended outcomes or desired qualities without a governing policy, rule, design direction, or operating practice."
   - "Limits or required conditions imposed externally rather than established as a governing direction."
+  - "Project-management assignments of issues, tasks, or work to a person or agent."
 ---

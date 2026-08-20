@@ -15,13 +15,13 @@ func TestReconcileDefinesOneAtomicLifecycleUpdate(t *testing.T) {
 	predecessor := domain.Knowledge{
 		ID: "kn-predecessor", Created: now, Updated: now,
 		Type: "property", Subject: "knowbrew", Feedstocks: []string{"fs-source"},
-		Assertions: []string{"fs-source#as-source"}, Status: domain.StatusPending,
+		Status: domain.StatusPending,
 	}
 	successor := domain.Knowledge{
 		ID: "kn-successor", Created: now, Updated: now,
 		Type: "property", Subject: "knowbrew", Feedstocks: []string{"fs-source"},
-		Assertions: []string{"fs-source#as-source"}, Supersedes: []string{predecessor.ID},
-		Status: domain.StatusPending,
+		Supersedes: []string{predecessor.ID},
+		Status:     domain.StatusPending,
 	}
 	repository := &lifecycleRepository{
 		metadata: []storage.KnowledgeMetadata{

@@ -57,14 +57,10 @@ func annotationPromptForTest(
 ) (string, []diagnostic.Warning, error) {
 	repository := &persistenceadapter.Markdown{Store: dataStore}
 	settings := promptSettingsForTest(cfg, dataStore.Root)
-	writingInstructions, err := loadWritingInstructions(repository, "common", "knowledge")
-	if err != nil {
-		return "", nil, err
-	}
 	return annotationPrompt(
 		settings, sourceadapter.New(settings.Sources),
 		repository,
-		feedstockID, feedstocks, writingInstructions, snapshots...,
+		feedstockID, feedstocks, snapshots...,
 	)
 }
 

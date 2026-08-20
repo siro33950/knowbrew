@@ -21,7 +21,6 @@ func TestFeedstockIsImmutableExceptBrewedAt(t *testing.T) {
 		t.Fatal(err)
 	}
 	feedstock := validFeedstock()
-	feedstock.Assertions = nil
 	feedstock.Types = nil
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
@@ -609,15 +608,52 @@ func TestDefaultTypeMastersAreGeneratedOnlyWhenEmpty(t *testing.T) {
 	want := map[string]struct {
 		definition string
 		example    string
+		excludes   []string
 	}{
-		"definition": {"The established meaning or boundary of a term or concept.", "A feedstock is an immutable record of one source turn."},
-		"property":   {"A durable established attribute or capability of a subject.", "The service accepts JSON Lines input."},
-		"relation":   {"An established relationship between two or more subjects or concepts.", "The archive belongs to the research collection."},
-		"principle":  {"An established generalized causal relationship, mechanism, or recurring tendency.", "Higher fermentation temperatures generally accelerate fermentation."},
-		"constraint": {"An established limit or required condition imposed by something other than a choice recorded here.", "The venue cannot admit more than 200 people."},
-		"decision":   {"An established policy, rule, design direction, or operating practice that governs future behavior until changed.", "The local rebuildable index uses SQLite."},
-		"intent":     {"A durable intended outcome or quality that explains why a subject, rule, or design exists, independently of the current means used to achieve it.", "Feedstock classification remains consistent with its Assertions so records without Assertions are not presented as classified."},
-		"preference": {"A stable stated preference of a person or group, rather than a one-time request or binding decision.", "The user prefers concise headings."},
+		"definition": {
+			"The established meaning or boundary of a term or concept.",
+			"A feedstock is an immutable record of one source turn.",
+			[]string{
+				"Governing policies, choices, or operating practices established as decisions.",
+				"Intended outcomes or desired qualities.",
+				"Personal or group preferences.",
+				"Temporary task terminology, implementation notes, assignments, or one-time work instructions.",
+			},
+		},
+		"property": {"A durable established attribute or capability of a subject.", "The service accepts JSON Lines input.", nil},
+		"relation": {
+			"An established relationship between two or more subjects or concepts.",
+			"The archive belongs to the research collection.",
+			[]string{
+				"Governing policies, choices, or operating practices established as decisions.",
+				"Intended outcomes or desired qualities.",
+				"Personal or group preferences.",
+				"Temporary task dependencies, implementation steps, assignments, or one-time work instructions.",
+			},
+		},
+		"principle": {
+			"An established generalized causal relationship, mechanism, or recurring tendency.",
+			"Higher fermentation temperatures generally accelerate fermentation.",
+			[]string{
+				"Governing policies, choices, or operating practices established as decisions.",
+				"Intended outcomes or desired qualities.",
+				"Personal or group preferences.",
+				"Temporary observations, task progress, implementation steps, assignments, or one-time work instructions.",
+			},
+		},
+		"constraint": {
+			"An established limit or required condition imposed by something other than a choice recorded here.",
+			"The venue cannot admit more than 200 people.",
+			[]string{
+				"Governing policies, choices, or operating practices established as decisions.",
+				"Intended outcomes or desired qualities.",
+				"Personal or group preferences.",
+				"Temporary task limits, implementation steps, assignments, or one-time work instructions.",
+			},
+		},
+		"decision":   {"An established policy, rule, design direction, or operating practice that governs future behavior until changed.", "The local rebuildable index uses SQLite.", nil},
+		"intent":     {"A durable intended outcome or quality that explains why a subject, rule, or design exists, independently of the current means used to achieve it.", "Feedstock classification remains consistent with its type candidates so unclassified records are not presented as ready for Brew.", nil},
+		"preference": {"A stable stated preference of a person or group, rather than a one-time request or binding decision.", "The user prefers concise headings.", nil},
 	}
 	for _, entry := range types {
 		expected, ok := want[entry.Name]
@@ -626,6 +662,9 @@ func TestDefaultTypeMastersAreGeneratedOnlyWhenEmpty(t *testing.T) {
 		}
 		if entry.Definition != expected.definition || entry.Example != expected.example {
 			t.Fatalf("default type master %q = %#v", entry.Name, entry)
+		}
+		if expected.excludes != nil && !slices.Equal(entry.Excludes, expected.excludes) {
+			t.Fatalf("default type master %q excludes = %#v", entry.Name, entry.Excludes)
 		}
 		if entry.Name == "decision" {
 			for _, exclusion := range []string{
@@ -838,7 +877,6 @@ func TestMasterReferencesWriteAsWikilinksAndReadAsPlainNames(t *testing.T) {
 	}
 	feedstock := validFeedstock()
 	feedstock.Types = []domain.KnowledgeType{"property"}
-	feedstock.Subjects = []string{"subject"}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
 	}
@@ -855,7 +893,6 @@ func TestMasterReferencesWriteAsWikilinksAndReadAsPlainNames(t *testing.T) {
 	}
 	for _, required := range []string{
 		`- "[[property]]"`,
-		`- "[[subject]]"`,
 	} {
 		if !strings.Contains(string(feedstockData), required) {
 			t.Fatalf("feedstock does not contain %q:\n%s", required, feedstockData)
@@ -865,13 +902,11 @@ func TestMasterReferencesWriteAsWikilinksAndReadAsPlainNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(storedFeedstock.Subjects, ",") != "subject" ||
-		fmt.Sprint(storedFeedstock.Types) != "[property]" {
+	if fmt.Sprint(storedFeedstock.Types) != "[property]" {
 		t.Fatalf("linked feedstock decoded as %#v", storedFeedstock)
 	}
 	rawFeedstock := strings.NewReplacer(
 		`"[[property]]"`, "property",
-		`"[[subject]]"`, "subject",
 	).Replace(string(feedstockData))
 	if err := os.WriteFile(feedstockPath, []byte(rawFeedstock), 0o644); err != nil {
 		t.Fatal(err)
@@ -880,8 +915,7 @@ func TestMasterReferencesWriteAsWikilinksAndReadAsPlainNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(storedFeedstock.Subjects, ",") != "subject" ||
-		fmt.Sprint(storedFeedstock.Types) != "[property]" {
+	if fmt.Sprint(storedFeedstock.Types) != "[property]" {
 		t.Fatalf("plain feedstock decoded as %#v", storedFeedstock)
 	}
 
@@ -1074,14 +1108,14 @@ func TestFindFeedstockUsesSentinelForMissingFeedstock(t *testing.T) {
 	}
 }
 
-func TestFeedstockIgnoresLegacySessionPathAndDoesNotWriteIt(t *testing.T) {
+func TestFeedstockIgnoresSessionPathAndDoesNotWriteIt(t *testing.T) {
 	dataStore, err := New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	legacyPath := filepath.Join(t.TempDir(), "legacy.md")
 	legacy := `---
-schema: 5
+schema: 6
 id: fs-legacy-path
 turn_id: turn-legacy
 session:
@@ -1091,20 +1125,9 @@ timestamp: 2026-07-30T01:00:00Z
 agent: claude
 types:
   - property
-subjects:
-  - subject
-summary: A legacy Feedstock remains readable.
+summary: A Feedstock session path is ignored.
 annotated_at: 2026-07-30T01:01:00Z
 ---
-
-## Assertions
-
-### as-legacy
-
-- Type: [[property]]
-- Subject: [[subject]]
-
-Legacy physical paths are ignored.
 `
 	if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
@@ -1143,12 +1166,7 @@ func validFeedstock() domain.Feedstock {
 		Timestamp: time.Date(2026, 7, 30, 1, 0, 0, 0, time.UTC),
 		Agent:     "claude",
 		Types:     []domain.KnowledgeType{"property"},
-		Subjects:  []string{"subject"},
 		Summary:   "The user requested testing.", AnnotatedAt: &annotatedAt,
-		Assertions: []domain.Assertion{{
-			ID: "as-test", Type: "property", Subject: "subject",
-			Statement: "The test value is stable.",
-		}},
 	}
 }
 
@@ -1165,13 +1183,8 @@ func TestReadKnowledgeToleratesLegacyTriggerKey(t *testing.T) {
 		Schema: domain.SchemaVersion, ID: "fs-legacy", TurnID: "turn-legacy",
 		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: now, Agent: "claude",
-		Types:    []domain.KnowledgeType{"property"},
-		Subjects: []string{"subject"},
-		Summary:  "Legacy trigger fixture.", AnnotatedAt: &now,
-		Assertions: []domain.Assertion{{
-			ID: "as-legacy", Type: "property", Subject: "subject",
-			Statement: "Legacy trigger fixture statement.",
-		}},
+		Types:   []domain.KnowledgeType{"property"},
+		Summary: "Legacy trigger fixture.", AnnotatedAt: &now,
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)

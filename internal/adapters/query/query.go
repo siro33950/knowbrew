@@ -24,7 +24,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const indexSchemaVersion = 16
+const indexSchemaVersion = 17
 const rawPageSizeBytes = 12_000
 
 type Target string
@@ -81,15 +81,13 @@ type SearchResponse struct {
 }
 
 type ShowResult struct {
-	ID         string                 `json:"id"`
-	TurnID     string                 `json:"turn_id"`
-	Timestamp  time.Time              `json:"timestamp"`
-	Agent      string                 `json:"agent"`
-	Session    domain.SessionRef      `json:"session"`
-	Summary    string                 `json:"summary"`
-	Types      []domain.KnowledgeType `json:"types"`
-	Subjects   []string               `json:"subjects"`
-	Assertions []domain.Assertion     `json:"assertions,omitempty"`
+	ID        string                 `json:"id"`
+	TurnID    string                 `json:"turn_id"`
+	Timestamp time.Time              `json:"timestamp"`
+	Agent     string                 `json:"agent"`
+	Session   domain.SessionRef      `json:"session"`
+	Summary   string                 `json:"summary"`
+	Types     []domain.KnowledgeType `json:"types"`
 }
 
 type ShowResponse struct {
@@ -462,7 +460,7 @@ func syncFeedstocks(
 			}
 			continue
 		}
-		subjects, _ := json.Marshal(feedstock.Subjects)
+		subjects, _ := json.Marshal([]string{})
 		types, _ := json.Marshal(feedstock.Types)
 		supersedes, _ := json.Marshal([]string{})
 		if err := upsertDocument(ctx, transaction, document{
@@ -472,8 +470,6 @@ func syncFeedstocks(
 			Type: string(types), Supersedes: string(supersedes),
 			Searchable: strings.Join([]string{
 				feedstock.Summary,
-				assertionSearchableText(feedstock.Assertions),
-				strings.Join(feedstock.Subjects, " "),
 				strings.Join(knowledgeTypeStrings(feedstock.Types), " "),
 			}, "\n"),
 			Path: file.Path, Status: string(domain.StatusActive),
@@ -1057,24 +1053,10 @@ func Show(dataStore *store.Store, ids []string) (ShowResponse, error) {
 			ID: feedstock.ID, TurnID: feedstock.TurnID,
 			Timestamp: feedstock.Timestamp, Agent: feedstock.Agent,
 			Session: feedstock.Session, Summary: feedstock.Summary,
-			Types:      feedstock.Types,
-			Subjects:   feedstock.Subjects,
-			Assertions: feedstock.Assertions,
+			Types: feedstock.Types,
 		})
 	}
 	return response, nil
-}
-
-func assertionSearchableText(assertions []domain.Assertion) string {
-	parts := make([]string, 0, len(assertions)*4)
-	for _, assertion := range assertions {
-		parts = append(parts,
-			assertion.Statement,
-			assertion.Rationale,
-			assertion.Subject,
-		)
-	}
-	return strings.Join(parts, "\n")
 }
 
 func knowledgeTypeStrings(values []domain.KnowledgeType) []string {

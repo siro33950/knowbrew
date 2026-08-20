@@ -280,7 +280,7 @@ func newBrewCommand() *cobra.Command {
 	)
 	command := &cobra.Command{
 		Use:   "brew",
-		Short: "Brew unresolved subjectful assertions into pending knowledge",
+		Short: "Brew pending feedstocks into Knowledge",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			options := brew.Options{}
@@ -335,7 +335,7 @@ func newBrewCommand() *cobra.Command {
 			return writeJSON(os.Stdout, summary)
 		},
 	}
-	command.Flags().IntVar(&maximum, "max", 0, "Process at most N unresolved assertions")
+	command.Flags().IntVar(&maximum, "max", 0, "Process at most N pending feedstocks")
 	command.Flags().BoolVar(&verbose, "verbose", false, "Stream agent output and per-record progress")
 	return command
 }
@@ -451,8 +451,10 @@ type searchFlags struct {
 	reindex                          bool
 }
 
-func addSearchFlags(command *cobra.Command, flags *searchFlags) {
-	command.Flags().StringVar(&flags.subject, "subject", "", "Filter by exact subject")
+func addSearchFlags(command *cobra.Command, flags *searchFlags, includeSubject bool) {
+	if includeSubject {
+		command.Flags().StringVar(&flags.subject, "subject", "", "Filter by exact subject")
+	}
 	command.Flags().StringVar(&flags.typeValue, "type", "", "Filter by exact knowledge type")
 	command.Flags().StringVar(&flags.since, "since", "", "Filter at or after an RFC3339 timestamp or YYYY-MM-DD date")
 	command.Flags().StringVar(&flags.until, "until", "", "Filter at or before an RFC3339 timestamp or YYYY-MM-DD date")
@@ -650,11 +652,11 @@ func newFeedstockCommand() *cobra.Command {
 			return writeJSON(os.Stdout, response)
 		},
 	}
-	addSearchFlags(parent, &flags)
+	addSearchFlags(parent, &flags, false)
 	parent.Flags().StringVar(&session, "session", "", "Filter by exact source session ID")
 	parent.Flags().StringVar(&agent, "agent", "", "Filter by agent name")
 	parent.Flags().IntVar(&last, "last", 0, "Return the latest N feedstocks in oldest-to-newest order")
-	var assertions []string
+	var typeValues []string
 	var summary string
 	summarize := &cobra.Command{
 		Use:   "summarize <feedstock-id>",
@@ -684,7 +686,7 @@ func newFeedstockCommand() *cobra.Command {
 	_ = summarize.MarkFlagRequired("summary")
 	annotate := &cobra.Command{
 		Use:   "annotate <feedstock-id>",
-		Short: "Finalize assertions for one summarized feedstock",
+		Short: "Write type candidates for one summarized feedstock",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
 			cfg, err := config.Load()
@@ -695,14 +697,14 @@ func newFeedstockCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			parsedAssertions, err := parseAssertionInputs(assertions)
+			types, err := domain.ParseKnowledgeTypes(typeValues)
 			if err != nil {
 				return err
 			}
 			_, err = draw.Annotate(
 				command.Context(), repositoryFor(dataStore),
 				invocationadapter.Guard{Root: cfg.Root}, draw.Annotation{
-					FeedstockID: args[0], Assertions: parsedAssertions,
+					FeedstockID: args[0], Types: types,
 				})
 			if err != nil {
 				return err
@@ -712,10 +714,10 @@ func newFeedstockCommand() *cobra.Command {
 			})
 		},
 	}
-	annotate.Flags().StringArrayVar(&assertions, "assertion", nil, "Atomic assertion as JSON (repeatable)")
+	annotate.Flags().StringArrayVar(&typeValues, "type", nil, "Knowledge type candidate (repeatable)")
 	contextCommand := &cobra.Command{
 		Use:   "context <feedstock-id>",
-		Short: "Load bounded source context for one ambiguous annotation",
+		Short: "Load bounded source context for one unresolved turn reference",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
 			cfg, err := config.Load()
@@ -753,38 +755,6 @@ func newFeedstockCommand() *cobra.Command {
 	return parent
 }
 
-func parseAssertionInputs(values []string) ([]draw.AssertionInput, error) {
-	assertions := make([]draw.AssertionInput, 0, len(values))
-	for index, value := range values {
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(value), &fields); err != nil {
-			return nil, fmt.Errorf("invalid --assertion %d: %w", index+1, err)
-		}
-		rawSubject, exists := fields["subject"]
-		if !exists {
-			return nil, fmt.Errorf("invalid --assertion %d: subject is required; use an empty string when none applies", index+1)
-		}
-		var explicitSubject string
-		if err := json.Unmarshal(rawSubject, &explicitSubject); err != nil {
-			return nil, fmt.Errorf("invalid --assertion %d: subject must be a string", index+1)
-		}
-		decoder := json.NewDecoder(strings.NewReader(value))
-		decoder.DisallowUnknownFields()
-		var assertion draw.AssertionInput
-		if err := decoder.Decode(&assertion); err != nil {
-			return nil, fmt.Errorf("invalid --assertion %d: %w", index+1, err)
-		}
-		if err := decoder.Decode(&struct{}{}); err != io.EOF {
-			if err == nil {
-				err = errors.New("multiple JSON values")
-			}
-			return nil, fmt.Errorf("invalid --assertion %d: %w", index+1, err)
-		}
-		assertions = append(assertions, assertion)
-	}
-	return assertions, nil
-}
-
 func newKnowledgeCommand() *cobra.Command {
 	var (
 		flags                          searchFlags
@@ -806,7 +776,7 @@ func newKnowledgeCommand() *cobra.Command {
 			return writeJSON(command.OutOrStdout(), response)
 		},
 	}
-	addSearchFlags(parent, &flags)
+	addSearchFlags(parent, &flags, true)
 	parent.Flags().BoolVar(&includePending, "include-pending", false, "Include pending knowledge")
 	parent.Flags().BoolVar(&includeRetired, "include-retired", false, "Include invalidated and superseded knowledge")
 	parent.AddCommand(newKnowledgeCatalogCommand(), newKnowledgeShowCommand(), newKnowledgeSubmitCommand())
@@ -817,7 +787,7 @@ func newKnowledgeCatalogCommand() *cobra.Command {
 	var subject, queryText string
 	command := &cobra.Command{
 		Use:    "catalog",
-		Short:  "List compact Knowledge semantics for one assertion subject",
+		Short:  "List compact Knowledge semantics for one subject",
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
@@ -856,8 +826,8 @@ func newKnowledgeCatalogCommand() *cobra.Command {
 			})
 		},
 	}
-	command.Flags().StringVar(&subject, "subject", "", "Exact assertion subject")
-	command.Flags().StringVar(&queryText, "query", "", "Verified or corrected assertion statement")
+	command.Flags().StringVar(&subject, "subject", "", "Exact Knowledge subject")
+	command.Flags().StringVar(&queryText, "query", "", "Candidate Knowledge statement")
 	_ = command.MarkFlagRequired("subject")
 	_ = command.MarkFlagRequired("query")
 	return command
@@ -914,40 +884,25 @@ func newKnowledgeShowCommand() *cobra.Command {
 }
 
 func newKnowledgeSubmitCommand() *cobra.Command {
-	var (
-		assertionID, verificationValue, correctedValue, resolutionValue string
-	)
+	var knowledgeValue string
 	command := &cobra.Command{
-		Use:   "submit <feedstock-id>",
-		Short: "Submit one semantic knowledge decision for deterministic application",
-		Args:  cobra.ExactArgs(1),
+		Use:    "submit <feedstock-id>",
+		Short:  "Register one Knowledge candidate for the current Brew invocation",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
 			dataStore, err := configuredStore()
 			if err != nil {
 				return err
 			}
-			var corrected *domain.Assertion
-			if strings.TrimSpace(correctedValue) != "" {
-				value := domain.Assertion{}
-				if err := decodeStrictJSON(correctedValue, &value); err != nil {
-					return fmt.Errorf("decode --corrected-assertion: %w", err)
-				}
-				corrected = &value
-			}
-			var resolution *brew.ResolutionInput
-			if strings.TrimSpace(resolutionValue) != "" {
-				value := brew.ResolutionInput{}
-				if err := decodeStrictJSON(resolutionValue, &value); err != nil {
-					return fmt.Errorf("decode --resolution: %w", err)
-				}
-				resolution = &value
+			var candidate domain.KnowledgeCandidate
+			if err := decodeStrictJSON(knowledgeValue, &candidate); err != nil {
+				return fmt.Errorf("decode --knowledge: %w", err)
 			}
 			result, err := brew.Submit(
-				command.Context(), repositoryFor(dataStore),
+				repositoryFor(dataStore),
 				invocationadapter.Guard{Root: dataStore.Root}, brew.SubmitInput{
-					FeedstockID: args[0], AssertionID: assertionID,
-					Verification:       brew.VerificationStatus(verificationValue),
-					CorrectedAssertion: corrected, Resolution: resolution,
+					FeedstockID: args[0], Knowledge: candidate,
 				})
 			if err != nil {
 				return err
@@ -955,12 +910,8 @@ func newKnowledgeSubmitCommand() *cobra.Command {
 			return writeJSON(command.OutOrStdout(), result)
 		},
 	}
-	command.Flags().StringVar(&assertionID, "assertion", "", "Assertion ID")
-	command.Flags().StringVar(&verificationValue, "verification", "", "Source verification: verified, corrected, or rejected")
-	command.Flags().StringVar(&correctedValue, "corrected-assertion", "", "Complete corrected assertion as JSON")
-	command.Flags().StringVar(&resolutionValue, "resolution", "", "Complete semantic resolution as JSON")
-	_ = command.MarkFlagRequired("assertion")
-	_ = command.MarkFlagRequired("verification")
+	command.Flags().StringVar(&knowledgeValue, "knowledge", "", "Complete Knowledge candidate as JSON")
+	_ = command.MarkFlagRequired("knowledge")
 	return command
 }
 

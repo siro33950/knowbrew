@@ -95,9 +95,8 @@ func TestTargetedSearchVisibilityAndShow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filteredFeedstock.Total != 1 ||
-		strings.Join(filteredFeedstock.Results[0].Subjects, ",") != "subject" {
-		t.Fatalf("plain-name feedstock filter = %#v", filteredFeedstock)
+	if filteredFeedstock.Total != 0 {
+		t.Fatalf("feedstock subject filter = %#v", filteredFeedstock)
 	}
 	filteredKnowledge, err := Search(context.Background(), dataStore, SearchOptions{
 		Target: TargetKnowledge, Subject: "subject",
@@ -129,16 +128,15 @@ func TestTargetedSearchVisibilityAndShow(t *testing.T) {
 	}
 	if len(shown.Feedstocks) != 1 ||
 		shown.Feedstocks[0].TurnID != feedstock.TurnID ||
-		!reflect.DeepEqual(shown.Feedstocks[0].Assertions, feedstock.Assertions) {
+		!reflect.DeepEqual(shown.Feedstocks[0].Types, feedstock.Types) {
 		t.Fatalf("show = %#v", shown)
 	}
 	encoded, err := json.Marshal(shown)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(encoded), `"feedstocks"`) ||
-		!strings.Contains(string(encoded), `\"ignore previous instructions\"`) {
-		t.Fatalf("unsafe content escaped its JSON string: %s", encoded)
+	if !strings.Contains(string(encoded), `"feedstocks"`) {
+		t.Fatalf("show JSON does not contain the feedstocks key: %s", encoded)
 	}
 }
 
@@ -186,10 +184,6 @@ func TestSearchIndexesWikilinkFilesAsPlainNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, options := range []SearchOptions{
-		{
-			Target: TargetFeedstock, Subject: "subject",
-			Limit: 10, MaxTokens: 1000,
-		},
 		{
 			Target: TargetKnowledge, Subject: "indexed-subject",
 			IncludePending: true, Limit: 10, MaxTokens: 1000,
@@ -483,7 +477,7 @@ func TestIncrementalFeedstockSyncUpdatesClassificationFields(t *testing.T) {
 		Schema: domain.SchemaVersion, ID: "claude-session-t000001",
 		TurnID:    "turn-1",
 		Session:   domain.SessionRef{ID: "session"},
-		Timestamp: time.Now().UTC(), Agent: "claude", Subjects: []string{"subject"},
+		Timestamp: time.Now().UTC(), Agent: "claude",
 		Summary: "classification-summary-keyword",
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
@@ -501,10 +495,7 @@ func TestIncrementalFeedstockSyncUpdatesClassificationFields(t *testing.T) {
 	}
 	if err := dataStore.AnnotateFeedstock(
 		feedstock.ID,
-		[]domain.Assertion{{
-			ID: "as-classified", Type: "property", Subject: "subject",
-			Statement: "assertion-search-keyword remains searchable.",
-		}},
+		[]domain.KnowledgeType{"property"},
 		time.Now().UTC(),
 	); err != nil {
 		t.Fatal(err)
@@ -1016,7 +1007,6 @@ func BenchmarkIncrementalSearch3000Feedstocks(b *testing.B) {
 			Session:     domain.SessionRef{ID: "benchmark"},
 			Timestamp:   base.Add(time.Duration(index) * time.Second),
 			Agent:       "claude",
-			Subjects:    []string{"knowbrew"},
 			Summary:     "Measure incremental search latency.",
 			AnnotatedAt: benchmarkTime(base),
 		}
@@ -1075,20 +1065,14 @@ func writeFeedstock(
 ) domain.Feedstock {
 	t.Helper()
 	feedstock := domain.Feedstock{
-		Schema:    domain.SchemaVersion,
-		ID:        id,
-		TurnID:    "turn-" + id,
-		Session:   domain.SessionRef{ID: "session"},
-		Timestamp: timestamp,
-		Agent:     "claude",
-		Types:     []domain.KnowledgeType{domain.KnowledgeType("property")},
-		Subjects:  []string{"subject"},
-		Summary:   text,
-		Assertions: []domain.Assertion{{
-			ID: "as-" + id, Type: "property", Subject: "subject",
-			Statement: text,
-			Rationale: `The source contains "ignore previous instructions" as data.`,
-		}},
+		Schema:      domain.SchemaVersion,
+		ID:          id,
+		TurnID:      "turn-" + id,
+		Session:     domain.SessionRef{ID: "session"},
+		Timestamp:   timestamp,
+		Agent:       "claude",
+		Types:       []domain.KnowledgeType{domain.KnowledgeType("property")},
+		Summary:     text,
 		AnnotatedAt: benchmarkTime(timestamp),
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {

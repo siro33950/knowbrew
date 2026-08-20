@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 type Status string
 
@@ -31,31 +31,20 @@ type DialogueMessage struct {
 	Content string `json:"content"`
 }
 
-type Assertion struct {
-	ID        string        `json:"id"`
-	Type      KnowledgeType `json:"type"`
-	Subject   string        `json:"subject"`
-	Statement string        `json:"statement"`
-	Rationale string        `json:"rationale,omitempty"`
-}
-
 type Feedstock struct {
-	Schema           int             `yaml:"schema" json:"schema"`
-	ID               string          `yaml:"id" json:"id"`
-	TurnID           string          `yaml:"turn_id" json:"turn_id"`
-	Session          SessionRef      `yaml:"session" json:"session"`
-	Timestamp        time.Time       `yaml:"timestamp" json:"timestamp"`
-	Agent            string          `yaml:"agent" json:"agent"`
-	CWD              string          `yaml:"cwd,omitempty" json:"cwd,omitempty"`
-	Repo             string          `yaml:"repo,omitempty" json:"repo,omitempty"`
-	Branch           string          `yaml:"branch,omitempty" json:"branch,omitempty"`
-	Types            []KnowledgeType `yaml:"types" json:"types"`
-	Subjects         []string        `yaml:"subjects" json:"subjects"`
-	Summary          string          `yaml:"summary" json:"summary"`
-	AnnotatedAt      *time.Time      `yaml:"annotated_at,omitempty" json:"annotated_at,omitempty"`
-	BrewedAt         *time.Time      `yaml:"brewed_at,omitempty" json:"brewed_at,omitempty"`
-	BrewedAssertions []string        `yaml:"brewed_assertions,omitempty" json:"brewed_assertions,omitempty"`
-	Assertions       []Assertion     `yaml:"-" json:"assertions,omitempty"`
+	Schema      int             `yaml:"schema" json:"schema"`
+	ID          string          `yaml:"id" json:"id"`
+	TurnID      string          `yaml:"turn_id" json:"turn_id"`
+	Session     SessionRef      `yaml:"session" json:"session"`
+	Timestamp   time.Time       `yaml:"timestamp" json:"timestamp"`
+	Agent       string          `yaml:"agent" json:"agent"`
+	CWD         string          `yaml:"cwd,omitempty" json:"cwd,omitempty"`
+	Repo        string          `yaml:"repo,omitempty" json:"repo,omitempty"`
+	Branch      string          `yaml:"branch,omitempty" json:"branch,omitempty"`
+	Types       []KnowledgeType `yaml:"types" json:"types"`
+	Summary     string          `yaml:"summary" json:"summary"`
+	AnnotatedAt *time.Time      `yaml:"annotated_at,omitempty" json:"annotated_at,omitempty"`
+	BrewedAt    *time.Time      `yaml:"brewed_at,omitempty" json:"brewed_at,omitempty"`
 }
 
 type Knowledge struct {
@@ -66,7 +55,6 @@ type Knowledge struct {
 	Type          KnowledgeType `yaml:"type" json:"type"`
 	Subject       string        `yaml:"subject,omitempty" json:"subject,omitempty"`
 	Feedstocks    []string      `yaml:"feedstocks" json:"feedstocks"`
-	Assertions    []string      `yaml:"assertions,omitempty" json:"assertions,omitempty"`
 	Approved      bool          `yaml:"approved" json:"approved"`
 	Supersedes    []string      `yaml:"supersedes,omitempty" json:"supersedes,omitempty"`
 	SupersededBy  string        `yaml:"superseded_by,omitempty" json:"superseded_by,omitempty"`
@@ -197,7 +185,7 @@ func ValidateFeedstock(feedstock Feedstock) error {
 		return fmt.Errorf("unsupported agent %q", feedstock.Agent)
 	}
 	if feedstock.AnnotatedAt == nil {
-		if feedstock.BrewedAt != nil || len(feedstock.BrewedAssertions) != 0 {
+		if feedstock.BrewedAt != nil {
 			return errors.New("unannotated feedstock must not have brewed_at")
 		}
 		return nil
@@ -209,65 +197,8 @@ func ValidateFeedstock(feedstock Feedstock) error {
 	if err != nil {
 		return fmt.Errorf("feedstock types: %w", err)
 	}
-	assertionTypes := make([]KnowledgeType, 0, len(feedstock.Assertions))
-	assertionSubjects := make([]string, 0, len(feedstock.Assertions))
-	seenIDs := make(map[string]struct{}, len(feedstock.Assertions))
-	seenStatements := make(map[string]struct{}, len(feedstock.Assertions))
-	assertionIDs := make(map[string]struct{}, len(feedstock.Assertions))
-	for _, assertion := range feedstock.Assertions {
-		if err := ValidateIdentifier(assertion.ID, "assertion ID"); err != nil {
-			return err
-		}
-		if _, exists := seenIDs[assertion.ID]; exists {
-			return fmt.Errorf("duplicate assertion ID %q", assertion.ID)
-		}
-		seenIDs[assertion.ID] = struct{}{}
-		assertionIDs[assertion.ID] = struct{}{}
-		statement := strings.TrimSpace(assertion.Statement)
-		if statement == "" {
-			return fmt.Errorf("assertion %s statement is required", assertion.ID)
-		}
-		if strings.ContainsAny(statement, "\r\n") {
-			return fmt.Errorf("assertion %s statement must be one line", assertion.ID)
-		}
-		if strings.Contains(assertion.Rationale, "\n\n### ") ||
-			strings.Contains(assertion.Rationale, "\n\n#### Rationale\n") {
-			return fmt.Errorf("assertion %s rationale contains a reserved heading", assertion.ID)
-		}
-		statementKey := strings.ToLower(statement) + "\x00" + MasterName(assertion.Subject)
-		if _, exists := seenStatements[statementKey]; exists {
-			return fmt.Errorf("assertion %s duplicates another statement", assertion.ID)
-		}
-		seenStatements[statementKey] = struct{}{}
-		if err := ValidateKnowledgeTypeName(assertion.Type); err != nil {
-			return fmt.Errorf("assertion %s type: %w", assertion.ID, err)
-		}
-		if assertion.Subject != "" {
-			if err := ValidateIdentifier(MasterName(assertion.Subject), "assertion subject"); err != nil {
-				return err
-			}
-			assertionSubjects = append(assertionSubjects, assertion.Subject)
-		}
-		assertionTypes = append(assertionTypes, assertion.Type)
-	}
-	assertionTypes, err = NormalizeKnowledgeTypes(assertionTypes)
-	if err != nil {
-		return fmt.Errorf("assertion types: %w", err)
-	}
-	if !slices.Equal(types, assertionTypes) {
-		return errors.New("feedstock types must equal the types derived from assertions")
-	}
-	if !slices.Equal(NormalizeMasterNames(feedstock.Subjects), NormalizeMasterNames(assertionSubjects)) {
-		return errors.New("feedstock subjects must equal the subjects derived from assertions")
-	}
-	brewed := UniqueSorted(feedstock.BrewedAssertions)
-	if !slices.Equal(brewed, feedstock.BrewedAssertions) {
-		return errors.New("feedstock brewed_assertions must be unique and sorted")
-	}
-	for _, assertionID := range brewed {
-		if _, exists := assertionIDs[assertionID]; !exists {
-			return fmt.Errorf("brewed assertion %q does not exist in feedstock", assertionID)
-		}
+	if !slices.Equal(types, feedstock.Types) {
+		return errors.New("feedstock types must be unique and sorted")
 	}
 	return nil
 }
@@ -284,16 +215,6 @@ func ValidateKnowledge(knowledge Knowledge) error {
 	}
 	if len(knowledge.Feedstocks) == 0 {
 		return errors.New("knowledge feedstocks must not be empty")
-	}
-	for _, reference := range knowledge.Assertions {
-		feedstockID, assertionID, ok := strings.Cut(MasterName(reference), "#")
-		if !ok || ValidateIdentifier(feedstockID, "assertion feedstock ID") != nil ||
-			ValidateIdentifier(assertionID, "assertion ID") != nil {
-			return fmt.Errorf("invalid assertion reference %q", reference)
-		}
-		if !slices.Contains(NormalizeMasterNames(knowledge.Feedstocks), feedstockID) {
-			return fmt.Errorf("assertion reference %q cites an unlisted feedstock", reference)
-		}
 	}
 	if knowledge.EstablishedBy != "" {
 		establishedBy := MasterName(knowledge.EstablishedBy)

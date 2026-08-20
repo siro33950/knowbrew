@@ -1,14 +1,14 @@
 package domain
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
 )
+
+const MaxKnowledgePerFeedstock = 16
 
 type ResolutionKind string
 
@@ -20,16 +20,24 @@ const (
 )
 
 type KnowledgeDraft struct {
-	Type      KnowledgeType
-	Subject   string
-	Statement string
-	Rationale string
+	Type      KnowledgeType `json:"type"`
+	Subject   string        `json:"subject"`
+	Statement string        `json:"statement"`
+	Rationale string        `json:"rationale"`
 }
 
 type Resolution struct {
-	Kind         ResolutionKind
-	KnowledgeIDs []string
-	Draft        *KnowledgeDraft
+	Kind         ResolutionKind  `json:"kind"`
+	KnowledgeIDs []string        `json:"knowledge_ids"`
+	Draft        *KnowledgeDraft `json:"draft"`
+}
+
+type KnowledgeCandidate struct {
+	Type       KnowledgeType `json:"type"`
+	Subject    string        `json:"subject"`
+	Statement  string        `json:"statement"`
+	Rationale  string        `json:"rationale"`
+	Resolution Resolution    `json:"resolution"`
 }
 
 type KnowledgeRecord struct {
@@ -42,7 +50,11 @@ type KnowledgeRecord struct {
 type ResolutionResult struct {
 	KnowledgeID string
 	Outcome     string
-	Changed     map[string]KnowledgeRecord
+}
+
+type KnowledgeResolution struct {
+	Results []ResolutionResult
+	Changed map[string]KnowledgeRecord
 }
 
 type LifecycleIssue struct {
@@ -50,103 +62,139 @@ type LifecycleIssue struct {
 	Err         error
 }
 
-func AssertionReference(feedstockID, assertionID string) string {
-	return MasterName(feedstockID) + "#" + MasterName(assertionID)
-}
-
-func KnowledgeID(reference string) string {
-	digest := sha256.Sum256([]byte(reference))
-	return "kn-" + hex.EncodeToString(digest[:16])
-}
-
-func NewKnowledgeFromAssertion(source Feedstock, assertion Assertion, now time.Time) Knowledge {
-	return newKnowledgeRecord(source, assertion, nil, now).Knowledge
-}
-
 func ResolveKnowledge(
 	source Feedstock,
-	assertion Assertion,
-	resolution Resolution,
+	candidates []KnowledgeCandidate,
 	records map[string]KnowledgeRecord,
 	vocabulary Vocabulary,
+	newKnowledgeID func() string,
 	now time.Time,
-) (ResolutionResult, error) {
-	if assertion.Subject == "" {
-		return ResolutionResult{}, errors.New("subjectless assertions cannot become Knowledge")
+) (KnowledgeResolution, error) {
+	if len(candidates) > MaxKnowledgePerFeedstock {
+		return KnowledgeResolution{}, fmt.Errorf(
+			"at most %d Knowledge candidates are allowed per feedstock",
+			MaxKnowledgePerFeedstock,
+		)
 	}
 	if now.IsZero() {
-		return ResolutionResult{}, errors.New("resolution time is required")
+		return KnowledgeResolution{}, errors.New("resolution time is required")
 	}
-	if err := validateResolution(assertion, resolution, records, vocabulary); err != nil {
-		return ResolutionResult{}, err
+	if newKnowledgeID == nil {
+		return KnowledgeResolution{}, errors.New("knowledge ID generator is required")
 	}
 	working := cloneKnowledgeRecords(records)
 	changed := make(map[string]KnowledgeRecord)
-	reference := AssertionReference(source.ID, assertion.ID)
-	result := ResolutionResult{Changed: changed}
-	switch resolution.Kind {
-	case ResolutionNew:
-		record := newKnowledgeRecord(source, assertion, nil, now)
-		if _, exists := working[record.Knowledge.ID]; exists {
-			return ResolutionResult{}, fmt.Errorf("knowledge ID collision: %s", record.Knowledge.ID)
+	nextKnowledgeID := func() (string, error) {
+		id := strings.TrimSpace(newKnowledgeID())
+		if err := ValidateKnowledgeID(id); err != nil {
+			return "", err
 		}
-		working[record.Knowledge.ID] = record
-		changed[record.Knowledge.ID] = record
-		result.KnowledgeID = record.Knowledge.ID
-		result.Outcome = "created"
-	case ResolutionEquivalent:
-		target := working[resolution.KnowledgeIDs[0]]
-		target.Knowledge.Feedstocks = UniqueSorted(append(target.Knowledge.Feedstocks, source.ID))
-		target.Knowledge.Assertions = UniqueSorted(append(target.Knowledge.Assertions, reference))
-		target.Knowledge.Updated = now
-		working[target.Knowledge.ID] = target
-		changed[target.Knowledge.ID] = target
-		result.KnowledgeID = target.Knowledge.ID
-		result.Outcome = "evidence_added"
-	case ResolutionConflicts:
-		target := working[resolution.KnowledgeIDs[0]]
-		compared := CompareFeedstocks(source, target.Established)
-		if compared < 0 || (compared == 0 && reference < FirstAssertionReference(target.Knowledge)) {
-			result.KnowledgeID = target.Knowledge.ID
-			result.Outcome = "historical_conflict_ignored"
-			break
-		}
-		record := newKnowledgeRecord(source, assertion, replacementPredecessors(target, working), now)
-		if _, exists := working[record.Knowledge.ID]; exists {
-			return ResolutionResult{}, fmt.Errorf("knowledge ID collision: %s", record.Knowledge.ID)
-		}
-		working[record.Knowledge.ID] = record
-		changed[record.Knowledge.ID] = record
-		retirePendingTarget(target, record.Knowledge.ID, now, working, changed)
-		result.KnowledgeID = record.Knowledge.ID
-		result.Outcome = "replaced"
-	case ResolutionComplements:
-		target := working[resolution.KnowledgeIDs[0]]
-		draft := *resolution.Draft
-		id := KnowledgeID(reference)
 		if _, exists := working[id]; exists {
-			return ResolutionResult{}, fmt.Errorf("knowledge ID collision: %s", id)
+			return "", fmt.Errorf("knowledge ID %s already exists", id)
 		}
-		knowledge := Knowledge{
-			ID: id, Created: now, Updated: now, EstablishedBy: source.ID,
-			Type: draft.Type, Subject: MasterName(draft.Subject),
-			Feedstocks: UniqueSorted(append(append([]string{}, target.Knowledge.Feedstocks...), source.ID)),
-			Assertions: UniqueSorted(append(append([]string{}, target.Knowledge.Assertions...), reference)),
-			Supersedes: replacementPredecessors(target, working),
-			Status:     StatusPending,
+		return id, nil
+	}
+	result := KnowledgeResolution{
+		Results: make([]ResolutionResult, 0, len(candidates)),
+		Changed: changed,
+	}
+	for index, candidate := range candidates {
+		candidate = normalizeKnowledgeCandidate(candidate)
+		if err := validateKnowledgeCandidate(candidate, working, vocabulary); err != nil {
+			return KnowledgeResolution{}, fmt.Errorf("knowledge candidate %d: %w", index+1, err)
 		}
-		record := KnowledgeRecord{
-			Knowledge: knowledge, Statement: strings.TrimSpace(draft.Statement),
-			Rationale: strings.TrimSpace(draft.Rationale), Established: source,
+		resolution := candidate.Resolution
+		itemResult := ResolutionResult{}
+		switch resolution.Kind {
+		case ResolutionNew:
+			id, err := nextKnowledgeID()
+			if err != nil {
+				return KnowledgeResolution{}, fmt.Errorf("knowledge candidate %d: %w", index+1, err)
+			}
+			record, err := newKnowledgeRecord(source, candidate, nil, id, now)
+			if err != nil {
+				return KnowledgeResolution{}, fmt.Errorf("knowledge candidate %d: %w", index+1, err)
+			}
+			working[record.Knowledge.ID] = record
+			changed[record.Knowledge.ID] = record
+			itemResult.KnowledgeID = record.Knowledge.ID
+			itemResult.Outcome = "created"
+		case ResolutionEquivalent:
+			target := working[resolution.KnowledgeIDs[0]]
+			target.Knowledge.Feedstocks = UniqueSorted(append(target.Knowledge.Feedstocks, source.ID))
+			target.Knowledge.Updated = now
+			working[target.Knowledge.ID] = target
+			changed[target.Knowledge.ID] = target
+			itemResult.KnowledgeID = target.Knowledge.ID
+			itemResult.Outcome = "evidence_added"
+		case ResolutionConflicts:
+			target := working[resolution.KnowledgeIDs[0]]
+			if slices.Contains(target.Knowledge.Feedstocks, source.ID) {
+				return KnowledgeResolution{}, fmt.Errorf(
+					"knowledge candidate %d: conflicting Knowledge shares source feedstock %s",
+					index+1,
+					source.ID,
+				)
+			}
+			compared := CompareFeedstocks(source, target.Established)
+			if compared == 0 {
+				return KnowledgeResolution{}, fmt.Errorf(
+					"knowledge candidate %d: conflicting Knowledge has the same source turn",
+					index+1,
+				)
+			}
+			if compared < 0 {
+				itemResult.KnowledgeID = target.Knowledge.ID
+				itemResult.Outcome = "historical_conflict_ignored"
+				break
+			}
+			id, err := nextKnowledgeID()
+			if err != nil {
+				return KnowledgeResolution{}, fmt.Errorf("knowledge candidate %d: %w", index+1, err)
+			}
+			record, err := newKnowledgeRecord(
+				source,
+				candidate,
+				replacementPredecessors(target, working),
+				id,
+				now,
+			)
+			if err != nil {
+				return KnowledgeResolution{}, fmt.Errorf("knowledge candidate %d: %w", index+1, err)
+			}
+			working[record.Knowledge.ID] = record
+			changed[record.Knowledge.ID] = record
+			retirePendingTarget(target, record.Knowledge.ID, now, working, changed)
+			itemResult.KnowledgeID = record.Knowledge.ID
+			itemResult.Outcome = "replaced"
+		case ResolutionComplements:
+			target := working[resolution.KnowledgeIDs[0]]
+			draft := *resolution.Draft
+			id, err := nextKnowledgeID()
+			if err != nil {
+				return KnowledgeResolution{}, fmt.Errorf("knowledge candidate %d: %w", index+1, err)
+			}
+			knowledge := Knowledge{
+				ID: id, Created: now, Updated: now, EstablishedBy: source.ID,
+				Type: draft.Type, Subject: MasterName(draft.Subject),
+				Feedstocks: UniqueSorted(append(append([]string{}, target.Knowledge.Feedstocks...), source.ID)),
+				Supersedes: replacementPredecessors(target, working),
+				Status:     StatusPending,
+			}
+			record := KnowledgeRecord{
+				Knowledge: knowledge, Statement: strings.TrimSpace(draft.Statement),
+				Rationale: strings.TrimSpace(draft.Rationale), Established: source,
+			}
+			working[id] = record
+			changed[id] = record
+			retirePendingTarget(target, id, now, working, changed)
+			itemResult.KnowledgeID = id
+			itemResult.Outcome = "merged"
 		}
-		working[id] = record
-		changed[id] = record
-		retirePendingTarget(target, id, now, working, changed)
-		result.KnowledgeID = id
-		result.Outcome = "merged"
+		result.Results = append(result.Results, itemResult)
 	}
 	if err := ValidateKnowledgeGraph(working); err != nil {
-		return ResolutionResult{}, err
+		return KnowledgeResolution{}, err
 	}
 	return result, nil
 }
@@ -369,21 +417,88 @@ func CompareFeedstocks(left, right Feedstock) int {
 	return strings.Compare(left.ID, right.ID)
 }
 
-func FirstAssertionReference(knowledge Knowledge) string {
-	if len(knowledge.Assertions) == 0 {
-		return ""
-	}
-	values := append([]string(nil), knowledge.Assertions...)
-	slices.Sort(values)
-	return values[0]
+type Vocabulary struct {
+	types    map[KnowledgeType]struct{}
+	subjects map[string]struct{}
 }
 
-func validateResolution(
-	assertion Assertion,
-	resolution Resolution,
+func NewVocabulary(types, subjects []MasterEntry) Vocabulary {
+	vocabulary := Vocabulary{
+		types:    make(map[KnowledgeType]struct{}, len(types)),
+		subjects: make(map[string]struct{}, len(subjects)),
+	}
+	for _, entry := range types {
+		vocabulary.types[KnowledgeType(MasterName(entry.Name))] = struct{}{}
+	}
+	for _, entry := range subjects {
+		vocabulary.subjects[MasterName(entry.Name)] = struct{}{}
+	}
+	return vocabulary
+}
+
+func (v Vocabulary) ValidateType(value KnowledgeType) error {
+	value = KnowledgeType(strings.TrimSpace(string(value)))
+	if err := ValidateKnowledgeTypeName(value); err != nil {
+		return err
+	}
+	if _, exists := v.types[value]; !exists {
+		return fmt.Errorf("knowledge type %q is not defined in masters/types", value)
+	}
+	return nil
+}
+
+func (v Vocabulary) ValidateSubject(value string) error {
+	value = MasterName(value)
+	if value == "" {
+		return errors.New("knowledge subject is required")
+	}
+	if err := ValidateIdentifier(value, "knowledge subject"); err != nil {
+		return err
+	}
+	if _, exists := v.subjects[value]; !exists {
+		return fmt.Errorf("subject %q is not defined in masters/subjects", value)
+	}
+	return nil
+}
+
+func normalizeKnowledgeCandidate(candidate KnowledgeCandidate) KnowledgeCandidate {
+	candidate.Type = KnowledgeType(strings.TrimSpace(string(candidate.Type)))
+	candidate.Subject = MasterName(candidate.Subject)
+	candidate.Statement = strings.TrimSpace(candidate.Statement)
+	candidate.Rationale = strings.TrimSpace(candidate.Rationale)
+	if candidate.Resolution.Draft != nil {
+		draft := *candidate.Resolution.Draft
+		draft.Type = KnowledgeType(strings.TrimSpace(string(draft.Type)))
+		draft.Subject = MasterName(draft.Subject)
+		draft.Statement = strings.TrimSpace(draft.Statement)
+		draft.Rationale = strings.TrimSpace(draft.Rationale)
+		candidate.Resolution.Draft = &draft
+	}
+	return candidate
+}
+
+func validateKnowledgeCandidate(
+	candidate KnowledgeCandidate,
 	records map[string]KnowledgeRecord,
 	vocabulary Vocabulary,
 ) error {
+	if err := vocabulary.ValidateType(candidate.Type); err != nil {
+		return fmt.Errorf("type: %w", err)
+	}
+	if err := vocabulary.ValidateSubject(candidate.Subject); err != nil {
+		return err
+	}
+	if candidate.Statement == "" {
+		return errors.New("knowledge statement is required")
+	}
+	if strings.Contains(candidate.Statement, "\r") {
+		return errors.New("knowledge statement must use LF line endings")
+	}
+	return validateResolution(candidate, records, vocabulary)
+}
+
+func validateResolution(candidate KnowledgeCandidate, records map[string]KnowledgeRecord, vocabulary Vocabulary) error {
+	resolution := candidate.Resolution
 	ids := UniqueSorted(resolution.KnowledgeIDs)
 	if !slices.Equal(ids, resolution.KnowledgeIDs) {
 		return errors.New("resolution knowledge_ids must be unique and sorted")
@@ -393,7 +508,7 @@ func validateResolution(
 		if !exists {
 			return fmt.Errorf("resolution target %s was not a current Knowledge head", id)
 		}
-		if record.Knowledge.Subject != assertion.Subject {
+		if record.Knowledge.Subject != candidate.Subject {
 			return fmt.Errorf("knowledge %s belongs to subject %q", id, record.Knowledge.Subject)
 		}
 	}
@@ -410,7 +525,7 @@ func validateResolution(
 		if len(ids) != 1 || resolution.Draft == nil {
 			return errors.New("complements requires exactly one target and a draft")
 		}
-		if err := validateKnowledgeDraft(assertion.Subject, *resolution.Draft, vocabulary); err != nil {
+		if err := validateKnowledgeDraft(candidate.Subject, *resolution.Draft, vocabulary); err != nil {
 			return err
 		}
 	default:
@@ -424,7 +539,7 @@ func validateKnowledgeDraft(subject string, draft KnowledgeDraft, vocabulary Voc
 		return err
 	}
 	if MasterName(draft.Subject) != subject {
-		return errors.New("merged draft must preserve the assertion subject")
+		return errors.New("merged draft must preserve the Knowledge subject")
 	}
 	if strings.TrimSpace(draft.Statement) == "" {
 		return errors.New("knowledge statement is required")
@@ -435,18 +550,26 @@ func validateKnowledgeDraft(subject string, draft KnowledgeDraft, vocabulary Voc
 	return nil
 }
 
-func newKnowledgeRecord(source Feedstock, assertion Assertion, supersedes []string, now time.Time) KnowledgeRecord {
-	reference := AssertionReference(source.ID, assertion.ID)
-	id := KnowledgeID(reference)
+func newKnowledgeRecord(
+	source Feedstock,
+	candidate KnowledgeCandidate,
+	supersedes []string,
+	id string,
+	now time.Time,
+) (KnowledgeRecord, error) {
+	id = strings.TrimSpace(id)
+	if err := ValidateKnowledgeID(id); err != nil {
+		return KnowledgeRecord{}, err
+	}
 	return KnowledgeRecord{
 		Knowledge: Knowledge{
 			ID: id, Created: now, Updated: now, EstablishedBy: source.ID,
-			Type: assertion.Type, Subject: assertion.Subject, Feedstocks: []string{source.ID},
-			Assertions: []string{reference}, Supersedes: UniqueSorted(supersedes),
-			Status: StatusPending,
+			Type: candidate.Type, Subject: candidate.Subject, Feedstocks: []string{source.ID},
+			Supersedes: UniqueSorted(supersedes),
+			Status:     StatusPending,
 		},
-		Statement: assertion.Statement, Rationale: assertion.Rationale, Established: source,
-	}
+		Statement: candidate.Statement, Rationale: candidate.Rationale, Established: source,
+	}, nil
 }
 
 func replacementPredecessors(target KnowledgeRecord, records map[string]KnowledgeRecord) []string {
@@ -482,7 +605,6 @@ func cloneKnowledgeRecords(records map[string]KnowledgeRecord) map[string]Knowle
 	result := make(map[string]KnowledgeRecord, len(records))
 	for id, record := range records {
 		record.Knowledge.Feedstocks = append([]string(nil), record.Knowledge.Feedstocks...)
-		record.Knowledge.Assertions = append([]string(nil), record.Knowledge.Assertions...)
 		record.Knowledge.Supersedes = append([]string(nil), record.Knowledge.Supersedes...)
 		result[id] = record
 	}

@@ -17,6 +17,7 @@ import (
 	"github.com/siro33950/knowbrew/internal/adapters/config"
 	"github.com/siro33950/knowbrew/internal/adapters/invocation/state"
 	"github.com/siro33950/knowbrew/internal/application/agent"
+	"github.com/siro33950/knowbrew/internal/domain"
 )
 
 var ErrTimeout = errors.New("LLM backend timed out")
@@ -37,14 +38,6 @@ const diagnosticTruncatedMarker = "[earlier diagnostic output truncated]"
 type Task = agent.Task
 type Runner = agent.Runner
 type RunResult = agent.RunResult
-
-func WithAssertion(ctx context.Context, assertionID string) context.Context {
-	return agent.WithAssertion(ctx, assertionID)
-}
-
-func assertionFromContext(ctx context.Context) string {
-	return agent.AssertionFromContext(ctx)
-}
 
 type CommandRunner struct {
 	Config     config.Config
@@ -109,7 +102,7 @@ func (runner *CommandRunner) Run(
 	}
 	defer func() { _ = os.Remove(resultPath) }()
 	if task == TaskAnnotate || task == TaskBrew {
-		prompt = fmt.Sprintf("%s\n\nUse this exact knowbrew executable only for the permitted read operations: %s", prompt, runner.Executable)
+		prompt = fmt.Sprintf("%s\n\nUse this exact knowbrew executable only for the permitted operations: %s", prompt, runner.Executable)
 	}
 	switch runner.Config.LLM.Backend {
 	case "claude-cli":
@@ -162,7 +155,7 @@ func (runner *CommandRunner) Run(
 	invocationID := newInvocationID()
 	defer invocation.Cleanup(runner.Config.Root, invocationID)
 	command.Env = invocationEnvironment(
-		os.Environ(), runner.Config.Path, feedstockID, assertionFromContext(ctx), invocationID,
+		os.Environ(), runner.Config.Path, feedstockID, invocationID, task,
 	)
 	stdout := newTailWriter(32 << 10)
 	stderr := newTailWriter(32 << 10)
@@ -211,9 +204,16 @@ func (runner *CommandRunner) Run(
 }
 
 func applicationReadState(reads invocation.ReadState) agent.ReadState {
+	subjects := make(map[string]agent.SubjectReadState, len(reads.Subjects))
+	for subject, entry := range reads.Subjects {
+		subjects[subject] = agent.SubjectReadState{
+			Catalog: append([]string(nil), entry.Catalog...),
+			Digest:  entry.Digest,
+		}
+	}
 	return agent.ReadState{
-		Subject: reads.Subject, Catalog: append([]string(nil), reads.Catalog...),
-		CatalogDigest: reads.CatalogDigest, Inspected: append([]string(nil), reads.Inspected...),
+		Subjects: subjects, Inspected: append([]string(nil), reads.Inspected...),
+		Submitted:         append([]domain.KnowledgeCandidate(nil), reads.Submitted...),
 		AnnotationContext: reads.AnnotationContext,
 	}
 }
@@ -360,6 +360,8 @@ func claudeAllowedTools(executable string, task Task) []string {
 	return []string{
 		pattern("knowledge catalog *"),
 		pattern("knowledge show *"),
+		pattern("knowledge submit *"),
+		pattern("feedstock context *"),
 	}
 }
 
@@ -400,12 +402,16 @@ func claudeStructuredOutput(data []byte) (json.RawMessage, error) {
 	return nil, errors.New("claude returned no structured output")
 }
 
-func invocationEnvironment(base []string, configPath, feedstockID, assertionID, invocationID string) []string {
+func invocationEnvironment(
+	base []string,
+	configPath, feedstockID, invocationID string,
+	task Task,
+) []string {
 	values := map[string]string{
 		config.ConfigEnvironment:              configPath,
 		config.InvocationFeedstockEnvironment: feedstockID,
-		config.InvocationAssertionEnvironment: assertionID,
 		config.InvocationIDEnvironment:        invocationID,
+		config.InvocationTaskEnvironment:      string(task),
 	}
 	out := make([]string, 0, len(base)+len(values))
 	for _, entry := range base {
@@ -417,8 +423,8 @@ func invocationEnvironment(base []string, configPath, feedstockID, assertionID, 
 	for _, key := range []string{
 		config.ConfigEnvironment,
 		config.InvocationFeedstockEnvironment,
-		config.InvocationAssertionEnvironment,
 		config.InvocationIDEnvironment,
+		config.InvocationTaskEnvironment,
 	} {
 		out = append(out, key+"="+values[key])
 	}
@@ -441,6 +447,19 @@ func commandForTool(executable string, name string, arguments map[string]any) ([
 		args := []string{"knowledge", "show"}
 		args = append(args, stringSlice(arguments["knowledge_ids"])...)
 		return append([]string{executable}, args...), nil
+	case "knowledge_submit":
+		knowledge, err := json.Marshal(arguments["knowledge"])
+		if err != nil {
+			return nil, fmt.Errorf("encode knowledge submit argument: %w", err)
+		}
+		return []string{
+			executable,
+			"knowledge",
+			"submit",
+			stringValue(arguments, "feedstock_id"),
+			"--knowledge",
+			string(knowledge),
+		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported tool %q", name)
 	}
