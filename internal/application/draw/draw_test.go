@@ -37,7 +37,7 @@ func (runner annotatingRunner) Run(_ context.Context, task llm.Task, _ string, _
 			Usage:  runner.usage,
 		}, nil
 	case llm.TaskAnnotate:
-		return llm.RunResult{Output: json.RawMessage(`{"assertions":[]}`), Usage: runner.usage}, nil
+		return llm.RunResult{Output: json.RawMessage(`{"types":[]}`), Usage: runner.usage}, nil
 	default:
 		return llm.RunResult{}, nil
 	}
@@ -700,7 +700,7 @@ func TestAnnotationPromptIncludesFilteredDialogueWithoutReadInstructions(t *test
 			t.Fatalf("summary prompt contains %q:\n%s", forbidden, summaryText)
 		}
 	}
-	assertionText, warnings, err := annotationPromptForTest(cfg, dataStore, target.ID, feedstocks)
+	typeCandidateText, warnings, err := annotationPromptForTest(cfg, dataStore, target.ID, feedstocks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -711,61 +711,32 @@ func TestAnnotationPromptIncludesFilteredDialogueWithoutReadInstructions(t *test
 		`"target_user_input": "FULL USER REQUEST"`, `"prior_turns": []`,
 		`"cwd": "/vault"`, `"repo": "https://github.com/example/knowbrew.git"`,
 		`run "knowbrew feedstock context ` + target.ID + `" exactly once`,
-		"target agent response, generated summary, and future turns are deliberately absent",
-		"Read all of target_user_input before inspecting prior_turns",
-		"A user instruction to add, remove, change, preserve, or use persistent subject behavior establishes the requested resulting behavior",
-		"Do not let an earlier acknowledgement in the same message replace, hide, or weaken a later direct clause",
-		"Do not promote supporting explanation, examples, rationale, implementation mechanics, consequences, or a definition of every named term",
-		"Do not turn one broad approval into separate assertions for every explanatory sentence",
-		"Re-read target_user_input clause by clause",
+		"target assistant response, generated summary, and future turns are deliberately absent",
+		`Return exactly one JSON object containing only {"types": [...]}`,
 		"Treat knowledge_type_master as the sole authority",
-		"Master field semantics:",
-		"name is the selectable identifier",
-		"definition is the controlling positive boundary",
-		"example is one illustration of the definition",
-		"includes lists explicit positive scope clarifications",
-		"excludes lists hard vetoes",
-		"Excludes wins over every positive field",
-		"An omitted optional field adds no condition",
-		"Evaluate every listed excludes value as a hard veto",
+		"Select every type that could plausibly apply",
+		"Multiple types are allowed, and uncertainty is a reason to include a candidate",
+		"Do not decide statement wording, meaning boundaries, subject ownership, or final type assignment",
 		`"includes": [`, `"verified runtime behavior"`,
 		`"excludes": [`, `"temporary task progress"`,
-		"Choose only existing subjects", `"name": "observation"`, `"name": "agent-model"`,
+		`"name": "observation"`,
 	} {
-		if !strings.Contains(assertionText, required) {
-			t.Fatalf("assertion prompt does not contain %q:\n%s", required, assertionText)
+		if !strings.Contains(typeCandidateText, required) {
+			t.Fatalf("type candidate prompt does not contain %q:\n%s", required, typeCandidateText)
 		}
 	}
 	for _, forbidden := range []string{
 		"VISIBLE ASSISTANT RESPONSE", "SECRET THINKING", "SECRET TOOL CALL", "SECRET TOOL OUTPUT",
-		`"summary"`, `"target_offset"`, `"offset": 0`, `"offset": 1`,
+		`"summary"`, `"subject_master"`, `"name": "agent-model"`,
+		`"target_offset"`, `"offset": 0`, `"offset": 1`,
 	} {
-		if strings.Contains(assertionText, forbidden) {
-			t.Fatalf("assertion prompt contains %q:\n%s", forbidden, assertionText)
+		if strings.Contains(typeCandidateText, forbidden) {
+			t.Fatalf("type candidate prompt contains %q:\n%s", forbidden, typeCandidateText)
 		}
-	}
-	stages := []string{
-		"1. Target decomposition.",
-		"2. Direct target meanings.",
-		"3. Bounded reference resolution.",
-		"4. Approval scope.",
-		"5. Meaning consolidation.",
-		"6. Type qualification.",
-		"7. Atomic assertions.",
-		"8. Subject expansion.",
-		"9. Coverage audit and return.",
-	}
-	previous := -1
-	for _, stage := range stages {
-		position := strings.Index(assertionText, stage)
-		if position <= previous {
-			t.Fatalf("assertion prompt stage %q is missing or out of order:\n%s", stage, assertionText)
-		}
-		previous = position
 	}
 }
 
-func TestWritingGuidesApplyOnlyToAssertionExtraction(t *testing.T) {
+func TestWritingGuidesDoNotApplyToDrawPhases(t *testing.T) {
 	dataStore, err := store.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -797,20 +768,14 @@ func TestWritingGuidesApplyOnlyToAssertionExtraction(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.Config{Path: "/configured/config.toml"}
-	assertionText, _, err := annotationPromptForTest(cfg, dataStore, target.ID, feedstocks)
+	typeCandidateText, _, err := annotationPromptForTest(cfg, dataStore, target.ID, feedstocks)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"COMMON WRITING RULE", "KNOWLEDGE WRITING RULE"} {
-		if !strings.Contains(assertionText, required) {
-			t.Fatalf("assertion prompt does not contain %q:\n%s", required, assertionText)
+	for _, forbidden := range []string{"COMMON WRITING RULE", "KNOWLEDGE WRITING RULE", "DOCUMENT WRITING RULE"} {
+		if strings.Contains(typeCandidateText, forbidden) {
+			t.Fatalf("type candidate prompt contains writing guide %q:\n%s", forbidden, typeCandidateText)
 		}
-	}
-	if strings.Contains(assertionText, "DOCUMENT WRITING RULE") {
-		t.Fatalf("assertion prompt contains document-only rules:\n%s", assertionText)
-	}
-	if strings.Contains(assertionText, "Never prefix it with Absolute: or Default:") {
-		t.Fatalf("assertion prompt retained externalized strength wording:\n%s", assertionText)
 	}
 
 	summaryText, _, err := summaryPromptForTest(cfg, dataStore, target.ID)
@@ -1269,7 +1234,7 @@ func (runner *retryingAnnotatingRunner) Run(_ context.Context, task llm.Task, fe
 		runner.failuresLeft--
 		return llm.RunResult{}, errors.New("temporary annotation failure")
 	}
-	return llm.RunResult{Output: json.RawMessage(`{"assertions":[]}`)}, nil
+	return llm.RunResult{Output: json.RawMessage(`{"types":[]}`)}, nil
 }
 
 func TestDrawContinuesAfterAnnotationFailureAndRetriesFeedstock(t *testing.T) {
@@ -1305,8 +1270,8 @@ func TestDrawContinuesAfterAnnotationFailureAndRetriesFeedstock(t *testing.T) {
 		!strings.Contains(first.Failures[0].Reason, "temporary annotation failure") {
 		t.Fatalf("failure = %#v", first.Failures[0])
 	}
-	if !strings.Contains(progress.String(), "Assertion extraction failed · "+failedID) {
-		t.Fatalf("assertion extraction failure was not printed:\n%s", progress.String())
+	if !strings.Contains(progress.String(), "Type candidate selection failed · "+failedID) {
+		t.Fatalf("type candidate selection failure was not printed:\n%s", progress.String())
 	}
 	failed, _, err := dataStore.FindFeedstock(failedID)
 	if err != nil {
@@ -1442,7 +1407,7 @@ func TestAcquisitionPersistsUnannotatedFeedstockAndResumeClassifiesIt(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if unannotated.AnnotatedAt != nil || unannotated.Summary != "" || len(unannotated.Assertions) != 0 {
+	if unannotated.AnnotatedAt != nil || unannotated.Summary != "" || len(unannotated.Types) != 0 {
 		t.Fatalf("phase-one feedstock = %#v", unannotated)
 	}
 	found, err := query.Search(context.Background(), dataStore, query.SearchOptions{
@@ -1502,7 +1467,7 @@ func (runner *phaseOrderRunner) Run(_ context.Context, task llm.Task, _ string, 
 		runner.mu.Lock()
 		runner.annotateCalls++
 		runner.mu.Unlock()
-		return llm.RunResult{Output: json.RawMessage(`{"assertions":[]}`)}, nil
+		return llm.RunResult{Output: json.RawMessage(`{"types":[]}`)}, nil
 	default:
 		return llm.RunResult{}, nil
 	}
@@ -1519,7 +1484,7 @@ func (writer cancelOnSummaryWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func TestDrawCompletesAllSummariesBeforeAssertionsAndResumesAtAssertionPhase(t *testing.T) {
+func TestDrawCompletesAllSummariesBeforeTypeCandidatesAndResumesAtAnnotationPhase(t *testing.T) {
 	root := t.TempDir()
 	dataStore, _ := store.New(root)
 	logPath := filepath.Join(t.TempDir(), "session.jsonl")
@@ -1606,7 +1571,7 @@ func (runner *concurrentAnnotatingRunner) Run(
 			Usage:  runner.usage,
 		}, nil
 	}
-	return llm.RunResult{Output: json.RawMessage(`{"assertions":[]}`), Usage: runner.usage}, nil
+	return llm.RunResult{Output: json.RawMessage(`{"types":[]}`), Usage: runner.usage}, nil
 }
 
 func TestDrawClassifiesAllFeedstocksWithConcurrentWorkers(t *testing.T) {
@@ -1655,7 +1620,7 @@ func TestDrawClassifiesAllFeedstocksWithConcurrentWorkers(t *testing.T) {
 		"Summarization complete · 8/8 feedstocks · in 8.0k tokens / out 800 tokens",
 	) || !strings.Contains(
 		progress.String(),
-		"Assertion extraction complete · 8/8 feedstocks · in 8.0k tokens / out 800 tokens",
+		"Type candidate selection complete · 8/8 feedstocks · in 8.0k tokens / out 800 tokens",
 	) {
 		t.Fatalf("draw phase progress did not reach all feedstocks:\n%s", progress.String())
 	}
@@ -1823,8 +1788,8 @@ func TestDrawNonTTYProgressUsesPhaseLinesOnly(t *testing.T) {
 		"Acquisition complete · 2 feedstocks from 1 sources",
 		"Summarizing · 0/2 · 2 workers · in 0 tokens / out 0 tokens",
 		"Summarization complete · 2/2 feedstocks · in 2.0k tokens / out 200 tokens",
-		"Extracting assertions · 0/2 · 2 workers · in 0 tokens / out 0 tokens",
-		"Assertion extraction complete · 2/2 feedstocks · in 2.0k tokens / out 200 tokens",
+		"Selecting type candidates · 0/2 · 2 workers · in 0 tokens / out 0 tokens",
+		"Type candidate selection complete · 2/2 feedstocks · in 2.0k tokens / out 200 tokens",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("progress does not contain %q:\n%s", required, text)
@@ -1833,7 +1798,7 @@ func TestDrawNonTTYProgressUsesPhaseLinesOnly(t *testing.T) {
 	for _, forbidden := range []string{
 		"Acquiring " + logPath,
 		"Summarizing 1/2 complete:",
-		"Extracting assertions 1/2 complete:",
+		"Selecting type candidates 1/2 complete:",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("non-TTY progress contains per-record line %q:\n%s", forbidden, text)

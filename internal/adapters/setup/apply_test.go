@@ -129,7 +129,7 @@ func TestApplyCreatesRootLocalConfigAndUserLocator(t *testing.T) {
 			"Write in the language and style required by the user's configuration.",
 		},
 		"knowledge.md": {
-			"# Assertion and Knowledge Writing Rules",
+			"# Knowledge Writing Rules",
 			"## Statement phrasing",
 			"## Compound Knowledge statements",
 			"## Rationale phrasing",

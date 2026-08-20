@@ -42,10 +42,10 @@ session logs ──draw──▶ feedstock ──brew──▶ knowledge ──a
 ```
 
 **`draw`** reads your session logs and records one *feedstock* per turn: a short
-summary plus the atomic claims that turn established. The raw dialogue stays in
-the source log. A feedstock stores the agent and session ID, while knowbrew
-resolves the log's current location from the configured source paths when raw
-dialogue is needed.
+summary plus broad Knowledge type candidates. The raw dialogue stays in the
+source log. A feedstock stores the agent and session ID, while knowbrew resolves
+the log's current location from the configured source paths when raw dialogue
+is needed.
 
 **`brew`** reads that evidence and writes *knowledge*: claims that stay useful
 beyond the turn they came from. Each record has one type and one subject, and
@@ -103,11 +103,10 @@ knowbrew distill --max 2
 
 The draw summary reports `turns_selected` for the current run and
 `turns_pending` for the unfinished turns remaining in its source scope.
-For Brew, `--max` counts unresolved Assertions; mechanical NOOP processing does
-not consume the limit. For Distill, it counts Subject documents. Bounded
-Distill runs continue from the next Subject and Template on the following run,
-so repeated invocations rotate through all assigned documents even though each
-document remains regenerable.
+For Brew, `--max` counts pending feedstocks. For Distill, it counts Subject
+documents. Bounded Distill runs continue from the next Subject and Template on
+the following run, so repeated invocations rotate through all assigned
+documents even though each document remains regenerable.
 
 Review what was created, and promote what you want your agent to use:
 
@@ -137,9 +136,9 @@ knowbrew knowledge --subject myproject --type decision
 Look back at what actually happened:
 
 ```sh
-knowbrew feedstock --last 10                      # the last 10 turns
-knowbrew feedstock --subject myproject -- deploy  # when did we touch deploys?
-knowbrew show <feedstock-id> --raw                # the original conversation
+knowbrew feedstock --last 10       # the last 10 turns
+knowbrew feedstock -- deploy       # when did we touch deploys?
+knowbrew show <feedstock-id> --raw # the original conversation
 ```
 
 Keywords go after `--`. With keywords you get relevance ranking; without them
@@ -335,11 +334,11 @@ knowbrew show <id...>              one feedstock record; --raw for the dialogue
 knowbrew index sync|rebuild|status maintain the derived search indexes
 ```
 
-Shared search flags: `--subject`, `--type`, `--since`, `--until`, `--limit`,
-`--max-tokens`, `--reindex`, `--search-mode`. `knowledge` adds `--include-pending`,
-and `--include-retired`. `feedstock` adds `--session`,
-`--agent`, and `--last N`. `document` searches distilled Subject documents and
-adds `--template` instead of `--type`.
+`knowledge` and `feedstock` share `--type`, `--since`, `--until`, `--limit`,
+`--max-tokens`, `--reindex`, and `--search-mode`. `knowledge` adds `--subject`,
+`--include-pending`, and `--include-retired`; `feedstock` adds `--session`,
+`--agent`, and `--last N`. `document` searches distilled Subject documents with
+`--subject` and `--template` instead of `--type`.
 
 `draw` flags: `--max N`, `--since`, `--until`, `--source claude|codex`,
 `--verbose`. Explicit files and directories must be inside a configured source

@@ -11,55 +11,35 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/siro33950/knowbrew/internal/application/agent"
 	"github.com/siro33950/knowbrew/internal/domain"
 )
 
-type VerificationStatus = domain.VerificationStatus
 type ResolutionKind = domain.ResolutionKind
 
 const (
-	VerificationVerified  = domain.VerificationVerified
-	VerificationCorrected = domain.VerificationCorrected
-	VerificationRejected  = domain.VerificationRejected
-
 	ResolutionNew         = domain.ResolutionNew
 	ResolutionEquivalent  = domain.ResolutionEquivalent
 	ResolutionComplements = domain.ResolutionComplements
 	ResolutionConflicts   = domain.ResolutionConflicts
 )
 
-var ErrStaleDecision = errors.New("knowledge changed while the assertion was being evaluated")
-
-type KnowledgeDraft struct {
-	Type      domain.KnowledgeType `json:"type"`
-	Subject   string               `json:"subject"`
-	Statement string               `json:"statement"`
-	Rationale string               `json:"rationale,omitempty"`
-}
-
-type ResolutionInput struct {
-	Kind         ResolutionKind  `json:"kind"`
-	KnowledgeIDs []string        `json:"knowledge_ids"`
-	Draft        *KnowledgeDraft `json:"draft"`
-}
+var ErrStaleDecision = errors.New("knowledge changed while the feedstock was being evaluated")
 
 type SubmitInput struct {
-	FeedstockID        string
-	AssertionID        string
-	ExpectedAssertion  *domain.Assertion
-	Verification       VerificationStatus
-	CorrectedAssertion *domain.Assertion
-	Resolution         *ResolutionInput
+	FeedstockID string
+	Knowledge   domain.KnowledgeCandidate
 }
 
 type SubmitResult struct {
-	FeedstockID  string             `json:"feedstock_id"`
-	AssertionID  string             `json:"assertion_id"`
-	Verification VerificationStatus `json:"verification"`
-	Outcome      string             `json:"outcome"`
-	KnowledgeID  string             `json:"knowledge_id,omitempty"`
-	Targets      []string           `json:"targets,omitempty"`
+	FeedstockID string `json:"feedstock_id"`
+	Submitted   int    `json:"submitted"`
+}
+
+type ApplyResult struct {
+	FeedstockID string                    `json:"feedstock_id"`
+	Resolutions []domain.ResolutionResult `json:"resolutions"`
 }
 
 type CatalogEntry struct {
@@ -134,12 +114,23 @@ func Show(dataStore Repository, reads Invocation, ids []string) ([]ShownKnowledg
 	}
 	result := make([]ShownKnowledge, 0, len(ids))
 	for _, id := range ids {
-		if !slices.Contains(state.Catalog, id) {
-			return nil, fmt.Errorf("knowledge %s was not present in the invocation catalog", id)
+		cataloged := false
+		for _, subjectState := range state.Subjects {
+			if slices.Contains(subjectState.Catalog, id) {
+				cataloged = true
+				break
+			}
+		}
+		if !cataloged {
+			return nil, fmt.Errorf("knowledge %s was not present in an invocation catalog", id)
 		}
 		file, err := dataStore.FindKnowledge(id)
 		if err != nil {
 			return nil, err
+		}
+		subjectState, exists := state.Subjects[file.Knowledge.Subject]
+		if !exists || !slices.Contains(subjectState.Catalog, id) {
+			return nil, fmt.Errorf("knowledge %s was not present in its subject invocation catalog", id)
 		}
 		result = append(result, ShownKnowledge{
 			ID: id, Type: file.Knowledge.Type, Subject: file.Knowledge.Subject,
@@ -152,88 +143,65 @@ func Show(dataStore Repository, reads Invocation, ids []string) ([]ShownKnowledg
 	return result, nil
 }
 
-// Submit remains an internal compatibility entry point. The agent is not
-// granted this command; normal Brew applies the structured decision in its
-// parent process.
-func Submit(
-	ctx context.Context,
-	dataStore Repository,
-	reads Invocation,
-	input SubmitInput,
-) (SubmitResult, error) {
-	if !reads.IsAssertionInvocation() {
-		return SubmitResult{}, errors.New("knowledge submit is available only inside an assertion invocation")
+func Submit(dataStore Repository, reads Invocation, input SubmitInput) (SubmitResult, error) {
+	if !reads.IsBrewInvocation() {
+		return SubmitResult{}, errors.New("knowledge submit is available only inside a Brew invocation")
 	}
+	input.FeedstockID = strings.TrimSpace(input.FeedstockID)
 	if err := reads.ValidateFeedstock(input.FeedstockID); err != nil {
-		return SubmitResult{}, err
-	}
-	if err := reads.ValidateAssertion(input.AssertionID); err != nil {
 		return SubmitResult{}, err
 	}
 	state, err := reads.ReadState()
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	return Apply(ctx, dataStore, input, state)
+	if len(state.Submitted) >= domain.MaxKnowledgePerFeedstock {
+		return SubmitResult{}, fmt.Errorf(
+			"at most %d Knowledge candidates are allowed per feedstock",
+			domain.MaxKnowledgePerFeedstock,
+		)
+	}
+	candidate := normalizeCandidate(input.Knowledge)
+	if err := validateCandidateForSubmission(dataStore, candidate, state); err != nil {
+		return SubmitResult{}, err
+	}
+	statementKey := normalizedStatement(candidate.Statement)
+	for _, submitted := range state.Submitted {
+		if normalizedStatement(submitted.Statement) == statementKey {
+			return SubmitResult{}, errors.New("knowledge candidate duplicates a submitted statement")
+		}
+		if submitted.Resolution.Kind == ResolutionConflicts &&
+			candidate.Resolution.Kind == ResolutionConflicts &&
+			submitted.Resolution.KnowledgeIDs[0] == candidate.Resolution.KnowledgeIDs[0] {
+			return SubmitResult{}, fmt.Errorf(
+				"knowledge %s is already the conflicts target of a submitted candidate",
+				candidate.Resolution.KnowledgeIDs[0],
+			)
+		}
+	}
+	if err := reads.RecordSubmitted(candidate); err != nil {
+		return SubmitResult{}, err
+	}
+	return SubmitResult{FeedstockID: input.FeedstockID, Submitted: len(state.Submitted) + 1}, nil
 }
 
 func Apply(
 	ctx context.Context,
 	dataStore Repository,
-	input SubmitInput,
+	feedstockID string,
 	reads agent.ReadState,
-) (SubmitResult, error) {
-	input.FeedstockID = strings.TrimSpace(input.FeedstockID)
-	input.AssertionID = strings.TrimSpace(input.AssertionID)
-	result := SubmitResult{
-		FeedstockID: input.FeedstockID, AssertionID: input.AssertionID,
-		Verification: input.Verification,
-	}
+) (ApplyResult, error) {
+	feedstockID = strings.TrimSpace(feedstockID)
+	result := ApplyResult{FeedstockID: feedstockID}
 	err := dataStore.Transaction(ctx, func(tx Transaction) error {
-		feedstock, err := dataStore.GetFeedstock(input.FeedstockID)
+		feedstock, err := dataStore.GetFeedstock(feedstockID)
 		if err != nil {
 			return err
 		}
-		assertionIndex := slices.IndexFunc(feedstock.Assertions, func(assertion domain.Assertion) bool {
-			return assertion.ID == input.AssertionID
-		})
-		if assertionIndex < 0 {
-			return fmt.Errorf("assertion %s was not found in feedstock %s", input.AssertionID, input.FeedstockID)
+		if !feedstock.PendingBrew() {
+			return fmt.Errorf("feedstock %s is not pending Brew", feedstockID)
 		}
-		if slices.Contains(feedstock.BrewedAssertions, input.AssertionID) {
-			return fmt.Errorf("assertion %s is already brewed", input.AssertionID)
-		}
-		assertion := feedstock.Assertions[assertionIndex]
-		if input.ExpectedAssertion != nil && assertion != *input.ExpectedAssertion {
-			return ErrStaleDecision
-		}
-		if err := validateVerification(dataStore, assertion, input); err != nil {
-			return err
-		}
-		if input.Verification == VerificationRejected {
-			feedstock.Assertions = slices.Delete(feedstock.Assertions, assertionIndex, assertionIndex+1)
-			if err := tx.StageBrewedFeedstock(feedstock, time.Now().UTC()); err != nil {
-				return err
-			}
-			result.Outcome = "rejected"
-			return nil
-		}
-		if input.Verification == VerificationCorrected {
-			assertion = *input.CorrectedAssertion
-			feedstock.Assertions[assertionIndex] = assertion
-		}
-		if assertion.Subject == "" {
-			return errors.New("subjectless assertions cannot become Knowledge")
-		}
-		heads, digest, err := catalogSnapshot(dataStore, assertion.Subject)
-		if err != nil {
-			return err
-		}
-		if reads.Subject != assertion.Subject || reads.CatalogDigest == "" || reads.CatalogDigest != digest {
-			return ErrStaleDecision
-		}
-		targets, err := validateResolution(assertion, input.Resolution, reads, heads)
-		if err != nil {
+		if err := validateSubmittedCandidates(dataStore, reads); err != nil {
 			return err
 		}
 		all, warnings, err := dataStore.ListKnowledge()
@@ -253,82 +221,222 @@ func Apply(
 		}
 		now := time.Now().UTC()
 		resolved, err := domain.ResolveKnowledge(
-			feedstock, assertion, domainResolution(*input.Resolution), records, vocabulary, now,
+			feedstock,
+			reads.Submitted,
+			records,
+			vocabulary,
+			func() string { return "kn-" + uuid.NewString() },
+			now,
 		)
 		if err != nil {
 			return err
 		}
-		feedstock.BrewedAssertions = append(feedstock.BrewedAssertions, assertion.ID)
 		ids := make([]string, 0, len(resolved.Changed))
 		for id := range resolved.Changed {
 			ids = append(ids, id)
 		}
 		sort.Strings(ids)
 		for _, id := range ids {
-			record := resolved.Changed[id]
-			if err := tx.StageKnowledge(record); err != nil {
+			if err := tx.StageKnowledge(resolved.Changed[id]); err != nil {
 				return err
 			}
 		}
 		if err := tx.StageBrewedFeedstock(feedstock, now); err != nil {
 			return err
 		}
-		result.KnowledgeID = resolved.KnowledgeID
-		result.Outcome = resolved.Outcome
-		for _, target := range targets {
-			result.Targets = append(result.Targets, target.Knowledge.ID)
-		}
+		result.Resolutions = resolved.Results
 		return nil
 	})
 	return result, err
 }
 
-func validateVerification(dataStore Repository, current domain.Assertion, input SubmitInput) error {
+func validateSubmittedCandidates(dataStore Repository, state agent.ReadState) error {
+	if len(state.Submitted) > domain.MaxKnowledgePerFeedstock {
+		return fmt.Errorf(
+			"at most %d Knowledge candidates are allowed per feedstock",
+			domain.MaxKnowledgePerFeedstock,
+		)
+	}
+	seenStatements := make(map[string]struct{}, len(state.Submitted))
+	conflictsTargets := make(map[string]struct{})
 	vocabulary, err := knowledgeVocabulary(dataStore)
 	if err != nil {
 		return err
 	}
-	corrected, _, err := domain.VerifyAssertion(
-		current, input.Verification, input.CorrectedAssertion, input.Resolution != nil, vocabulary,
-	)
-	if err != nil {
-		return err
+	type subjectSnapshot struct {
+		heads  []KnowledgeDocument
+		digest string
 	}
-	if input.CorrectedAssertion != nil {
-		*input.CorrectedAssertion = corrected
+	snapshots := make(map[string]subjectSnapshot)
+	for index, candidate := range state.Submitted {
+		candidate = normalizeCandidate(candidate)
+		if err := validateCandidateBasics(candidate, vocabulary); err != nil {
+			return fmt.Errorf("knowledge candidate %d: %w", index+1, err)
+		}
+		snapshot, exists := snapshots[candidate.Subject]
+		if !exists {
+			heads, digest, snapshotErr := catalogSnapshot(dataStore, candidate.Subject)
+			if snapshotErr != nil {
+				return fmt.Errorf("knowledge candidate %d: %w", index+1, snapshotErr)
+			}
+			snapshot = subjectSnapshot{heads: heads, digest: digest}
+			snapshots[candidate.Subject] = snapshot
+		}
+		if err := validateCandidateReadState(
+			candidate,
+			state,
+			vocabulary,
+			snapshot.heads,
+			snapshot.digest,
+		); err != nil {
+			return fmt.Errorf("knowledge candidate %d: %w", index+1, err)
+		}
+		key := normalizedStatement(candidate.Statement)
+		if _, exists := seenStatements[key]; exists {
+			return fmt.Errorf("knowledge candidate %d duplicates a submitted statement", index+1)
+		}
+		seenStatements[key] = struct{}{}
+		if candidate.Resolution.Kind == ResolutionConflicts {
+			target := candidate.Resolution.KnowledgeIDs[0]
+			if _, exists := conflictsTargets[target]; exists {
+				return fmt.Errorf("knowledge %s is the conflicts target of multiple candidates", target)
+			}
+			conflictsTargets[target] = struct{}{}
+		}
 	}
 	return nil
 }
 
-func validateResolution(
-	assertion domain.Assertion,
-	resolution *ResolutionInput,
+func validateCandidateForSubmission(
+	dataStore Repository,
+	candidate domain.KnowledgeCandidate,
 	state agent.ReadState,
-	heads []KnowledgeDocument,
-) ([]KnowledgeDocument, error) {
-	if resolution == nil {
-		return nil, errors.New("knowledge resolution is required")
+) error {
+	vocabulary, err := knowledgeVocabulary(dataStore)
+	if err != nil {
+		return err
 	}
+	if err := validateCandidateBasics(candidate, vocabulary); err != nil {
+		return err
+	}
+	heads, digest, err := catalogSnapshot(dataStore, candidate.Subject)
+	if err != nil {
+		return err
+	}
+	return validateCandidateReadState(candidate, state, vocabulary, heads, digest)
+}
+
+func validateCandidateBasics(
+	candidate domain.KnowledgeCandidate,
+	vocabulary domain.Vocabulary,
+) error {
+	if err := vocabulary.ValidateType(candidate.Type); err != nil {
+		return fmt.Errorf("type: %w", err)
+	}
+	if err := vocabulary.ValidateSubject(candidate.Subject); err != nil {
+		return err
+	}
+	if candidate.Statement == "" {
+		return errors.New("knowledge statement is required")
+	}
+	if strings.Contains(candidate.Statement, "\r") {
+		return errors.New("knowledge statement must use LF line endings")
+	}
+	return nil
+}
+
+func validateCandidateReadState(
+	candidate domain.KnowledgeCandidate,
+	state agent.ReadState,
+	vocabulary domain.Vocabulary,
+	heads []KnowledgeDocument,
+	digest string,
+) error {
+	subjectState, exists := state.Subjects[candidate.Subject]
+	if !exists || strings.TrimSpace(subjectState.Digest) == "" {
+		return fmt.Errorf("subject %q has not been cataloged in this invocation", candidate.Subject)
+	}
+	if subjectState.Digest != digest {
+		return ErrStaleDecision
+	}
+	return validateResolution(candidate, subjectState, state.Inspected, heads, vocabulary)
+}
+
+func validateResolution(
+	candidate domain.KnowledgeCandidate,
+	subjectState agent.SubjectReadState,
+	inspected []string,
+	heads []KnowledgeDocument,
+	vocabulary domain.Vocabulary,
+) error {
+	resolution := candidate.Resolution
 	ids := domain.UniqueSorted(resolution.KnowledgeIDs)
 	if !slices.Equal(ids, resolution.KnowledgeIDs) {
-		return nil, errors.New("resolution knowledge_ids must be unique and sorted")
+		return errors.New("resolution knowledge_ids must be unique and sorted")
+	}
+	switch resolution.Kind {
+	case ResolutionNew:
+		if len(ids) != 0 || resolution.Draft != nil {
+			return errors.New("new requires no target and no draft")
+		}
+	case ResolutionEquivalent, ResolutionConflicts:
+		if len(ids) != 1 || resolution.Draft != nil {
+			return fmt.Errorf("%s requires exactly one target and no draft", resolution.Kind)
+		}
+	case ResolutionComplements:
+		if len(ids) != 1 || resolution.Draft == nil {
+			return errors.New("complements requires exactly one target and a draft")
+		}
+		draft := resolution.Draft
+		if err := vocabulary.ValidateType(draft.Type); err != nil {
+			return fmt.Errorf("merged draft type: %w", err)
+		}
+		if domain.MasterName(draft.Subject) != candidate.Subject {
+			return errors.New("merged draft must preserve the candidate subject")
+		}
+		if strings.TrimSpace(draft.Statement) == "" {
+			return errors.New("merged draft statement is required")
+		}
+		if strings.Contains(draft.Statement, "\r") {
+			return errors.New("merged draft statement must use LF line endings")
+		}
+	default:
+		return fmt.Errorf("invalid resolution kind %q", resolution.Kind)
 	}
 	byID := make(map[string]KnowledgeDocument, len(heads))
 	for _, file := range heads {
 		byID[file.Knowledge.ID] = file
 	}
-	targets := make([]KnowledgeDocument, 0, len(ids))
 	for _, id := range ids {
 		file, exists := byID[id]
-		if !exists || !slices.Contains(state.Catalog, id) || !slices.Contains(state.Inspected, id) {
-			return nil, fmt.Errorf("resolution target %s was not a current inspected Knowledge head", id)
+		if !exists || !slices.Contains(subjectState.Catalog, id) || !slices.Contains(inspected, id) {
+			return fmt.Errorf("resolution target %s was not a current inspected Knowledge head", id)
 		}
-		if file.Knowledge.Subject != assertion.Subject {
-			return nil, fmt.Errorf("knowledge %s belongs to subject %q", id, file.Knowledge.Subject)
+		if file.Knowledge.Subject != candidate.Subject {
+			return fmt.Errorf("knowledge %s belongs to subject %q", id, file.Knowledge.Subject)
 		}
-		targets = append(targets, file)
 	}
-	return targets, nil
+	return nil
+}
+
+func normalizeCandidate(candidate domain.KnowledgeCandidate) domain.KnowledgeCandidate {
+	candidate.Type = domain.KnowledgeType(strings.TrimSpace(string(candidate.Type)))
+	candidate.Subject = domain.MasterName(candidate.Subject)
+	candidate.Statement = strings.TrimSpace(candidate.Statement)
+	candidate.Rationale = strings.TrimSpace(candidate.Rationale)
+	if candidate.Resolution.Draft != nil {
+		draft := *candidate.Resolution.Draft
+		draft.Type = domain.KnowledgeType(strings.TrimSpace(string(draft.Type)))
+		draft.Subject = domain.MasterName(draft.Subject)
+		draft.Statement = strings.TrimSpace(draft.Statement)
+		draft.Rationale = strings.TrimSpace(draft.Rationale)
+		candidate.Resolution.Draft = &draft
+	}
+	return candidate
+}
+
+func normalizedStatement(statement string) string {
+	return strings.ToLower(strings.Join(strings.Fields(statement), " "))
 }
 
 func catalogSnapshot(dataStore Repository, subject string) ([]KnowledgeDocument, string, error) {
@@ -437,18 +545,4 @@ func knowledgeRecords(
 		}
 	}
 	return records, nil
-}
-
-func domainResolution(input ResolutionInput) domain.Resolution {
-	result := domain.Resolution{
-		Kind:         domain.ResolutionKind(input.Kind),
-		KnowledgeIDs: append([]string(nil), input.KnowledgeIDs...),
-	}
-	if input.Draft != nil {
-		result.Draft = &domain.KnowledgeDraft{
-			Type: input.Draft.Type, Subject: input.Draft.Subject,
-			Statement: input.Draft.Statement, Rationale: input.Draft.Rationale,
-		}
-	}
-	return result
 }

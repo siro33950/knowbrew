@@ -18,7 +18,6 @@ const (
 	APITokenEnvironment            = "KNOWBREW_API_KEY"
 	APIURLEnvironment              = "KNOWBREW_API_URL"
 	InvocationFeedstockEnvironment = "KNOWBREW_INVOCATION_FEEDSTOCK"
-	InvocationAssertionEnvironment = "KNOWBREW_INVOCATION_ASSERTION"
 	InvocationIDEnvironment        = "KNOWBREW_INVOCATION_ID"
 	DefaultLLMTimeout              = 5 * time.Minute
 	DefaultContextMaxTokens        = 2000

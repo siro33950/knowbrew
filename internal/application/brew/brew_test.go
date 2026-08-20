@@ -4,536 +4,429 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
-	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/siro33950/knowbrew/internal/adapters/config"
-	"github.com/siro33950/knowbrew/internal/adapters/invocation/state"
-	"github.com/siro33950/knowbrew/internal/adapters/llm"
+	"github.com/siro33950/knowbrew/internal/adapters/persistence/knowledgefmt"
 	"github.com/siro33950/knowbrew/internal/adapters/persistence/markdownstore"
 	"github.com/siro33950/knowbrew/internal/application/agent"
+	"github.com/siro33950/knowbrew/internal/application/diagnostic"
 	"github.com/siro33950/knowbrew/internal/domain"
 )
 
-func TestSubmitCreatesKnowledgeFromVerifiedAssertion(t *testing.T) {
-	dataStore := newBrewStore(t)
-	feedstock := writeAssertionFeedstock(t, dataStore, "fs-create", time.Now().UTC(), []domain.Assertion{
-		testAssertion("as-create", "knowbrew", "Knowledge IDs are independent of claim wording."),
-	})
-	setInvocation(t, dataStore, feedstock.ID, "as-create", "inv-create")
-	if _, err := catalogForTest(dataStore, "knowbrew"); err != nil {
+func TestSubmitRejectsDuplicateStatementInSameTurn(t *testing.T) {
+	dataStore := newBrewStore(t, "knowbrew")
+	feedstock := writePendingFeedstock(t, dataStore, "fs-duplicate", "knowbrew")
+	invocation := newMemoryInvocation(feedstock.ID)
+	if _, err := Catalog(repositoryForTest(dataStore), invocation, "knowbrew", nil); err != nil {
 		t.Fatal(err)
 	}
-	result, err := submitForTest(context.Background(), dataStore, SubmitInput{
-		FeedstockID: feedstock.ID, AssertionID: "as-create", Verification: VerificationVerified,
-		Resolution: &ResolutionInput{Kind: ResolutionNew},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != "created" || !strings.HasPrefix(result.KnowledgeID, "kn-") {
-		t.Fatalf("result = %#v", result)
-	}
-	file, err := dataStore.FindKnowledge(result.KnowledgeID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if file.Knowledge.ID != result.KnowledgeID ||
-		file.Knowledge.Subject != "knowbrew" ||
-		!slices.Equal(file.Knowledge.Assertions, []string{"fs-create#as-create"}) {
-		t.Fatalf("knowledge = %#v", file.Knowledge)
-	}
-	if !strings.Contains(file.Body, "## Claim\n\nKnowledge IDs") {
-		t.Fatalf("body = %q", file.Body)
-	}
-	updated, _, err := dataStore.FindFeedstock(feedstock.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(updated.BrewedAssertions, []string{"as-create"}) || updated.BrewedAt == nil {
-		t.Fatalf("brew state = %#v", updated)
-	}
-}
-
-func TestSubmitRejectsAssertionAndRecomputesFeedstockTypes(t *testing.T) {
-	dataStore := newBrewStore(t)
-	feedstock := writeAssertionFeedstock(t, dataStore, "fs-reject", time.Now().UTC(), []domain.Assertion{
-		testAssertion("as-reject", "knowbrew", "A request is knowledge."),
-		testAssertion("as-keep", "", "A later subject may make this assertion brewable."),
-	})
-	setInvocation(t, dataStore, feedstock.ID, "as-reject", "inv-reject")
-	result, err := submitForTest(context.Background(), dataStore, SubmitInput{
-		FeedstockID: feedstock.ID, AssertionID: "as-reject", Verification: VerificationRejected,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != "rejected" {
-		t.Fatalf("result = %#v", result)
-	}
-	updated, _, err := dataStore.FindFeedstock(feedstock.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(updated.Assertions) != 1 || updated.Assertions[0].ID != "as-keep" ||
-		!slices.Equal(updated.Types, []domain.KnowledgeType{"property"}) {
-		t.Fatalf("updated feedstock = %#v", updated)
-	}
-	if updated.BrewedAt != nil {
-		t.Fatal("subjectless remaining assertion must keep the feedstock open for later subject assignment")
-	}
-}
-
-func TestSubjectlessAssertionIsNotPendingOrMarkedBrewed(t *testing.T) {
-	dataStore := newBrewStore(t)
-	feedstock := writeAssertionFeedstock(t, dataStore, "fs-subjectless", time.Now().UTC(), []domain.Assertion{
-		testAssertion("as-subjectless", "", "This assertion has no semantic owner yet."),
-	})
-	if pending := collectPendingAssertions([]domain.Feedstock{feedstock}); len(pending) != 0 {
-		t.Fatalf("pending = %#v", pending)
-	}
-	if err := dataStore.WriteBrewedFeedstock(feedstock, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	updated, _, err := dataStore.FindFeedstock(feedstock.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated.BrewedAt != nil {
-		t.Fatal("subjectless-only feedstock was marked brewed")
-	}
-}
-
-func TestSubmitCorrectsAssertionWithoutChangingIdentityOrSubject(t *testing.T) {
-	dataStore := newBrewStore(t)
-	feedstock := writeAssertionFeedstock(t, dataStore, "fs-correct", time.Now().UTC(), []domain.Assertion{
-		testAssertion("as-correct", "knowbrew", "Knowledge uses wording as identity."),
-	})
-	bad := testAssertion("as-correct", "other", "Knowledge uses stable IDs independent of wording.")
-	setInvocation(t, dataStore, feedstock.ID, "as-correct", "inv-bad-subject")
-	if _, err := submitForTest(context.Background(), dataStore, SubmitInput{
-		FeedstockID: feedstock.ID, AssertionID: "as-correct", Verification: VerificationCorrected,
-		CorrectedAssertion: &bad, Resolution: &ResolutionInput{Kind: ResolutionNew},
-	}); err == nil || !strings.Contains(err.Error(), "cannot change an assertion subject") {
-		t.Fatalf("subject-change error = %v", err)
-	}
-
-	setInvocation(t, dataStore, feedstock.ID, "as-correct", "inv-correct")
-	if _, err := catalogForTest(dataStore, "knowbrew"); err != nil {
-		t.Fatal(err)
-	}
-	corrected := testAssertion("as-correct", "knowbrew", "Knowledge uses stable IDs independent of wording.")
-	result, err := submitForTest(context.Background(), dataStore, SubmitInput{
-		FeedstockID: feedstock.ID, AssertionID: "as-correct", Verification: VerificationCorrected,
-		CorrectedAssertion: &corrected, Resolution: &ResolutionInput{Kind: ResolutionNew},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	updated, _, err := dataStore.FindFeedstock(feedstock.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated.Assertions[0] != corrected || result.KnowledgeID == "" {
-		t.Fatalf("updated = %#v, result = %#v", updated.Assertions, result)
-	}
-}
-
-func TestEquivalentRequiresCatalogAndFullInspectionThenAddsEvidence(t *testing.T) {
-	dataStore := newBrewStore(t)
-	old := writeAssertionFeedstock(t, dataStore, "fs-old", time.Now().Add(-time.Hour).UTC(), []domain.Assertion{
-		testAssertion("as-old", "knowbrew", "Stable IDs preserve Knowledge identity."),
-	})
-	writeKnowledge(t, dataStore, "kn-existing", old, old.Assertions[0], false)
-	current := writeAssertionFeedstock(t, dataStore, "fs-equivalent", time.Now().UTC(), []domain.Assertion{
-		testAssertion("as-equivalent", "knowbrew", "Stable IDs preserve Knowledge identity."),
-	})
-	setInvocation(t, dataStore, current.ID, "as-equivalent", "inv-equivalent")
-	entries, err := catalogForTest(dataStore, "knowbrew")
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("catalog = %#v, err = %v", entries, err)
-	}
-	if _, err := catalogForTest(dataStore, "knowbrew"); err == nil ||
-		!strings.Contains(err.Error(), "already loaded subject catalog") {
-		t.Fatalf("second catalog error = %v", err)
-	}
-	if _, err := submitForTest(context.Background(), dataStore, SubmitInput{
-		FeedstockID: current.ID, AssertionID: "as-equivalent", Verification: VerificationVerified,
-		Resolution: &ResolutionInput{Kind: ResolutionEquivalent, KnowledgeIDs: []string{"kn-existing"}},
-	}); err == nil || !strings.Contains(err.Error(), "current inspected Knowledge head") {
-		t.Fatalf("uninspected relation error = %v", err)
-	}
-	if _, err := showForTest(dataStore, []string{"kn-existing"}); err != nil {
-		t.Fatal(err)
-	}
-	result, err := submitForTest(context.Background(), dataStore, SubmitInput{
-		FeedstockID: current.ID, AssertionID: "as-equivalent", Verification: VerificationVerified,
-		Resolution: &ResolutionInput{Kind: ResolutionEquivalent, KnowledgeIDs: []string{"kn-existing"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != "evidence_added" || result.KnowledgeID != "kn-existing" {
-		t.Fatalf("result = %#v", result)
-	}
-	file, err := dataStore.FindKnowledge("kn-existing")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Contains(file.Knowledge.Assertions, "fs-equivalent#as-equivalent") {
-		t.Fatalf("assertions = %#v", file.Knowledge.Assertions)
-	}
-}
-
-func TestComplementsCreatesOnePendingSuccessorAtomically(t *testing.T) {
-	dataStore := newBrewStore(t)
-	old := writeAssertionFeedstock(t, dataStore, "fs-part-one", time.Now().Add(-time.Hour).UTC(), []domain.Assertion{
-		testAssertion("as-part-one", "knowbrew", "Knowledge IDs are stable."),
-	})
-	writeKnowledge(t, dataStore, "kn-combined", old, old.Assertions[0], false)
-	current := writeAssertionFeedstock(t, dataStore, "fs-part-two", time.Now().UTC(), []domain.Assertion{
-		testAssertion("as-part-two", "knowbrew", "Knowledge filenames use their stable IDs."),
-	})
-	setInvocation(t, dataStore, current.ID, "as-part-two", "inv-complements")
-	_, _ = catalogForTest(dataStore, "knowbrew")
-	_, _ = showForTest(dataStore, []string{"kn-combined"})
-	draft := KnowledgeDraft{
-		Type: "property", Subject: "knowbrew",
-		Statement: "Knowledge has a stable ID and uses that ID as its filename.",
-		Rationale: "Identity therefore does not depend on mutable wording.",
-	}
-	result, err := submitForTest(context.Background(), dataStore, SubmitInput{
-		FeedstockID: current.ID, AssertionID: "as-part-two", Verification: VerificationVerified,
-		Resolution: &ResolutionInput{
-			Kind: ResolutionComplements, KnowledgeIDs: []string{"kn-combined"}, Draft: &draft,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != "merged" || result.KnowledgeID == "kn-combined" {
-		t.Fatalf("result = %#v", result)
-	}
-	file, err := dataStore.FindKnowledge(result.KnowledgeID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(file.Body, draft.Statement) || len(file.Knowledge.Assertions) != 2 {
-		t.Fatalf("merged = %#v\n%s", file.Knowledge, file.Body)
-	}
-}
-
-func TestComplementsFromSameFeedstockAreMerged(t *testing.T) {
-	dataStore := newBrewStore(t)
-	feedstock := writeAssertionFeedstock(t, dataStore, "fs-same-source", time.Now().UTC(), []domain.Assertion{
-		testAssertion("as-phase-count", "knowbrew", "Draw has three phases."),
-		testAssertion("as-phase-order", "knowbrew", "Summarization finishes before assertion extraction starts."),
-	})
-	writeKnowledge(t, dataStore, "kn-phases", feedstock, feedstock.Assertions[0], false)
-	setInvocation(t, dataStore, feedstock.ID, "as-phase-order", "inv-same-source-complements")
-	_, _ = catalogForTest(dataStore, "knowbrew")
-	_, _ = showForTest(dataStore, []string{"kn-phases"})
-	draft := KnowledgeDraft{
-		Type: "property", Subject: "knowbrew",
-		Statement: "Draw has three phases, with summarization completed before assertion extraction starts.",
-	}
-	result, err := submitForTest(context.Background(), dataStore, SubmitInput{
-		FeedstockID: feedstock.ID, AssertionID: "as-phase-order", Verification: VerificationVerified,
-		Resolution: &ResolutionInput{
-			Kind: ResolutionComplements, KnowledgeIDs: []string{"kn-phases"}, Draft: &draft,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != "merged" || result.KnowledgeID == "kn-phases" {
-		t.Fatalf("result = %#v", result)
-	}
-	file, err := dataStore.FindKnowledge(result.KnowledgeID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(file.Body, draft.Statement) || len(file.Knowledge.Assertions) != 2 {
-		t.Fatalf("merged = %#v\n%s", file.Knowledge, file.Body)
-	}
-}
-
-func TestConflictsWithEqualTimestampsUseStableSourceOrder(t *testing.T) {
-	dataStore := newBrewStore(t)
-	when := time.Now().UTC()
-	older := writeAssertionFeedstock(t, dataStore, "fs-order-a", when, []domain.Assertion{
-		testAssertion("as-order-a", "knowbrew", "Draw has two phases."),
-	})
-	writeKnowledge(t, dataStore, "kn-order", older, older.Assertions[0], false)
-	newer := writeAssertionFeedstock(t, dataStore, "fs-order-b", when, []domain.Assertion{
-		testAssertion("as-order-b", "knowbrew", "Draw has three phases."),
-	})
-	setInvocation(t, dataStore, newer.ID, "as-order-b", "inv-stable-source-order")
-	_, _ = catalogForTest(dataStore, "knowbrew")
-	_, _ = showForTest(dataStore, []string{"kn-order"})
-	result, err := submitForTest(context.Background(), dataStore, SubmitInput{
-		FeedstockID: newer.ID, AssertionID: "as-order-b", Verification: VerificationVerified,
-		Resolution: &ResolutionInput{Kind: ResolutionConflicts, KnowledgeIDs: []string{"kn-order"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != "replaced" || result.KnowledgeID == "kn-order" {
-		t.Fatalf("result = %#v", result)
-	}
-}
-
-func TestConflictsUsesNewestSourceTimeAndKeepsPendingIdentity(t *testing.T) {
-	dataStore := newBrewStore(t)
-	baseTime := time.Now().Add(-2 * time.Hour).UTC()
-	old := writeAssertionFeedstock(t, dataStore, "fs-old-rule", baseTime, []domain.Assertion{
-		testAssertion("as-old-rule", "knowbrew", "Draw uses five workers."),
-	})
-	writeKnowledge(t, dataStore, "kn-rule", old, old.Assertions[0], false)
-	newer := writeAssertionFeedstock(t, dataStore, "fs-new-rule", baseTime.Add(time.Hour), []domain.Assertion{
-		testAssertion("as-new-rule", "knowbrew", "Draw uses one worker."),
-	})
-	setInvocation(t, dataStore, newer.ID, "as-new-rule", "inv-new-conflict")
-	_, _ = catalogForTest(dataStore, "knowbrew")
-	_, _ = showForTest(dataStore, []string{"kn-rule"})
-	result, err := submitForTest(context.Background(), dataStore, SubmitInput{
-		FeedstockID: newer.ID, AssertionID: "as-new-rule", Verification: VerificationVerified,
-		Resolution: &ResolutionInput{Kind: ResolutionConflicts, KnowledgeIDs: []string{"kn-rule"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != "replaced" || result.KnowledgeID == "kn-rule" {
-		t.Fatalf("new result = %#v", result)
-	}
-	file, _ := dataStore.FindKnowledge(result.KnowledgeID)
-	if !strings.Contains(file.Body, "one worker") ||
-		!slices.Equal(file.Knowledge.Assertions, []string{"fs-new-rule#as-new-rule"}) {
-		t.Fatalf("newest replacement = %#v\n%s", file.Knowledge, file.Body)
-	}
-
-	historical := writeAssertionFeedstock(t, dataStore, "fs-historical", baseTime.Add(-time.Hour), []domain.Assertion{
-		testAssertion("as-historical", "knowbrew", "Draw uses ten workers."),
-	})
-	setInvocation(t, dataStore, historical.ID, "as-historical", "inv-old-conflict")
-	_, _ = catalogForTest(dataStore, "knowbrew")
-	_, _ = showForTest(dataStore, []string{result.KnowledgeID})
-	currentKnowledgeID := result.KnowledgeID
-	result, err = submitForTest(context.Background(), dataStore, SubmitInput{
-		FeedstockID: historical.ID, AssertionID: "as-historical", Verification: VerificationVerified,
-		Resolution: &ResolutionInput{Kind: ResolutionConflicts, KnowledgeIDs: []string{currentKnowledgeID}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != "historical_conflict_ignored" {
-		t.Fatalf("historical result = %#v", result)
-	}
-	file, _ = dataStore.FindKnowledge(currentKnowledgeID)
-	if !strings.Contains(file.Body, "one worker") {
-		t.Fatalf("historical assertion regressed Knowledge: %s", file.Body)
-	}
-}
-
-func TestActiveConflictCreatesPendingSuccessor(t *testing.T) {
-	dataStore := newBrewStore(t)
-	old := writeAssertionFeedstock(t, dataStore, "fs-active-old", time.Now().Add(-time.Hour).UTC(), []domain.Assertion{
-		testAssertion("as-active-old", "knowbrew", "The format is old."),
-	})
-	writeKnowledge(t, dataStore, "kn-active", old, old.Assertions[0], true)
-	current := writeAssertionFeedstock(t, dataStore, "fs-active-new", time.Now().UTC(), []domain.Assertion{
-		testAssertion("as-active-new", "knowbrew", "The format is new."),
-	})
-	setInvocation(t, dataStore, current.ID, "as-active-new", "inv-active-conflict")
-	_, _ = catalogForTest(dataStore, "knowbrew")
-	_, _ = showForTest(dataStore, []string{"kn-active"})
-	result, err := submitForTest(context.Background(), dataStore, SubmitInput{
-		FeedstockID: current.ID, AssertionID: "as-active-new", Verification: VerificationVerified,
-		Resolution: &ResolutionInput{Kind: ResolutionConflicts, KnowledgeIDs: []string{"kn-active"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.KnowledgeID == "kn-active" || result.Outcome != "replaced" {
-		t.Fatalf("result = %#v", result)
-	}
-	predecessor, _ := dataStore.FindKnowledge("kn-active")
-	successor, _ := dataStore.FindKnowledge(result.KnowledgeID)
-	if predecessor.Knowledge.Status != domain.StatusActive || predecessor.Knowledge.SupersededBy != "" ||
-		successor.Knowledge.Status != domain.StatusPending ||
-		!slices.Equal(successor.Knowledge.Supersedes, []string{"kn-active"}) {
-		t.Fatalf("predecessor = %#v, successor = %#v", predecessor.Knowledge, successor.Knowledge)
-	}
-}
-
-func TestCatalogUsesPendingBrewHeadInsteadOfItsActivePredecessor(t *testing.T) {
-	dataStore := newBrewStore(t)
-	old := writeAssertionFeedstock(t, dataStore, "fs-head-old", time.Now().Add(-time.Hour).UTC(), []domain.Assertion{
-		testAssertion("as-head-old", "knowbrew", "The active form is old."),
-	})
-	writeKnowledge(t, dataStore, "kn-head-active", old, old.Assertions[0], true)
-	proposal := writeAssertionFeedstock(t, dataStore, "fs-head-new", time.Now().UTC(), []domain.Assertion{
-		testAssertion("as-head-new", "knowbrew", "The proposed form is new."),
-	})
-	knowledge := domain.NewKnowledgeFromAssertion(proposal, proposal.Assertions[0], proposal.Timestamp)
-	knowledge.ID = "kn-head-pending"
-	knowledge.Supersedes = []string{"kn-head-active"}
-	if err := dataStore.WriteNewKnowledge(
-		knowledge.ID, knowledge, "## Claim\n\nThe proposed form is new.",
-	); err != nil {
-		t.Fatal(err)
-	}
-	setInvocation(t, dataStore, proposal.ID, "as-head-new", "inv-brew-head")
-	entries, err := catalogForTest(dataStore, "knowbrew")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 || entries[0].ID != "kn-head-pending" {
-		t.Fatalf("catalog = %#v", entries)
-	}
-}
-
-func TestApplyRejectsStaleCatalogWithoutChangingFeedstock(t *testing.T) {
-	dataStore := newBrewStore(t)
-	old := writeAssertionFeedstock(t, dataStore, "fs-stale-old", time.Now().Add(-time.Hour).UTC(), []domain.Assertion{
-		testAssertion("as-stale-old", "knowbrew", "The original statement is current."),
-	})
-	writeKnowledge(t, dataStore, "kn-stale", old, old.Assertions[0], false)
-	current := writeAssertionFeedstock(t, dataStore, "fs-stale-new", time.Now().UTC(), []domain.Assertion{
-		testAssertion("as-stale-new", "knowbrew", "The original statement is current."),
-	})
-	setInvocation(t, dataStore, current.ID, "as-stale-new", "inv-stale")
-	if _, err := catalogForTest(dataStore, "knowbrew"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := showForTest(dataStore, []string{"kn-stale"}); err != nil {
-		t.Fatal(err)
-	}
-	path, _ := dataStore.KnowledgePath("kn-stale")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data = []byte(strings.Replace(string(data), "The original statement is current.", "A human-edited statement is current.", 1))
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	reads, err := invocation.CurrentReadState(dataStore.Root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = applyForTest(context.Background(), dataStore, SubmitInput{
-		FeedstockID: current.ID, AssertionID: "as-stale-new", Verification: VerificationVerified,
-		Resolution: &ResolutionInput{Kind: ResolutionEquivalent, KnowledgeIDs: []string{"kn-stale"}},
-	}, agent.ReadState{
-		Subject: reads.Subject, Catalog: reads.Catalog,
-		CatalogDigest: reads.CatalogDigest, Inspected: reads.Inspected,
-	})
-	if !errors.Is(err, ErrStaleDecision) {
-		t.Fatalf("stale error = %v", err)
-	}
-	updated, _, err := dataStore.FindFeedstock(current.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(updated.BrewedAssertions) != 0 || updated.BrewedAt != nil {
-		t.Fatalf("stale decision changed Feedstock: %#v", updated)
-	}
-}
-
-func TestAssertionPromptIncludesSourceContextAndSemanticSubjectWithoutAliases(t *testing.T) {
-	dataStore := newBrewStore(t)
-	writingDirectory := filepath.Join(dataStore.Root, "masters", "writing")
-	for name, content := range map[string]string{
-		"common.md":    "COMMON WRITING RULE",
-		"knowledge.md": "KNOWLEDGE WRITING RULE",
-		"document.md":  "DOCUMENT WRITING RULE",
-	} {
-		if err := os.WriteFile(filepath.Join(writingDirectory, name), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{
-		Name: "agent-model", Definition: "Model-specific agent behavior.",
-		Includes: []string{"model behavior"}, Excludes: []string{"prompt architecture"},
-		Aliases: []string{"/private/machine/path"},
+	first := newCandidate("The Brew statement is independently identifiable.")
+	if _, err := Submit(repositoryForTest(dataStore), invocation, SubmitInput{
+		FeedstockID: feedstock.ID, Knowledge: first,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	source := filepath.Join(dataStore.Root, "session.jsonl")
-	writeClaudeDialogue(t, source, "session", "turn-prompt", "Use model-specific defaults.", "Verified model behavior.")
-	when := time.Now().UTC()
-	annotated := when
-	feedstock := domain.Feedstock{
-		Schema: domain.SchemaVersion, ID: "fs-prompt", TurnID: "turn-prompt",
-		Session: domain.SessionRef{ID: "session"}, Timestamp: when,
-		Agent: "claude", Summary: "summary", AnnotatedAt: &annotated,
-		Types:      []domain.KnowledgeType{"property"},
-		Assertions: []domain.Assertion{testAssertion("as-prompt", "agent-model", "Model defaults differ.")},
+	second := newCandidate("  the brew statement is independently identifiable.  ")
+	if _, err := Submit(repositoryForTest(dataStore), invocation, SubmitInput{
+		FeedstockID: feedstock.ID, Knowledge: second,
+	}); err == nil || !strings.Contains(err.Error(), "duplicates a submitted statement") {
+		t.Fatalf("error = %v", err)
 	}
-	if err := dataStore.WriteFeedstock(feedstock); err != nil {
+}
+
+func TestCatalogCanRunRepeatedlyPerSubjectAndDetectsStaleDigest(t *testing.T) {
+	dataStore := newBrewStore(t, "knowbrew", "other")
+	feedstock := writePendingFeedstock(t, dataStore, "fs-catalog", "knowbrew")
+	t.Setenv(config.InvocationIDEnvironment, "inv-catalog")
+	t.Setenv(config.InvocationFeedstockEnvironment, feedstock.ID)
+	guard := invocationForTest(dataStore)
+	for _, subject := range []string{"knowbrew", "other", "knowbrew"} {
+		if _, err := Catalog(repositoryForTest(dataStore), guard, subject, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := guard.ReadState()
+	if err != nil {
 		t.Fatal(err)
 	}
-	prompt, warnings, err := assertionPromptForTest(dataStore, testConfig(dataStore.Root), []domain.Feedstock{feedstock}, feedstock, feedstock.Assertions[0])
-	if err != nil || len(warnings) != 0 {
-		t.Fatalf("prompt err = %v, warnings = %#v", err, warnings)
+	if len(state.Subjects) != 2 || state.Subjects["knowbrew"].Digest == "" || state.Subjects["other"].Digest == "" {
+		t.Fatalf("state = %#v", state)
+	}
+	writeKnowledge(t, dataStore, "kn-new-catalog-entry", feedstock, "knowbrew", "A new catalog entry.")
+	_, err = Submit(repositoryForTest(dataStore), guard, SubmitInput{
+		FeedstockID: feedstock.ID,
+		Knowledge:   newCandidate("Another independent statement."),
+	})
+	if !errors.Is(err, ErrStaleDecision) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSubmitRejectsResolutionTargetThatWasNotShown(t *testing.T) {
+	dataStore := newBrewStore(t, "knowbrew")
+	feedstock := writePendingFeedstock(t, dataStore, "fs-unshown", "knowbrew")
+	writeKnowledge(t, dataStore, "kn-existing", feedstock, "knowbrew", "Existing statement.")
+	invocation := newMemoryInvocation(feedstock.ID)
+	if _, err := Catalog(repositoryForTest(dataStore), invocation, "knowbrew", nil); err != nil {
+		t.Fatal(err)
+	}
+	candidate := newCandidate("Existing statement.")
+	candidate.Resolution = domain.Resolution{
+		Kind: domain.ResolutionEquivalent, KnowledgeIDs: []string{"kn-existing"},
+	}
+	_, err := Submit(repositoryForTest(dataStore), invocation, SubmitInput{
+		FeedstockID: feedstock.ID, Knowledge: candidate,
+	})
+	if err == nil || !strings.Contains(err.Error(), "current inspected Knowledge head") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestShowRejectsUncatalogedKnowledgeBeforeReading(t *testing.T) {
+	dataStore := newBrewStore(t, "knowbrew")
+	repository := &trackingRepository{Repository: repositoryForTest(dataStore)}
+	_, err := Show(repository, newMemoryInvocation("fs-show"), []string{"kn-not-cataloged"})
+	if err == nil || !strings.Contains(err.Error(), "not present in an invocation catalog") {
+		t.Fatalf("error = %v", err)
+	}
+	if repository.findKnowledgeCalls != 0 {
+		t.Fatalf("FindKnowledge calls = %d", repository.findKnowledgeCalls)
+	}
+}
+
+func TestApplyCreatesMultipleKnowledgeAndBrewsFeedstockAtomically(t *testing.T) {
+	dataStore := newBrewStore(t, "knowbrew")
+	feedstock := writePendingFeedstock(t, dataStore, "fs-multiple", "knowbrew")
+	invocation := newMemoryInvocation(feedstock.ID)
+	if _, err := Catalog(repositoryForTest(dataStore), invocation, "knowbrew", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		"First independently maintainable statement.",
+		"Second independently maintainable statement.",
+	} {
+		if _, err := Submit(repositoryForTest(dataStore), invocation, SubmitInput{
+			FeedstockID: feedstock.ID, Knowledge: newCandidate(statement),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := invocation.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Apply(context.Background(), repositoryForTest(dataStore), feedstock.ID, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Resolutions) != 2 {
+		t.Fatalf("result = %#v", result)
+	}
+	files, warnings, err := dataStore.ListAllKnowledge()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(files) != 2 {
+		t.Fatalf("files = %#v, warnings = %#v", files, warnings)
+	}
+	for _, file := range files {
+		if _, err := uuid.Parse(strings.TrimPrefix(file.Knowledge.ID, "kn-")); err != nil {
+			t.Fatalf("knowledge ID %q is not UUID-backed: %v", file.Knowledge.ID, err)
+		}
+		if len(file.Knowledge.Feedstocks) != 1 || file.Knowledge.Feedstocks[0] != feedstock.ID {
+			t.Fatalf("knowledge = %#v", file.Knowledge)
+		}
+	}
+	stored, _, err := dataStore.FindFeedstock(feedstock.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.BrewedAt == nil {
+		t.Fatal("feedstock was not brewed")
+	}
+}
+
+func TestApplyRollsBackWholeTurnWhenOneCandidateFails(t *testing.T) {
+	dataStore := newBrewStore(t, "knowbrew")
+	feedstock := writePendingFeedstock(t, dataStore, "fs-rollback", "knowbrew")
+	writeKnowledge(t, dataStore, "kn-same-source", feedstock, "knowbrew", "Original statement.")
+	invocation := newMemoryInvocation(feedstock.ID)
+	if _, err := Catalog(repositoryForTest(dataStore), invocation, "knowbrew", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Show(repositoryForTest(dataStore), invocation, []string{"kn-same-source"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Submit(repositoryForTest(dataStore), invocation, SubmitInput{
+		FeedstockID: feedstock.ID, Knowledge: newCandidate("A valid new statement."),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	conflict := newCandidate("A conflicting statement from the same turn.")
+	conflict.Resolution = domain.Resolution{
+		Kind: domain.ResolutionConflicts, KnowledgeIDs: []string{"kn-same-source"},
+	}
+	if _, err := Submit(repositoryForTest(dataStore), invocation, SubmitInput{
+		FeedstockID: feedstock.ID, Knowledge: conflict,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := invocation.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Apply(context.Background(), repositoryForTest(dataStore), feedstock.ID, state)
+	if err == nil || !strings.Contains(err.Error(), "shares source feedstock") {
+		t.Fatalf("error = %v", err)
+	}
+	files, _, err := dataStore.ListAllKnowledge()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Knowledge.ID != "kn-same-source" {
+		t.Fatalf("files = %#v", files)
+	}
+	stored, _, err := dataStore.FindFeedstock(feedstock.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.BrewedAt != nil {
+		t.Fatalf("feedstock was partially brewed: %#v", stored)
+	}
+}
+
+func TestApplyWithNoSubmittedCandidatesMarksFeedstockBrewed(t *testing.T) {
+	dataStore := newBrewStore(t, "knowbrew")
+	feedstock := writePendingFeedstock(t, dataStore, "fs-empty-result", "knowbrew")
+	if _, err := Apply(
+		context.Background(), repositoryForTest(dataStore), feedstock.ID, agent.ReadState{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	stored, _, err := dataStore.FindFeedstock(feedstock.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.BrewedAt == nil {
+		t.Fatal("feedstock was not marked brewed")
+	}
+}
+
+func TestRunRejectsRegisteredCountMismatchWithoutBrewingFeedstock(t *testing.T) {
+	dataStore := newBrewStore(t, "knowbrew")
+	feedstock := writePendingFeedstock(t, dataStore, "fs-count-mismatch", "knowbrew")
+	repository := repositoryForTest(dataStore)
+	service := Service{
+		Repository: repository,
+		Lifecycle:  repository,
+		Dialogue:   dialogueMap{},
+		Runner: fixedRunner{result: agent.RunResult{
+			Output: json.RawMessage(`{"registered":0}`),
+			Reads: agent.ReadState{Submitted: []domain.KnowledgeCandidate{
+				newCandidate("A candidate was registered."),
+			}},
+		}},
+		RunLock: immediateRunLock{},
+	}
+	summary, err := service.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.FeedstocksFailed != 1 || summary.FeedstocksProcessed != 0 ||
+		summary.FeedstocksPending != 1 || len(summary.Failures) != 1 ||
+		!strings.Contains(summary.Failures[0].Reason, "reported 0 registered candidates") {
+		t.Fatalf("summary = %#v", summary)
+	}
+	stored, _, err := dataStore.FindFeedstock(feedstock.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.BrewedAt != nil {
+		t.Fatalf("feedstock was brewed: %#v", stored)
+	}
+}
+
+func TestRunAcceptsRegisteredZeroAndBrewsFeedstock(t *testing.T) {
+	dataStore := newBrewStore(t, "knowbrew")
+	feedstock := writePendingFeedstock(t, dataStore, "fs-count-zero", "knowbrew")
+	repository := repositoryForTest(dataStore)
+	service := Service{
+		Repository: repository,
+		Lifecycle:  repository,
+		Dialogue:   dialogueMap{},
+		Runner: fixedRunner{result: agent.RunResult{
+			Output: json.RawMessage(`{"registered":0}`),
+		}},
+		RunLock: immediateRunLock{},
+	}
+	summary, err := service.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.FeedstocksFailed != 0 || summary.FeedstocksProcessed != 1 ||
+		summary.FeedstocksPending != 0 {
+		t.Fatalf("summary = %#v", summary)
+	}
+	stored, _, err := dataStore.FindFeedstock(feedstock.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.BrewedAt == nil {
+		t.Fatal("feedstock was not brewed")
+	}
+}
+
+func TestValidateSubmittedCandidatesCachesVocabularyAndCatalogBySubject(t *testing.T) {
+	dataStore := newBrewStore(t, "knowbrew", "other")
+	base := repositoryForTest(dataStore)
+	_, knowbrewDigest, err := catalogSnapshot(base, "knowbrew")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherDigest, err := catalogSnapshot(base, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &trackingRepository{Repository: base}
+	state := agent.ReadState{
+		Subjects: map[string]agent.SubjectReadState{
+			"knowbrew": {Digest: knowbrewDigest},
+			"other":    {Digest: otherDigest},
+		},
+		Submitted: []domain.KnowledgeCandidate{
+			newCandidate("First knowbrew statement."),
+			newCandidate("Second knowbrew statement."),
+			newCandidateForSubject("other", "First other statement."),
+			newCandidateForSubject("other", "Second other statement."),
+		},
+	}
+	if err := validateSubmittedCandidates(repository, state); err != nil {
+		t.Fatal(err)
+	}
+	if repository.loadMastersCalls != 2 {
+		t.Fatalf("LoadMasters calls = %d, want 2", repository.loadMastersCalls)
+	}
+	if repository.listKnowledgeCalls != 2 {
+		t.Fatalf("ListKnowledge calls = %d, want 2", repository.listKnowledgeCalls)
+	}
+}
+
+func TestFeedstockPromptContainsTurnMastersAndNoDrawTypeCandidates(t *testing.T) {
+	dataStore := newBrewStore(t, "knowbrew")
+	target := writePendingFeedstock(t, dataStore, "fs-prompt", "knowbrew")
+	target.CWD = "/workspace/knowbrew"
+	target.Repo = "https://github.com/example/knowbrew.git"
+	reader := dialogueMap{target.ID: {
+		{Role: "user", Content: "Use UUID-backed Knowledge IDs."},
+		{Role: "assistant", Content: "Implemented UUID-backed IDs."},
+	}}
+	prompt, warnings, err := feedstockPrompt(
+		repositoryForTest(dataStore), reader, Settings{}, []domain.Feedstock{target}, target, "WRITING RULE",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
 	}
 	for _, required := range []string{
-		"Use model-specific defaults.", "Verified model behavior.",
-		"COMMON WRITING RULE", "KNOWLEDGE WRITING RULE",
-		`"definition": "Model-specific agent behavior."`,
-		`"includes"`, `"excludes"`, "Source verification", "Type qualification",
-		"knowledge_type_master as the sole authority", "Do not apply a separate hard-coded category",
-		"Subject candidates", "Full inspection",
-		"Verify statement and rationale independently",
-		"merely say the user requested, specified, confirmed, or explicitly stated",
-		"same type, subject, and statement with an empty rationale",
-		"A Knowledge unit answers one independently maintainable question",
-		"peer item on the same mapping axis",
-		"choose new even when it is closely related",
-		"do not use it to repeat the statement, mapping, or source history",
+		`"feedstock_id": "fs-prompt"`, `"summary":`, `"target_dialogue":`,
+		`"role": "user"`, `"role": "assistant"`, `"subject_master":`,
+		`"knowledge_type_master":`, `"cwd": "/workspace/knowbrew"`,
+		`"repo": "https://github.com/example/knowbrew.git"`, "WRITING RULE",
+		"statement that identifies its subject matter without the source dialogue",
+		`return {"registered": N}`, "run catalog again",
 	} {
 		if !strings.Contains(prompt, required) {
-			t.Fatalf("prompt missing %q:\n%s", required, prompt)
+			t.Fatalf("prompt does not contain %q:\n%s", required, prompt)
 		}
 	}
-	if strings.Contains(prompt, "/private/machine/path") {
-		t.Fatalf("machine alias leaked into semantic prompt:\n%s", prompt)
-	}
-	if strings.Contains(prompt, "DOCUMENT WRITING RULE") {
-		t.Fatalf("brew prompt contains document-only writing rules:\n%s", prompt)
-	}
-	for _, forbidden := range []string{
-		"applies_when", "task-local progress", "a workflow",
-		"Use concise natural prose for a single proposition",
-		"short lead sentence followed by a Markdown bullet list",
-		"never serialize peer items into one sentence by chaining conjunctions",
-		"Do not put headings inside statement",
-	} {
-		if strings.Contains(prompt, forbidden) {
-			t.Fatalf("prompt contains obsolete qualification %q:\n%s", forbidden, prompt)
-		}
+	if strings.Contains(prompt, `"types": [`) {
+		t.Fatalf("prompt contains Draw type candidates:\n%s", prompt)
 	}
 }
 
-func TestExistingKnowledgeReferenceDoesNotRepairBrewProgress(t *testing.T) {
-	dataStore := newBrewStore(t)
-	feedstock := writeAssertionFeedstock(t, dataStore, "fs-repair", time.Now().UTC(), []domain.Assertion{
-		testAssertion("as-repair", "knowbrew", "Evidence records support recovery."),
-	})
-	writeKnowledge(t, dataStore, "kn-repair", feedstock, feedstock.Assertions[0], false)
-	updated, _, _ := dataStore.FindFeedstock(feedstock.ID)
-	if len(updated.BrewedAssertions) != 0 || updated.BrewedAt != nil {
-		t.Fatalf("partial Knowledge was incorrectly accepted as completed: %#v", updated)
+func TestCollectPendingFeedstocksSkipsEmptyTypes(t *testing.T) {
+	now := time.Now().UTC()
+	annotated := now.Add(time.Minute)
+	withTypes := domain.Feedstock{
+		Schema: domain.SchemaVersion, ID: "fs-with", TurnID: "turn-with",
+		Session: domain.SessionRef{ID: "session"}, Timestamp: now, Agent: "codex",
+		Summary: "summary", Types: []domain.KnowledgeType{"property"}, AnnotatedAt: &annotated,
+	}
+	withoutTypes := withTypes
+	withoutTypes.ID = "fs-without"
+	withoutTypes.TurnID = "turn-without"
+	withoutTypes.Types = nil
+	pending := collectPendingFeedstocks([]domain.Feedstock{withoutTypes, withTypes})
+	if len(pending) != 1 || pending[0].ID != withTypes.ID {
+		t.Fatalf("pending = %#v", pending)
 	}
 }
 
-func newBrewStore(t *testing.T) *store.Store {
+type memoryInvocation struct {
+	feedstockID string
+	state       agent.ReadState
+}
+
+func newMemoryInvocation(feedstockID string) *memoryInvocation {
+	return &memoryInvocation{
+		feedstockID: feedstockID,
+		state:       agent.ReadState{Subjects: make(map[string]agent.SubjectReadState)},
+	}
+}
+
+func (invocation *memoryInvocation) ValidateFeedstock(id string) error {
+	if id != invocation.feedstockID {
+		return errors.New("wrong feedstock")
+	}
+	return nil
+}
+
+func (*memoryInvocation) IsBrewInvocation() bool { return true }
+
+func (invocation *memoryInvocation) RecordCatalog(subject string, ids []string, digest string) error {
+	previous := invocation.state.Subjects[subject]
+	invocation.state.Subjects[subject] = agent.SubjectReadState{
+		Catalog: domain.UniqueSorted(append(previous.Catalog, ids...)), Digest: digest,
+	}
+	return nil
+}
+
+func (invocation *memoryInvocation) RecordInspected(ids []string) error {
+	invocation.state.Inspected = domain.UniqueSorted(append(invocation.state.Inspected, ids...))
+	return nil
+}
+
+func (invocation *memoryInvocation) RecordSubmitted(candidate domain.KnowledgeCandidate) error {
+	invocation.state.Submitted = append(invocation.state.Submitted, candidate)
+	return nil
+}
+
+func (invocation *memoryInvocation) ReadState() (agent.ReadState, error) {
+	state := invocation.state
+	state.Subjects = make(map[string]agent.SubjectReadState, len(invocation.state.Subjects))
+	for subject, entry := range invocation.state.Subjects {
+		state.Subjects[subject] = agent.SubjectReadState{
+			Catalog: append([]string(nil), entry.Catalog...), Digest: entry.Digest,
+		}
+	}
+	state.Inspected = append([]string(nil), invocation.state.Inspected...)
+	state.Submitted = append([]domain.KnowledgeCandidate(nil), invocation.state.Submitted...)
+	return state, nil
+}
+
+type dialogueMap map[string][]domain.DialogueMessage
+
+func (reader dialogueMap) Read(id string) ([]domain.DialogueMessage, error) {
+	return append([]domain.DialogueMessage(nil), reader[id]...), nil
+}
+
+func newBrewStore(t *testing.T, subjects ...string) *store.Store {
 	t.Helper()
 	dataStore, err := store.New(t.TempDir())
 	if err != nil {
@@ -542,59 +435,26 @@ func newBrewStore(t *testing.T) *store.Store {
 	if err := dataStore.EnsureLayout(); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"knowbrew", "other"} {
-		if _, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{Name: name}); err != nil {
+	for _, subject := range subjects {
+		if _, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{
+			Name: subject, Definition: "Knowledge owned by " + subject + ".",
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return dataStore
 }
 
-func testConfig(root string) config.Config {
-	return config.Config{
-		Root: root,
-		Draw: config.Draw{Concurrency: 1, ContextTurns: 3},
-		LLM:  config.LLM{Backend: "codex-cli", BrewModel: "brew-model"},
-		Sources: []config.Source{{
-			Agent: "claude", Parser: "claude", Paths: []string{root},
-		}},
-	}
-}
-
-func testAssertion(id, subject, statement string) domain.Assertion {
-	return domain.Assertion{
-		ID: id, Type: "property", Subject: subject,
-		Statement: statement,
-	}
-}
-
-func writeAssertionFeedstock(
-	t *testing.T,
-	dataStore *store.Store,
-	id string,
-	when time.Time,
-	assertions []domain.Assertion,
-) domain.Feedstock {
+func writePendingFeedstock(t *testing.T, dataStore *store.Store, id, subject string) domain.Feedstock {
 	t.Helper()
-	annotated := when
-	types := make([]domain.KnowledgeType, 0, len(assertions))
-	for _, assertion := range assertions {
-		types = append(types, assertion.Type)
-	}
-	types, err := domain.NormalizeKnowledgeTypes(types)
-	if err != nil {
-		t.Fatal(err)
-	}
+	now := time.Now().UTC()
+	annotated := now.Add(time.Minute)
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: id, TurnID: "turn-" + id,
-		Session:   domain.SessionRef{ID: id},
-		Timestamp: when, Agent: "claude", Types: types, Summary: "summary",
-		AnnotatedAt: &annotated, Assertions: assertions,
+		Session: domain.SessionRef{ID: "session"}, Timestamp: now, Agent: "codex",
+		Summary: "A durable statement was established for " + subject + ".",
+		Types:   []domain.KnowledgeType{"property"}, AnnotatedAt: &annotated,
 	}
-	writeClaudeDialogue(
-		t, filepath.Join(dataStore.Root, id+".jsonl"), id,
-		feedstock.TurnID, "user source", "assistant source",
-	)
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
 	}
@@ -606,193 +466,79 @@ func writeKnowledge(
 	dataStore *store.Store,
 	id string,
 	feedstock domain.Feedstock,
-	assertion domain.Assertion,
-	approved bool,
+	subject,
+	statement string,
 ) {
 	t.Helper()
-	knowledge := domain.NewKnowledgeFromAssertion(feedstock, assertion, feedstock.Timestamp)
-	knowledge.ID = id
-	if err := dataStore.WriteNewKnowledge(id, knowledge, "## Claim\n\n"+assertion.Statement); err != nil {
-		t.Fatal(err)
-	}
-	if approved {
-		path, err := dataStore.KnowledgePath(id)
-		if err != nil {
-			t.Fatal(err)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		updated := strings.Replace(string(data), "approved: false", "approved: true", 1)
-		if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func setInvocation(t *testing.T, dataStore *store.Store, feedstockID, assertionID, invocationID string) {
-	t.Helper()
-	t.Setenv(config.InvocationIDEnvironment, invocationID)
-	t.Setenv(config.InvocationFeedstockEnvironment, feedstockID)
-	t.Setenv(config.InvocationAssertionEnvironment, assertionID)
-	invocation.Cleanup(dataStore.Root, invocationID)
-}
-
-func writeClaudeDialogue(t *testing.T, path, sessionID, turnID, user, assistant string) {
-	t.Helper()
-	lines := []map[string]any{
-		{
-			"type": "user", "uuid": turnID, "sessionId": sessionID, "timestamp": time.Now().UTC(),
-			"message": map[string]any{"role": "user", "content": user},
-		},
-		{
-			"type": "assistant", "sessionId": sessionID, "timestamp": time.Now().UTC(),
-			"message": map[string]any{"role": "assistant", "content": []map[string]any{{"type": "text", "text": assistant}}},
-		},
-	}
-	var encoded strings.Builder
-	for _, line := range lines {
-		data, err := json.Marshal(line)
-		if err != nil {
-			t.Fatal(err)
-		}
-		encoded.Write(data)
-		encoded.WriteByte('\n')
-	}
-	if err := os.WriteFile(path, []byte(encoded.String()), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-type resolvingRunner struct {
-	store       *store.Store
-	assertionID string
-	invocation  string
-}
-
-func (runner resolvingRunner) Run(
-	_ context.Context,
-	task llm.Task,
-	_ string,
-	_ string,
-) (llm.RunResult, error) {
-	if task != llm.TaskBrew {
-		return llm.RunResult{}, fmt.Errorf("task = %s", task)
-	}
-	_, digest, err := catalogSnapshot(repositoryForTest(runner.store), "knowbrew")
-	if err != nil {
-		return llm.RunResult{}, err
-	}
-	return llm.RunResult{
-		Output: json.RawMessage(`{"verification":"verified","corrected_assertion":null,"resolution":{"kind":"new","knowledge_ids":[],"draft":null}}`),
-		Usage:  llm.Usage{InputTokens: 100, OutputTokens: 10},
-		Reads:  agent.ReadState{Subject: "knowbrew", CatalogDigest: digest},
-	}, nil
-}
-
-func TestRunProcessesAssertionsOnceAndReportsAssertionProgress(t *testing.T) {
-	dataStore := newBrewStore(t)
-	feedstock := writeAssertionFeedstock(t, dataStore, "fs-run", time.Now().UTC(), []domain.Assertion{
-		testAssertion("as-run", "knowbrew", "Brew resolves one assertion at a time."),
-	})
-	cfg := testConfig(dataStore.Root)
-	var progress strings.Builder
-	summary, err := runForTest(context.Background(), cfg, resolvingRunner{
-		store: dataStore, assertionID: "as-run", invocation: "inv-run",
-	}, &progress)
+	body, err := knowledgefmt.Encode(statement, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.AssertionsProcessed != 1 || summary.Created != 1 || summary.Usage.TotalTokens != 110 {
-		t.Fatalf("summary = %#v", summary)
+	now := time.Now().UTC()
+	knowledge := domain.Knowledge{
+		ID: id, Created: now, Updated: now, EstablishedBy: feedstock.ID,
+		Type: "property", Subject: subject, Feedstocks: []string{feedstock.ID},
 	}
-	if !strings.Contains(progress.String(), "Brewing complete · 1/1 assertions") {
-		t.Fatalf("progress = %q", progress.String())
-	}
-	second, err := runForTest(context.Background(), cfg, resolvingRunner{
-		store: dataStore, assertionID: "as-run", invocation: "inv-run-second",
-	}, nil)
-	if err != nil {
+	if err := dataStore.WriteNewKnowledge(id, knowledge, body); err != nil {
 		t.Fatal(err)
-	}
-	if second.AssertionsProcessed != 0 || second.Created != 0 {
-		t.Fatalf("second summary = %#v", second)
-	}
-	updated, _, _ := dataStore.FindFeedstock(feedstock.ID)
-	if updated.BrewedAt == nil {
-		t.Fatal("feedstock was not completed")
 	}
 }
 
-func TestRunMaxProcessesBoundedAssertionsAndReportsBacklog(t *testing.T) {
-	dataStore := newBrewStore(t)
-	oldest := writeAssertionFeedstock(t, dataStore, "fs-max-old", time.Now().Add(-time.Hour).UTC(), []domain.Assertion{
-		testAssertion("as-max-old", "knowbrew", "Brew limits work by assertion."),
-	})
-	newest := writeAssertionFeedstock(t, dataStore, "fs-max-new", time.Now().UTC(), []domain.Assertion{
-		testAssertion("as-max-new", "knowbrew", "A later assertion remains pending."),
-	})
-	cfg := testConfig(dataStore.Root)
-	first, err := runWithOptionsForTest(
-		context.Background(), cfg,
-		resolvingRunner{store: dataStore}, nil, Options{Max: 1},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.AssertionsSelected != 1 || first.AssertionsProcessed != 1 || first.AssertionsPending != 1 {
-		t.Fatalf("first summary = %#v", first)
-	}
-	oldestAfter, _, err := dataStore.FindFeedstock(oldest.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	newestAfter, _, err := dataStore.FindFeedstock(newest.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if oldestAfter.BrewedAt == nil || newestAfter.BrewedAt != nil {
-		t.Fatalf("oldest brewed_at = %v, newest brewed_at = %v", oldestAfter.BrewedAt, newestAfter.BrewedAt)
-	}
+func newCandidate(statement string) domain.KnowledgeCandidate {
+	return newCandidateForSubject("knowbrew", statement)
+}
 
-	second, err := runWithOptionsForTest(
-		context.Background(), cfg,
-		resolvingRunner{store: dataStore}, nil, Options{Max: 1},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.AssertionsSelected != 1 || second.AssertionsProcessed != 1 || second.AssertionsPending != 0 {
-		t.Fatalf("second summary = %#v", second)
+func newCandidateForSubject(subject, statement string) domain.KnowledgeCandidate {
+	return domain.KnowledgeCandidate{
+		Type: "property", Subject: subject, Statement: statement,
+		Resolution: domain.Resolution{Kind: domain.ResolutionNew},
 	}
 }
 
-func TestRunRequiresPreBrewIndexSyncAndTreatsPostSyncAsWarning(t *testing.T) {
-	t.Run("pre-sync failure stops brew", func(t *testing.T) {
-		dataStore := newBrewStore(t)
-		index := &recordingSearchIndex{failOn: map[int]error{1: errors.New("pre-sync failed")}}
-		_, err := runForTest(context.Background(), testConfig(dataStore.Root), nil, nil, index)
-		if err == nil || !strings.Contains(err.Error(), "synchronize search index before brewing") {
-			t.Fatalf("pre-sync error = %v", err)
-		}
-		if index.calls != 1 {
-			t.Fatalf("pre-sync calls = %d, want 1", index.calls)
-		}
-	})
-
-	t.Run("post-sync failure is reported", func(t *testing.T) {
-		dataStore := newBrewStore(t)
-		index := &recordingSearchIndex{failOn: map[int]error{2: errors.New("post-sync failed")}}
-		summary, err := runForTest(context.Background(), testConfig(dataStore.Root), nil, nil, index)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if index.calls != 2 {
-			t.Fatalf("sync calls = %d, want 2", index.calls)
-		}
-		if len(summary.Warnings) != 1 || !strings.Contains(summary.Warnings[0].Message, "post-sync failed") {
-			t.Fatalf("post-sync warnings = %#v", summary.Warnings)
-		}
-	})
+type fixedRunner struct {
+	result agent.RunResult
 }
+
+func (runner fixedRunner) Run(context.Context, agent.Task, string, string) (agent.RunResult, error) {
+	return runner.result, nil
+}
+
+type immediateRunLock struct{}
+
+func (immediateRunLock) Lock(context.Context) (func() error, error) {
+	return func() error { return nil }, nil
+}
+
+type trackingRepository struct {
+	Repository
+	findKnowledgeCalls int
+	loadMastersCalls   int
+	listKnowledgeCalls int
+}
+
+func (repository *trackingRepository) FindKnowledge(id string) (KnowledgeDocument, error) {
+	repository.findKnowledgeCalls++
+	return repository.Repository.FindKnowledge(id)
+}
+
+func (repository *trackingRepository) LoadMasters(
+	kind string,
+) ([]domain.MasterEntry, []diagnostic.Warning, error) {
+	repository.loadMastersCalls++
+	return repository.Repository.LoadMasters(kind)
+}
+
+func (repository *trackingRepository) ListKnowledge() (
+	[]KnowledgeDocument,
+	[]diagnostic.Warning,
+	error,
+) {
+	repository.listKnowledgeCalls++
+	return repository.Repository.ListKnowledge()
+}
+
+var _ Invocation = (*memoryInvocation)(nil)
+var _ DialogueReader = dialogueMap{}
+var _ agent.Runner = fixedRunner{}
+var _ RunLock = immediateRunLock{}
+var _ Repository = (*trackingRepository)(nil)

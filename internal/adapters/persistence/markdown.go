@@ -55,10 +55,10 @@ func (repository *Markdown) SummarizeFeedstock(id, summary string) error {
 
 func (repository *Markdown) AnnotateFeedstock(
 	id string,
-	assertions []domain.Assertion,
+	types []domain.KnowledgeType,
 	when time.Time,
 ) error {
-	return repository.Store.AnnotateFeedstock(id, assertions, when)
+	return repository.Store.AnnotateFeedstock(id, types, when)
 }
 
 func (repository *Markdown) EnsureMaster(kind string, entry domain.MasterEntry) (bool, error) {

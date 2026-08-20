@@ -14,11 +14,15 @@ import (
 )
 
 type ReadState struct {
-	Subject           string   `json:"subject,omitempty"`
-	Catalog           []string `json:"catalog,omitempty"`
-	CatalogDigest     string   `json:"catalog_digest,omitempty"`
-	Inspected         []string `json:"inspected,omitempty"`
-	AnnotationContext bool     `json:"annotation_context,omitempty"`
+	Subjects          map[string]SubjectReadState `json:"subjects,omitempty"`
+	Inspected         []string                    `json:"inspected,omitempty"`
+	Submitted         []domain.KnowledgeCandidate `json:"submitted,omitempty"`
+	AnnotationContext bool                        `json:"annotation_context,omitempty"`
+}
+
+type SubjectReadState struct {
+	Catalog []string `json:"catalog,omitempty"`
+	Digest  string   `json:"digest"`
 }
 
 func RecordAnnotationContext(root string) error {
@@ -37,14 +41,6 @@ func ValidateFeedstock(feedstockID string) error {
 	expected := strings.TrimSpace(os.Getenv(config.InvocationFeedstockEnvironment))
 	if expected != "" && feedstockID != expected {
 		return fmt.Errorf("feedstock %s does not match invocation feedstock %s", feedstockID, expected)
-	}
-	return nil
-}
-
-func ValidateAssertion(assertionID string) error {
-	expected := strings.TrimSpace(os.Getenv(config.InvocationAssertionEnvironment))
-	if expected != "" && assertionID != expected {
-		return fmt.Errorf("assertion %s does not match invocation assertion %s", assertionID, expected)
 	}
 	return nil
 }
@@ -135,12 +131,14 @@ func RecordCatalog(root, subject string, ids []string, digest string) error {
 		return err
 	}
 	subject = domain.MasterName(subject)
-	if state.Subject != "" {
-		return fmt.Errorf("invocation already loaded subject catalog %q", state.Subject)
+	if state.Subjects == nil {
+		state.Subjects = make(map[string]SubjectReadState)
 	}
-	state.Subject = subject
-	state.Catalog = domain.UniqueSorted(ids)
-	state.CatalogDigest = strings.TrimSpace(digest)
+	previous := state.Subjects[subject]
+	state.Subjects[subject] = SubjectReadState{
+		Catalog: domain.UniqueSorted(append(previous.Catalog, ids...)),
+		Digest:  strings.TrimSpace(digest),
+	}
 	return writeState(path, state)
 }
 
@@ -150,6 +148,15 @@ func RecordInspected(root string, ids []string) error {
 		return err
 	}
 	state.Inspected = domain.UniqueSorted(append(state.Inspected, ids...))
+	return writeState(path, state)
+}
+
+func RecordSubmitted(root string, candidate domain.KnowledgeCandidate) error {
+	state, path, err := readState(root)
+	if err != nil {
+		return err
+	}
+	state.Submitted = append(state.Submitted, candidate)
 	return writeState(path, state)
 }
 

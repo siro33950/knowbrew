@@ -12,14 +12,7 @@ import (
 
 type Annotation struct {
 	FeedstockID string
-	Assertions  []AssertionInput
-}
-
-type AssertionInput struct {
-	Type      domain.KnowledgeType `json:"type"`
-	Subject   string               `json:"subject"`
-	Statement string               `json:"statement"`
-	Rationale string               `json:"rationale,omitempty"`
+	Types       []domain.KnowledgeType
 }
 
 func Annotate(
@@ -61,19 +54,17 @@ func Annotate(
 			if err != nil {
 				return err
 			}
-			subjectEntries, _, err := dataStore.LoadMasters("subjects")
+			types, err := domain.NormalizeKnowledgeTypes(annotation.Types)
 			if err != nil {
 				return err
 			}
-			assertions, err := buildAssertions(
-				annotation.FeedstockID,
-				annotation.Assertions,
-				domain.NewVocabulary(typeEntries, subjectEntries),
-			)
-			if err != nil {
-				return err
+			vocabulary := domain.NewVocabulary(typeEntries, nil)
+			for _, value := range types {
+				if err := vocabulary.ValidateType(value); err != nil {
+					return err
+				}
 			}
-			return dataStore.AnnotateFeedstock(annotation.FeedstockID, assertions, now)
+			return dataStore.AnnotateFeedstock(annotation.FeedstockID, types, now)
 		})
 	})
 	return 0, err
@@ -121,19 +112,4 @@ func Summarize(
 			return dataStore.SummarizeFeedstock(feedstockID, summary)
 		})
 	})
-}
-
-func buildAssertions(
-	feedstockID string,
-	inputs []AssertionInput,
-	vocabulary domain.Vocabulary,
-) ([]domain.Assertion, error) {
-	drafts := make([]domain.AssertionDraft, 0, len(inputs))
-	for _, input := range inputs {
-		drafts = append(drafts, domain.AssertionDraft{
-			Type: input.Type, Subject: input.Subject, Statement: input.Statement,
-			Rationale: input.Rationale,
-		})
-	}
-	return domain.BuildAssertions(feedstockID, drafts, vocabulary)
 }

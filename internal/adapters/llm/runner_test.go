@@ -202,7 +202,7 @@ func TestCommandDiagnosticHasNoEmptyHeadings(t *testing.T) {
 func TestCommandRunnerStreamsBackendOutputOnlyWhenVerbose(t *testing.T) {
 	binDir := t.TempDir()
 	writeExecutable(t, filepath.Join(binDir, "claude"), `#!/bin/sh
-printf '%s\n' '{"structured_output":{"assertions":[]},"marker":"backend stdout marker"}'
+printf '%s\n' '{"structured_output":{"types":[]},"marker":"backend stdout marker"}'
 echo "backend stderr marker" >&2
 `)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -247,7 +247,7 @@ echo "backend stderr marker" >&2
 func TestCommandRunnerReportsBackendUsage(t *testing.T) {
 	binDir := t.TempDir()
 	writeExecutable(t, filepath.Join(binDir, "claude"), `#!/bin/sh
-printf '%s\n' '{"type":"result","structured_output":{"assertions":[]},"usage":{"input_tokens":100,"cache_creation_input_tokens":200,"cache_read_input_tokens":300,"output_tokens":40}}'
+printf '%s\n' '{"type":"result","structured_output":{"types":[]},"usage":{"input_tokens":100,"cache_creation_input_tokens":200,"cache_read_input_tokens":300,"output_tokens":40}}'
 `)
 	writeExecutable(t, filepath.Join(binDir, "codex"), `#!/bin/sh
 result_path=""
@@ -255,7 +255,7 @@ while [ "$#" -gt 0 ]; do
   if [ "$1" = "--output-last-message" ]; then result_path="$2"; shift 2; continue; fi
   shift
 done
-printf '%s\n' '{"assertions":[]}' > "$result_path"
+printf '%s\n' '{"types":[]}' > "$result_path"
 printf '%s\n' '{"type":"thread.started","thread_id":"thread-1"}'
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":450,"cached_input_tokens":300,"output_tokens":50}}'
 `)
@@ -316,21 +316,21 @@ func TestClippedAPIPreservesUTF8(t *testing.T) {
 	}
 }
 
-func TestClaudeBrewPermissionsExposeOnlyCatalogAndShow(t *testing.T) {
+func TestClaudeBrewPermissionsExposeFeedstockBrewTools(t *testing.T) {
 	normalization := strings.Join(claudeAllowedTools("/bin/knowbrew", TaskBrew), "\n")
 	for _, required := range []string{
 		"/bin/knowbrew knowledge catalog *",
 		"/bin/knowbrew knowledge show *",
+		"/bin/knowbrew knowledge submit *",
+		"/bin/knowbrew feedstock context *",
 	} {
 		if !strings.Contains(normalization, required) {
 			t.Fatalf("normalization permissions do not contain %q:\n%s", required, normalization)
 		}
 	}
 	for _, forbidden := range []string{
-		"Bash(/bin/knowbrew feedstock ",
 		"Bash(/bin/knowbrew show *",
 		"feedstock annotate",
-		"knowledge submit",
 		"knowledge --include-pending",
 		"knowledge --include-retired",
 	} {

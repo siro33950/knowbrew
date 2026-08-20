@@ -56,7 +56,6 @@ type knowledgeFrontmatter struct {
 	Type          domain.KnowledgeType `yaml:"type"`
 	Subject       string               `yaml:"subject,omitempty"`
 	Feedstocks    []string             `yaml:"feedstocks"`
-	Assertions    []string             `yaml:"assertions,omitempty"`
 	Approved      *bool                `yaml:"approved,omitempty"`
 	Supersedes    []string             `yaml:"supersedes,omitempty"`
 	SupersededBy  string               `yaml:"superseded_by,omitempty"`
@@ -70,21 +69,19 @@ type knowledgeFrontmatter struct {
 }
 
 type readableFeedstockFrontmatter struct {
-	Schema           int                    `yaml:"schema"`
-	ID               string                 `yaml:"id"`
-	TurnID           string                 `yaml:"turn_id"`
-	Session          readableSessionRef     `yaml:"session"`
-	Timestamp        time.Time              `yaml:"timestamp"`
-	Agent            string                 `yaml:"agent"`
-	CWD              string                 `yaml:"cwd,omitempty"`
-	Repo             string                 `yaml:"repo,omitempty"`
-	Branch           string                 `yaml:"branch,omitempty"`
-	Types            []domain.KnowledgeType `yaml:"types"`
-	Subjects         []string               `yaml:"subjects"`
-	Summary          string                 `yaml:"summary"`
-	AnnotatedAt      *time.Time             `yaml:"annotated_at,omitempty"`
-	BrewedAt         *time.Time             `yaml:"brewed_at,omitempty"`
-	BrewedAssertions []string               `yaml:"brewed_assertions,omitempty"`
+	Schema      int                    `yaml:"schema"`
+	ID          string                 `yaml:"id"`
+	TurnID      string                 `yaml:"turn_id"`
+	Session     readableSessionRef     `yaml:"session"`
+	Timestamp   time.Time              `yaml:"timestamp"`
+	Agent       string                 `yaml:"agent"`
+	CWD         string                 `yaml:"cwd,omitempty"`
+	Repo        string                 `yaml:"repo,omitempty"`
+	Branch      string                 `yaml:"branch,omitempty"`
+	Types       []domain.KnowledgeType `yaml:"types"`
+	Summary     string                 `yaml:"summary"`
+	AnnotatedAt *time.Time             `yaml:"annotated_at,omitempty"`
+	BrewedAt    *time.Time             `yaml:"brewed_at,omitempty"`
 }
 
 type readableSessionRef struct {
@@ -98,9 +95,7 @@ func (header readableFeedstockFrontmatter) domainFeedstock() domain.Feedstock {
 		Session:   domain.SessionRef{ID: header.Session.ID},
 		Timestamp: header.Timestamp, Agent: header.Agent, CWD: header.CWD,
 		Repo: header.Repo, Branch: header.Branch, Types: header.Types,
-		Subjects: header.Subjects, Summary: header.Summary,
-		AnnotatedAt: header.AnnotatedAt, BrewedAt: header.BrewedAt,
-		BrewedAssertions: header.BrewedAssertions,
+		Summary: header.Summary, AnnotatedAt: header.AnnotatedAt, BrewedAt: header.BrewedAt,
 	}
 }
 
@@ -112,7 +107,6 @@ type writableKnowledgeFrontmatter struct {
 	Type          domain.KnowledgeType `yaml:"type"`
 	Subject       string               `yaml:"subject,omitempty"`
 	Feedstocks    []string             `yaml:"feedstocks"`
-	Assertions    []string             `yaml:"assertions,omitempty"`
 	Approved      bool                 `yaml:"approved"`
 	Supersedes    []string             `yaml:"supersedes,omitempty"`
 	SupersededBy  string               `yaml:"superseded_by,omitempty"`
@@ -200,13 +194,11 @@ func (s *Store) FeedstockPath(feedstock domain.Feedstock) (string, error) {
 }
 
 func (s *Store) WriteFeedstock(feedstock domain.Feedstock) error {
-	assertions, types, err := s.normalizeAssertions(feedstock.Assertions)
+	types, err := s.NormalizeKnowledgeTypes(feedstock.Types)
 	if err != nil {
-		return fmt.Errorf("feedstock assertions: %w", err)
+		return fmt.Errorf("feedstock types: %w", err)
 	}
-	feedstock.Assertions = assertions
 	feedstock.Types = types
-	feedstock.Subjects = subjectsFromAssertions(assertions)
 	if err := domain.ValidateFeedstock(feedstock); err != nil {
 		return err
 	}
@@ -226,11 +218,7 @@ func (s *Store) WriteFeedstock(feedstock domain.Feedstock) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	body, err := encodeAssertions(feedstock.Assertions)
-	if err != nil {
-		return err
-	}
-	data, err := encodeWithWikilinks(feedstock, body, "types", "subjects")
+	data, err := encodeWithWikilinks(feedstock, "", "types")
 	if err != nil {
 		return err
 	}
@@ -243,20 +231,11 @@ func (s *Store) ReadFeedstock(path string) (domain.Feedstock, error) {
 		return domain.Feedstock{}, err
 	}
 	var header readableFeedstockFrontmatter
-	body, err := frontmatter.Decode(data, &header)
+	_, err = frontmatter.Decode(data, &header)
 	if err != nil {
 		return domain.Feedstock{}, fmt.Errorf("read feedstock %s: %w", path, err)
 	}
 	feedstock := header.domainFeedstock()
-	feedstock.Assertions, err = decodeAssertions(body)
-	if err != nil {
-		return domain.Feedstock{}, fmt.Errorf("read feedstock %s: %w", path, err)
-	}
-	feedstock.Subjects = domain.NormalizeMasterNames(feedstock.Subjects)
-	feedstock.Assertions, _, err = s.normalizeAssertions(feedstock.Assertions)
-	if err != nil {
-		return domain.Feedstock{}, fmt.Errorf("validate feedstock %s: assertions: %w", path, err)
-	}
 	feedstock.Types, err = s.NormalizeKnowledgeTypes(feedstock.Types)
 	if err != nil {
 		return domain.Feedstock{}, fmt.Errorf("validate feedstock %s: feedstock types: %w", path, err)
@@ -329,47 +308,10 @@ func (s *Store) WriteBrewedFeedstock(feedstock domain.Feedstock, when time.Time)
 	if current.AnnotatedAt == nil {
 		return fmt.Errorf("feedstock %s is not annotated", feedstock.ID)
 	}
-	assertions := append([]domain.Assertion(nil), feedstock.Assertions...)
-	brewedAssertions := append([]string(nil), feedstock.BrewedAssertions...)
-	feedstock = current
-	feedstock.Assertions = assertions
-	feedstock.BrewedAssertions = brewedAssertions
-	feedstock.Types = nil
-	feedstock.Assertions, feedstock.Types, err = s.normalizeAssertions(feedstock.Assertions)
-	if err != nil {
-		return fmt.Errorf("feedstock assertions: %w", err)
-	}
-	feedstock.Subjects = subjectsFromAssertions(feedstock.Assertions)
-	feedstock.BrewedAssertions = domain.UniqueSorted(feedstock.BrewedAssertions)
-	processed := make(map[string]struct{}, len(feedstock.BrewedAssertions))
-	for _, assertionID := range feedstock.BrewedAssertions {
-		processed[assertionID] = struct{}{}
-	}
-	complete := true
-	for _, assertion := range feedstock.Assertions {
-		if assertion.Subject == "" {
-			continue
-		}
-		if _, exists := processed[assertion.ID]; !exists {
-			complete = false
-			break
-		}
-	}
-	if complete && (len(feedstock.Assertions) == 0 || len(feedstock.BrewedAssertions) > 0) {
-		if feedstock.BrewedAt == nil {
-			feedstock.BrewedAt = &when
-		}
-	} else {
-		feedstock.BrewedAt = nil
-	}
-	if err := domain.ValidateFeedstock(feedstock); err != nil {
+	if err := current.ApplyBrewProgress(when); err != nil {
 		return err
 	}
-	body, err := encodeAssertions(feedstock.Assertions)
-	if err != nil {
-		return err
-	}
-	data, err := encodeWithWikilinks(feedstock, body, "types", "subjects")
+	data, err := encodeWithWikilinks(current, "", "types")
 	if err != nil {
 		return err
 	}
@@ -387,22 +329,16 @@ func (s *Store) SummarizeFeedstock(id, summary string) error {
 	if err := domain.ValidateFeedstock(feedstock); err != nil {
 		return err
 	}
-	body, err := encodeAssertions(feedstock.Assertions)
-	if err != nil {
-		return err
-	}
-	data, err := encodeWithWikilinks(feedstock, body, "types", "subjects")
+	data, err := encodeWithWikilinks(feedstock, "", "types")
 	if err != nil {
 		return err
 	}
 	return fsutil.AtomicWrite(path, data, 0o644)
 }
 
-// AnnotateFeedstock applies assertions and annotated_at to a summarized
-// feedstock. Machine fields and the existing summary are retained.
 func (s *Store) AnnotateFeedstock(
 	id string,
-	assertions []domain.Assertion,
+	types []domain.KnowledgeType,
 	when time.Time,
 ) error {
 	feedstock, path, err := s.FindFeedstock(id)
@@ -415,18 +351,14 @@ func (s *Store) AnnotateFeedstock(
 	if strings.TrimSpace(feedstock.Summary) == "" {
 		return fmt.Errorf("feedstock %s must be summarized before annotation", id)
 	}
-	assertions, _, err = s.normalizeAssertions(assertions)
+	types, err = s.NormalizeKnowledgeTypes(types)
 	if err != nil {
-		return fmt.Errorf("feedstock assertions: %w", err)
+		return fmt.Errorf("feedstock types: %w", err)
 	}
-	if err := feedstock.ApplyAnnotation(assertions, when); err != nil {
+	if err := feedstock.ApplyAnnotation(types, when); err != nil {
 		return err
 	}
-	body, err := encodeAssertions(feedstock.Assertions)
-	if err != nil {
-		return err
-	}
-	data, err := encodeWithWikilinks(feedstock, body, "types", "subjects")
+	data, err := encodeWithWikilinks(feedstock, "", "types")
 	if err != nil {
 		return err
 	}
@@ -463,7 +395,6 @@ func (s *Store) WriteNewKnowledge(id string, knowledge domain.Knowledge, body st
 	knowledge.Subject = domain.MasterName(knowledge.Subject)
 	knowledge.EstablishedBy = domain.MasterName(knowledge.EstablishedBy)
 	knowledge.Feedstocks = normalizeFeedstockLinks(knowledge.Feedstocks)
-	knowledge.Assertions = normalizeAssertionLinks(knowledge.Assertions)
 	knowledge.Supersedes = normalizeKnowledgeLinks(knowledge.Supersedes)
 	if slices.Contains(knowledge.Supersedes, id) {
 		return errors.New("knowledge cannot supersede itself")
@@ -480,18 +411,6 @@ func (s *Store) WriteNewKnowledge(id string, knowledge domain.Knowledge, body st
 	for _, feedstock := range knowledge.Feedstocks {
 		if _, _, err := s.FindFeedstock(feedstock); err != nil {
 			return fmt.Errorf("invalid feedstock %s: %w", feedstock, err)
-		}
-	}
-	for _, reference := range knowledge.Assertions {
-		feedstockID, assertionID, _ := strings.Cut(reference, "#")
-		feedstock, _, err := s.FindFeedstock(feedstockID)
-		if err != nil {
-			return fmt.Errorf("invalid assertion reference %s: %w", reference, err)
-		}
-		if !slices.ContainsFunc(feedstock.Assertions, func(assertion domain.Assertion) bool {
-			return assertion.ID == assertionID
-		}) {
-			return fmt.Errorf("invalid assertion reference %s: assertion was not found", reference)
 		}
 	}
 	path, err := s.KnowledgePath(id)
@@ -529,7 +448,6 @@ func (s *Store) ReadKnowledge(path string) (domain.Knowledge, string, error) {
 		knowledge.ID = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	}
 	knowledge.Feedstocks = normalizeFeedstockLinks(knowledge.Feedstocks)
-	knowledge.Assertions = normalizeAssertionLinks(knowledge.Assertions)
 	knowledge.Supersedes = normalizeKnowledgeLinks(knowledge.Supersedes)
 	knowledge.SupersededBy = domain.MasterName(knowledge.SupersededBy)
 	types, err := s.NormalizeKnowledgeTypes([]domain.KnowledgeType{knowledge.Type})
@@ -612,59 +530,6 @@ func (s *Store) FindKnowledge(id string) (KnowledgeFile, error) {
 		}
 	}
 	return KnowledgeFile{}, fmt.Errorf("knowledge %q was not found", id)
-}
-
-func (s *Store) AddKnowledgeAssertion(
-	id,
-	feedstockID,
-	assertionID string,
-	when time.Time,
-) error {
-	file, err := s.FindKnowledge(id)
-	if err != nil {
-		return err
-	}
-	feedstock, _, err := s.FindFeedstock(feedstockID)
-	if err != nil {
-		return err
-	}
-	found := false
-	for _, assertion := range feedstock.Assertions {
-		if assertion.ID == assertionID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return fmt.Errorf("assertion %s was not found in feedstock %s", assertionID, feedstockID)
-	}
-	reference := feedstockID + "#" + assertionID
-	file.Knowledge.Feedstocks = normalizeFeedstockLinks(
-		append(file.Knowledge.Feedstocks, feedstockID),
-	)
-	file.Knowledge.Assertions = normalizeAssertionLinks(
-		append(file.Knowledge.Assertions, reference),
-	)
-	file.Knowledge.Updated = when
-	data, err := encodeKnowledge(file.Knowledge, file.Body)
-	if err != nil {
-		return err
-	}
-	return fsutil.AtomicWrite(file.Path, data, 0o644)
-}
-
-func (s *Store) KnowledgeByAssertion(reference string) (KnowledgeFile, bool, error) {
-	reference = domain.MasterName(reference)
-	files, _, err := s.ListAllKnowledge()
-	if err != nil {
-		return KnowledgeFile{}, false, err
-	}
-	for _, file := range files {
-		if slices.Contains(file.Knowledge.Assertions, reference) {
-			return file, true, nil
-		}
-	}
-	return KnowledgeFile{}, false, nil
 }
 
 func (s *Store) AddKnowledgeFeedstocks(id string, feedstocks []string, when time.Time) error {
@@ -977,29 +842,6 @@ func (s *Store) ValidateKnowledgeType(value domain.KnowledgeType) error {
 	return err
 }
 
-func (s *Store) normalizeAssertions(
-	values []domain.Assertion,
-) ([]domain.Assertion, []domain.KnowledgeType, error) {
-	assertions := append([]domain.Assertion(nil), values...)
-	types := make([]domain.KnowledgeType, 0, len(assertions))
-	for index := range assertions {
-		assertion := &assertions[index]
-		assertion.ID = strings.TrimSpace(assertion.ID)
-		assertion.Subject = domain.MasterName(assertion.Subject)
-		assertion.Statement = strings.TrimSpace(assertion.Statement)
-		assertion.Rationale = strings.TrimSpace(assertion.Rationale)
-		if err := s.ValidateKnowledgeType(assertion.Type); err != nil {
-			return nil, nil, fmt.Errorf("assertion %d type: %w", index+1, err)
-		}
-		types = append(types, assertion.Type)
-	}
-	normalizedTypes, err := s.NormalizeKnowledgeTypes(types)
-	if err != nil {
-		return nil, nil, err
-	}
-	return assertions, normalizedTypes, nil
-}
-
 func encodeWithWikilinks(
 	header any,
 	body string,
@@ -1050,8 +892,7 @@ func knowledgeFromFrontmatter(header knowledgeFrontmatter) (domain.Knowledge, er
 		ID:      header.ID,
 		Created: header.Created, Updated: header.Updated,
 		EstablishedBy: domain.MasterName(header.EstablishedBy), Type: header.Type,
-		Subject:    header.Subject,
-		Feedstocks: header.Feedstocks, Assertions: header.Assertions,
+		Subject: header.Subject, Feedstocks: header.Feedstocks,
 		Approved: approved, Supersedes: header.Supersedes,
 		SupersededBy: header.SupersededBy, SupersededAt: header.SupersededAt,
 		InvalidatedAt: header.InvalidatedAt,
@@ -1065,8 +906,7 @@ func encodeKnowledge(knowledge domain.Knowledge, body string) ([]byte, error) {
 		ID:      knowledge.ID,
 		Created: knowledge.Created, Updated: knowledge.Updated,
 		EstablishedBy: knowledge.EstablishedBy, Type: knowledge.Type,
-		Subject:    knowledge.Subject,
-		Feedstocks: knowledge.Feedstocks, Assertions: knowledge.Assertions,
+		Subject: knowledge.Subject, Feedstocks: knowledge.Feedstocks,
 		Approved:   knowledge.Approved,
 		Supersedes: knowledge.Supersedes, SupersededBy: knowledge.SupersededBy,
 		SupersededAt: knowledge.SupersededAt, InvalidatedAt: knowledge.InvalidatedAt,
@@ -1078,20 +918,9 @@ func encodeKnowledge(knowledge domain.Knowledge, body string) ([]byte, error) {
 		"type",
 		"subject",
 		"feedstocks",
-		"assertions",
 		"supersedes",
 		"superseded_by",
 	)
-}
-
-func subjectsFromAssertions(assertions []domain.Assertion) []string {
-	subjects := make([]string, 0, len(assertions))
-	for _, assertion := range assertions {
-		if assertion.Subject != "" {
-			subjects = append(subjects, assertion.Subject)
-		}
-	}
-	return domain.NormalizeMasterNames(subjects)
 }
 
 func normalizeFeedstockLinks(values []string) []string {
@@ -1103,14 +932,6 @@ func normalizeFeedstockLinks(values []string) []string {
 }
 
 func normalizeKnowledgeLinks(values []string) []string {
-	normalized := make([]string, 0, len(values))
-	for _, value := range values {
-		normalized = append(normalized, domain.MasterName(value))
-	}
-	return domain.UniqueSorted(normalized)
-}
-
-func normalizeAssertionLinks(values []string) []string {
 	normalized := make([]string, 0, len(values))
 	for _, value := range values {
 		normalized = append(normalized, domain.MasterName(value))
@@ -1154,8 +975,6 @@ func linkWikilinkNode(node *yaml.Node) {
 func equalFeedstockExceptBrewed(left, right domain.Feedstock) bool {
 	left.BrewedAt = nil
 	right.BrewedAt = nil
-	left.BrewedAssertions = nil
-	right.BrewedAssertions = nil
 	leftJSON, _ := json.Marshal(left)
 	rightJSON, _ := json.Marshal(right)
 	return string(leftJSON) == string(rightJSON)

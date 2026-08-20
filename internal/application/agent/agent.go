@@ -6,7 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
+
+	"github.com/siro33950/knowbrew/internal/domain"
 )
 
 type Task string
@@ -20,11 +21,15 @@ const (
 )
 
 type ReadState struct {
-	Subject           string
-	Catalog           []string
-	CatalogDigest     string
+	Subjects          map[string]SubjectReadState
 	Inspected         []string
+	Submitted         []domain.KnowledgeCandidate
 	AnnotationContext bool
+}
+
+type SubjectReadState struct {
+	Catalog []string
+	Digest  string
 }
 
 type Runner interface {
@@ -37,17 +42,7 @@ type RunResult struct {
 	Reads  ReadState
 }
 
-type assertionContextKey struct{}
 type knowledgeTypesContextKey struct{}
-
-func WithAssertion(ctx context.Context, assertionID string) context.Context {
-	return context.WithValue(ctx, assertionContextKey{}, strings.TrimSpace(assertionID))
-}
-
-func AssertionFromContext(ctx context.Context) string {
-	value, _ := ctx.Value(assertionContextKey{}).(string)
-	return strings.TrimSpace(value)
-}
 
 func WithKnowledgeTypes(ctx context.Context, values []string) context.Context {
 	return context.WithValue(ctx, knowledgeTypesContextKey{}, append([]string(nil), values...))

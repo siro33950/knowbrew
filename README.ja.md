@@ -41,7 +41,7 @@ knowbrew init
 ```
 
 **`draw`** はセッションログを読み、1ターンにつき1件の *feedstock* を記録します。
-短い要約と、そのターンで確定した個々の主張が入ります。生の対話はソースログに
+短い要約と、幅広く選んだKnowledgeの型候補が入ります。生の対話はソースログに
 置いたままです。feedstockにはエージェントとセッションIDだけを保存し、原文が必要な
 ときは設定済みソースから現在の配置場所を解決します。
 
@@ -97,9 +97,9 @@ knowbrew distill --max 2
 
 drawのサマリには、今回の対象数を`turns_selected`、対象範囲に残る未完了数を
 `turns_pending`として出力します。
-Brewの`--max`は未処理Assertionを数え、機械NOOPは上限を消費しません。Distillでは
-Subject文書を数えます。上限付きDistillは次回、次のSubjectとTemplateから続行するため、
-各文書が再生成可能なままでも、繰り返し実行すれば割り当て済み文書を順番に処理できます。
+Brewの`--max`は処理待ちfeedstockを数えます。DistillではSubject文書を数えます。
+上限付きDistillは次回、次のSubjectとTemplateから続行するため、各文書が再生成可能な
+ままでも、繰り返し実行すれば割り当て済み文書を順番に処理できます。
 
 作られたものを確認し、エージェントに使わせたいものを承認します。
 
@@ -129,9 +129,9 @@ knowbrew knowledge --subject myproject --type decision
 実際に何があったかを振り返る:
 
 ```sh
-knowbrew feedstock --last 10                      # 直近10ターン
-knowbrew feedstock --subject myproject -- deploy  # デプロイをいじったのはいつ？
-knowbrew show <feedstock-id> --raw                # 元の対話そのもの
+knowbrew feedstock --last 10       # 直近10ターン
+knowbrew feedstock -- deploy       # デプロイをいじったのはいつ？
+knowbrew show <feedstock-id> --raw # 元の対話そのもの
 ```
 
 キーワードは `--` の後に書きます。キーワードありなら関連度順、なしなら新しい順に
@@ -321,11 +321,11 @@ knowbrew show <id...>              feedstock 1件; --raw で元の対話
 knowbrew index sync|rebuild|status 派生検索索引の保守
 ```
 
-検索の共通フラグ: `--subject`・`--type`・`--since`・`--until`・`--limit`・
-`--max-tokens`・`--reindex`・`--search-mode`。`knowledge` にはさらに `--include-pending`・
-`--include-retired`。`feedstock` にはさらに `--session`・
-`--agent`・`--last N`。`document` はdistill済みsubject文書を検索し、`--type` の
-代わりに `--template` を持ちます。
+`knowledge` と `feedstock` の共通フラグは `--type`・`--since`・`--until`・`--limit`・
+`--max-tokens`・`--reindex`・`--search-mode` です。`knowledge` にはさらに `--subject`・
+`--include-pending`・`--include-retired`、`feedstock` には `--session`・`--agent`・
+`--last N` があります。`document` はdistill済みsubject文書を検索し、`--type` の
+代わりに `--subject`・`--template` を持ちます。
 
 `draw` のフラグ: `--max N`・`--since`・`--until`・`--source claude|codex`・
 `--verbose`。明示するファイルまたはディレクトリは、設定済みsourceの配下である
