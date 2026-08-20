@@ -44,7 +44,7 @@ func resultSchema(task Task, typeNames []string) map[string]any {
 			[]string{"types"},
 			map[string]any{
 				"types": map[string]any{
-					"type": "array", "uniqueItems": true,
+					"type":  "array",
 					"items": typeSchema(typeNames),
 				},
 			},
