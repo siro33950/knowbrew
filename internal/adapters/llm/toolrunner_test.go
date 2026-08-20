@@ -90,13 +90,9 @@ func TestCommandForToolMapsFeedstockWorkflow(t *testing.T) {
 }
 
 func TestToolSchemasExposeTaskSpecificOperations(t *testing.T) {
-	summarize := schemaNames(toolSchemas(TaskSummarize, testKnowledgeTypes))
-	if len(summarize) != 0 {
-		t.Fatalf("summarize schemas = %#v", summarize)
-	}
-	annotate := schemaNames(toolSchemas(TaskAnnotate, testKnowledgeTypes))
-	if !reflect.DeepEqual(annotate, []string{"feedstock_context"}) {
-		t.Fatalf("annotate schemas = %#v", annotate)
+	drawSchemas := schemaNames(toolSchemas(TaskDraw, testKnowledgeTypes))
+	if !reflect.DeepEqual(drawSchemas, []string{"feedstock_context"}) {
+		t.Fatalf("draw schemas = %#v", drawSchemas)
 	}
 	brew := schemaNames(toolSchemas(TaskBrew, testKnowledgeTypes))
 	if !reflect.DeepEqual(brew, []string{
@@ -123,15 +119,21 @@ func TestToolSchemasExposeTaskSpecificOperations(t *testing.T) {
 		}
 	}
 
-	annotationResult := resultSchema(TaskAnnotate, []string{"observation", "guideline"})
-	properties := annotationResult["properties"].(map[string]any)
+	drawResult := resultSchema(TaskDraw, []string{"observation", "guideline"})
+	properties := drawResult["properties"].(map[string]any)
 	items := properties["types"].(map[string]any)["items"].(map[string]any)
 	if got := items["enum"]; !reflect.DeepEqual(got, []string{"observation", "guideline"}) {
 		t.Fatalf("type enum = %#v", got)
 	}
+	if properties["summary"] == nil {
+		t.Fatalf("draw schema does not expose summary: %#v", properties)
+	}
+	if got := drawResult["required"]; !reflect.DeepEqual(got, []string{"summary", "types"}) {
+		t.Fatalf("draw required = %#v", got)
+	}
 	for _, removed := range []string{"assertions", "subjects", "speech_acts", "topics", "new_subjects"} {
 		if properties[removed] != nil {
-			t.Fatalf("annotation schema exposes %q", removed)
+			t.Fatalf("draw schema exposes %q", removed)
 		}
 	}
 
@@ -179,7 +181,7 @@ func TestInvocationEnvironmentReplacesAllInvocationScope(t *testing.T) {
 		config.ConfigEnvironment + "=/stale/config.toml",
 		config.InvocationFeedstockEnvironment + "=stale-feedstock",
 		config.InvocationIDEnvironment + "=stale-invocation",
-		config.InvocationTaskEnvironment + "=annotate",
+		config.InvocationTaskEnvironment + "=draw",
 	}
 	environment := invocationEnvironment(
 		base, "/current/config.toml", "feedstock-1", "invocation-1", TaskBrew,
@@ -220,15 +222,15 @@ func TestToolRunnerUsesTaskSpecificAPIModelAndEffort(t *testing.T) {
 	}}, "/bin/knowbrew", t.TempDir(), nil)
 	runner.Client = &http.Client{Transport: transport}
 	for _, task := range []Task{
-		TaskSummarize, TaskAnnotate, TaskBrew, TaskDistillSelect, TaskDistillGenerate,
+		TaskDraw, TaskBrew, TaskDistillSelect, TaskDistillGenerate,
 	} {
 		if _, _, err := runner.complete(context.Background(), task, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if !reflect.DeepEqual(models, []string{
-		"draw-fast", "draw-fast", "brew-quality", "distill-quality", "distill-quality",
-	}) || !reflect.DeepEqual(efforts, []string{"low", "low", "high", "max", "max"}) {
+		"draw-fast", "brew-quality", "distill-quality", "distill-quality",
+	}) || !reflect.DeepEqual(efforts, []string{"low", "high", "max", "max"}) {
 		t.Fatalf("models = %#v, efforts = %#v", models, efforts)
 	}
 }
@@ -254,7 +256,7 @@ func TestToolRunnerOmitsEffortWhenEmptyAndForOllama(t *testing.T) {
 			Backend: test.backend, DrawModel: "draw", BrewModel: "brew", DrawEffort: test.effort,
 		}}, "/bin/knowbrew", t.TempDir(), nil)
 		runner.Client = &http.Client{Transport: transport}
-		if _, _, err := runner.complete(context.Background(), TaskAnnotate, nil, nil, nil); err != nil {
+		if _, _, err := runner.complete(context.Background(), TaskDraw, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -289,7 +291,7 @@ func TestToolRunnerStreamsCommandOutputOnlyWhenVerbose(t *testing.T) {
 	}
 }
 
-func TestToolRunnerReturnsTypeCandidatesWithoutMutationCommand(t *testing.T) {
+func TestToolRunnerReturnsDraftWithoutMutationCommand(t *testing.T) {
 	root := t.TempDir()
 	binary := filepath.Join(t.TempDir(), "knowbrew")
 	capturePath := filepath.Join(t.TempDir(), "commands.txt")
@@ -298,52 +300,21 @@ func TestToolRunnerReturnsTypeCandidatesWithoutMutationCommand(t *testing.T) {
 	rounds := 0
 	transport := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		rounds++
-		return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"{\"types\":[\"property\"]}"}}]}`), nil
+		return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"{\"summary\":\"summary\",\"types\":[\"property\"]}"}}]}`), nil
 	})
 	runner := NewToolRunner(config.Config{
 		Root: root, Path: filepath.Join(root, "config.toml"),
 		LLM: config.LLM{Backend: "api", DrawModel: "draw", Timeout: "5s"},
 	}, binary, root, nil)
 	runner.Client = &http.Client{Transport: transport}
-	result, err := runner.Run(context.Background(), TaskAnnotate, "feedstock-1", "classify")
+	result, err := runner.Run(context.Background(), TaskDraw, "feedstock-1", "draw")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if rounds != 1 {
 		t.Fatalf("rounds = %d", rounds)
 	}
-	if string(result.Output) == "" {
-		t.Fatal("structured type candidates are empty")
-	}
-	if _, err := os.Stat(capturePath); !os.IsNotExist(err) {
-		t.Fatalf("mutation command was executed: %v", err)
-	}
-}
-
-func TestToolRunnerReturnsSummaryWithoutMutationCommand(t *testing.T) {
-	root := t.TempDir()
-	binary := filepath.Join(t.TempDir(), "knowbrew")
-	capturePath := filepath.Join(t.TempDir(), "commands.txt")
-	writeExecutable(t, binary, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CAPTURE_PATH\"\n")
-	t.Setenv("CAPTURE_PATH", capturePath)
-	rounds := 0
-	transport := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-		rounds++
-		return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"{\"summary\":\"summary\"}"}}]}`), nil
-	})
-	runner := NewToolRunner(config.Config{
-		Root: root, Path: filepath.Join(root, "config.toml"),
-		LLM: config.LLM{Backend: "api", DrawModel: "draw", Timeout: "5s"},
-	}, binary, root, nil)
-	runner.Client = &http.Client{Transport: transport}
-	result, err := runner.Run(context.Background(), TaskSummarize, "feedstock-1", "summarize")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rounds != 1 {
-		t.Fatalf("rounds = %d", rounds)
-	}
-	if string(result.Output) != `{"summary":"summary"}` {
+	if string(result.Output) != `{"summary":"summary","types":["property"]}` {
 		t.Fatalf("result = %s", result.Output)
 	}
 	if _, err := os.Stat(capturePath); !os.IsNotExist(err) {
@@ -351,7 +322,7 @@ func TestToolRunnerReturnsSummaryWithoutMutationCommand(t *testing.T) {
 	}
 }
 
-func TestToolRunnerCanLoadContextOnceBeforeAnnotating(t *testing.T) {
+func TestToolRunnerCanLoadContextOnceBeforeDrawing(t *testing.T) {
 	root := t.TempDir()
 	binary := filepath.Join(t.TempDir(), "knowbrew")
 	capturePath := filepath.Join(t.TempDir(), "commands.txt")
@@ -370,7 +341,7 @@ func TestToolRunnerCanLoadContextOnceBeforeAnnotating(t *testing.T) {
 		LLM: config.LLM{Backend: "api", DrawModel: "draw", Timeout: "5s"},
 	}, binary, root, nil)
 	runner.Client = &http.Client{Transport: transport}
-	if _, err := runner.RunWithUsage(context.Background(), TaskAnnotate, "feedstock-1", "classify"); err != nil {
+	if _, err := runner.RunWithUsage(context.Background(), TaskDraw, "feedstock-1", "classify"); err != nil {
 		t.Fatal(err)
 	}
 	if rounds != 2 {
@@ -382,12 +353,12 @@ func TestToolRunnerCanLoadContextOnceBeforeAnnotating(t *testing.T) {
 	}
 	commands := string(data)
 	if !strings.Contains(commands, "feedstock context feedstock-1") ||
-		strings.Contains(commands, "feedstock annotate") {
+		strings.Contains(commands, "feedstock draft") {
 		t.Fatalf("commands = %q", commands)
 	}
 }
 
-func TestToolRunnerRejectsReadToolForAnnotate(t *testing.T) {
+func TestToolRunnerRejectsReadToolForDraw(t *testing.T) {
 	transport := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		return jsonResponse(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"read-1","type":"function","function":{"name":"knowledge_show","arguments":{"knowledge_ids":["kn-1"]}}}]}}]}`), nil
 	})
@@ -397,8 +368,8 @@ func TestToolRunnerRejectsReadToolForAnnotate(t *testing.T) {
 		LLM: config.LLM{Backend: "api", DrawModel: "draw", Timeout: "5s"},
 	}, "/bin/knowbrew", root, nil)
 	runner.Client = &http.Client{Transport: transport}
-	_, err := runner.Run(context.Background(), TaskAnnotate, "feedstock-1", "classify")
-	if err == nil || !strings.Contains(err.Error(), `tool "knowledge_show" is not allowed for annotate`) {
+	_, err := runner.Run(context.Background(), TaskDraw, "feedstock-1", "classify")
+	if err == nil || !strings.Contains(err.Error(), `tool "knowledge_show" is not allowed for draw`) {
 		t.Fatalf("error = %v", err)
 	}
 }

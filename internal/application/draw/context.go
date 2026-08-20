@@ -27,20 +27,28 @@ type SummaryMaterial struct {
 	AgentResponse string `json:"agent_response,omitempty"`
 }
 
-func LoadSummaryMaterial(
+type DrawMaterial struct {
+	FeedstockID   string           `json:"feedstock_id"`
+	UserInput     string           `json:"user_input"`
+	AgentResponse string           `json:"agent_response,omitempty"`
+	PriorTurns    []AnnotationTurn `json:"prior_turns"`
+}
+
+func LoadDrawMaterial(
 	sources SourceGateway,
 	dataStore Repository,
 	feedstockID string,
-) (SummaryMaterial, []diagnostic.Warning, error) {
+	count int,
+) (DrawMaterial, []diagnostic.Warning, error) {
 	feedstock, err := dataStore.GetFeedstock(feedstockID)
 	if err != nil {
-		return SummaryMaterial{}, nil, err
+		return DrawMaterial{}, nil, err
 	}
 	candidates, warnings, err := sources.ParseSession(feedstock.Agent, feedstock.Session.ID)
 	if err != nil {
-		return SummaryMaterial{}, warnings, err
+		return DrawMaterial{}, warnings, err
 	}
-	material, err := summaryMaterialFromCandidates(candidates, feedstockID)
+	material, err := drawMaterialFromCandidates(candidates, feedstockID, count)
 	return material, warnings, err
 }
 
@@ -90,15 +98,33 @@ func annotationContextFromCandidates(
 	}, nil
 }
 
-func summaryMaterialFromCandidates(
+func drawMaterialFromCandidates(
 	candidates []domain.FeedstockCandidate,
 	feedstockID string,
-) (SummaryMaterial, error) {
+	count int,
+) (DrawMaterial, error) {
+	if count < 0 {
+		return DrawMaterial{}, errors.New("context turn count must be at least 0")
+	}
 	session, targetIndex, err := sourceSession(candidates, feedstockID)
 	if err != nil {
-		return SummaryMaterial{}, err
+		return DrawMaterial{}, err
 	}
-	return summaryMaterialFromCandidate(session[targetIndex]), nil
+	start := max(0, targetIndex-count)
+	priorTurns := make([]AnnotationTurn, 0, targetIndex-start)
+	for index := start; index < targetIndex; index++ {
+		priorTurns = append(priorTurns, structuredPriorTurn(
+			session[index].Dialogue,
+			index-targetIndex,
+		))
+	}
+	target := summaryMaterialFromCandidate(session[targetIndex])
+	return DrawMaterial{
+		FeedstockID:   feedstockID,
+		UserInput:     target.UserInput,
+		AgentResponse: target.AgentResponse,
+		PriorTurns:    priorTurns,
+	}, nil
 }
 
 func sourceSession(

@@ -37,7 +37,7 @@ wait "$child_pid"
 		WorkDir:    root,
 	}
 
-	_, err := runner.Run(context.Background(), TaskAnnotate, "feedstock-1", "classify")
+	_, err := runner.Run(context.Background(), TaskDraw, "feedstock-1", "classify")
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("error = %v, want ErrTimeout", err)
 	}

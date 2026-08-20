@@ -30,37 +30,29 @@ type annotatingRunner struct {
 	usage llm.Usage
 }
 
-type annotationResultRunner struct {
+type drawResultRunner struct {
 	output json.RawMessage
 }
 
-func (runner annotationResultRunner) Run(
+func (runner drawResultRunner) Run(
 	_ context.Context,
 	task llm.Task,
 	_, _ string,
 ) (llm.RunResult, error) {
-	switch task {
-	case llm.TaskSummarize:
-		return llm.RunResult{Output: json.RawMessage(`{"summary":"A durable property was established."}`)}, nil
-	case llm.TaskAnnotate:
-		return llm.RunResult{Output: runner.output}, nil
-	default:
+	if task != llm.TaskDraw {
 		return llm.RunResult{}, nil
 	}
+	return llm.RunResult{Output: runner.output}, nil
 }
 
 func (runner annotatingRunner) Run(_ context.Context, task llm.Task, _ string, _ string) (llm.RunResult, error) {
-	switch task {
-	case llm.TaskSummarize:
-		return llm.RunResult{
-			Output: json.RawMessage(`{"summary":"The user requested a tested change."}`),
-			Usage:  runner.usage,
-		}, nil
-	case llm.TaskAnnotate:
-		return llm.RunResult{Output: json.RawMessage(`{"types":[]}`), Usage: runner.usage}, nil
-	default:
+	if task != llm.TaskDraw {
 		return llm.RunResult{}, nil
 	}
+	return llm.RunResult{
+		Output: json.RawMessage(`{"summary":"The user requested a tested change.","types":[]}`),
+		Usage:  runner.usage,
+	}, nil
 }
 
 func TestDrawIsIdempotentWithoutPersistentSessionState(t *testing.T) {
@@ -86,14 +78,14 @@ func TestDrawIsIdempotentWithoutPersistentSessionState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.FeedstocksAcquired != 1 || first.FeedstocksAnnotated != 1 {
+	if first.FeedstocksAcquired != 1 || first.FeedstocksDrawn != 1 {
 		t.Fatalf("first summary = %#v", first)
 	}
 	second, err := Run(context.Background(), cfg, []string{logPath}, runner, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.FeedstocksAcquired != 0 || second.FeedstocksAnnotated != 0 {
+	if second.FeedstocksAcquired != 0 || second.FeedstocksDrawn != 0 {
 		t.Fatalf("second summary = %#v", second)
 	}
 	if err := os.MkdirAll(movedDir, 0o755); err != nil {
@@ -107,7 +99,7 @@ func TestDrawIsIdempotentWithoutPersistentSessionState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if moved.FeedstocksAcquired != 0 || moved.FeedstocksAnnotated != 0 {
+	if moved.FeedstocksAcquired != 0 || moved.FeedstocksDrawn != 0 {
 		t.Fatalf("moved summary = %#v", moved)
 	}
 	if _, err := os.Stat(filepath.Join(root, ".knowbrew", "state", "draw-state.json")); !errors.Is(err, os.ErrNotExist) {
@@ -125,7 +117,7 @@ func TestDrawIsIdempotentWithoutPersistentSessionState(t *testing.T) {
 	}
 }
 
-func TestDrawValidatesAndPersistsAnnotationTypes(t *testing.T) {
+func TestDrawValidatesAndPersistsDraftResults(t *testing.T) {
 	tests := []struct {
 		name          string
 		output        string
@@ -134,10 +126,15 @@ func TestDrawValidatesAndPersistsAnnotationTypes(t *testing.T) {
 		wantPending   bool
 		wantFailed    int
 	}{
-		{name: "missing types", output: `{}`, wantFailed: 1},
-		{name: "empty types", output: `{"types":[]}`, wantAnnotated: true},
+		{name: "missing types", output: `{"summary":"A durable property was established."}`, wantFailed: 1},
 		{
-			name: "valid type", output: `{"types":["property"]}`,
+			name:          "empty types",
+			output:        `{"summary":"A durable property was established.","types":[]}`,
+			wantAnnotated: true,
+		},
+		{
+			name:          "valid type",
+			output:        `{"summary":"A durable property was established.","types":["property"]}`,
 			wantAnnotated: true, wantTypes: []domain.KnowledgeType{"property"}, wantPending: true,
 		},
 	}
@@ -167,19 +164,19 @@ func TestDrawValidatesAndPersistsAnnotationTypes(t *testing.T) {
 				context.Background(),
 				cfg,
 				[]string{logPath},
-				annotationResultRunner{output: json.RawMessage(test.output)},
+				drawResultRunner{output: json.RawMessage(test.output)},
 				nil,
 			)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if summary.TypeCandidateSelectionFailed != test.wantFailed {
+			if summary.FeedstocksFailed != test.wantFailed {
 				t.Fatalf("summary = %#v", summary)
 			}
 			if test.wantFailed != 0 {
 				if len(summary.Failures) != 1 ||
-					summary.Failures[0].Phase != "type_candidate_selection" ||
-					!strings.Contains(summary.Failures[0].Reason, "annotation result types are required") {
+					summary.Failures[0].Phase != "draw" ||
+					!strings.Contains(summary.Failures[0].Reason, "draw result types are required") {
 					t.Fatalf("failures = %#v", summary.Failures)
 				}
 			} else if len(summary.Failures) != 0 {
@@ -283,7 +280,7 @@ func TestDefaultDrawUsesOnlyLogsModifiedInLast24Hours(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.FeedstocksAcquired != 1 || first.FeedstocksAnnotated != 1 {
+	if first.FeedstocksAcquired != 1 || first.FeedstocksDrawn != 1 {
 		t.Fatalf("default summary = %#v", first)
 	}
 	if _, _, err := dataStore.FindFeedstock(parser.FeedstockID("claude", "old-session", "old-turn")); err == nil {
@@ -300,7 +297,7 @@ func TestDefaultDrawUsesOnlyLogsModifiedInLast24Hours(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.FeedstocksAcquired != 1 || second.FeedstocksAnnotated != 1 {
+	if second.FeedstocksAcquired != 1 || second.FeedstocksDrawn != 1 {
 		t.Fatalf("--max summary = %#v", second)
 	}
 }
@@ -336,7 +333,7 @@ func TestMaxTurnsProcessesNewestUnfinishedTurnsAndReportsBacklog(t *testing.T) {
 		t.Fatal(err)
 	}
 	if first.TurnsSelected != 2 || first.TurnsPending != 1 ||
-		first.FeedstocksAcquired != 2 || first.FeedstocksAnnotated != 2 {
+		first.FeedstocksAcquired != 2 || first.FeedstocksDrawn != 2 {
 		t.Fatalf("first summary = %#v", first)
 	}
 	for _, turnID := range []string{"turn-2", "turn-3"} {
@@ -358,7 +355,7 @@ func TestMaxTurnsProcessesNewestUnfinishedTurnsAndReportsBacklog(t *testing.T) {
 		t.Fatal(err)
 	}
 	if second.TurnsSelected != 1 || second.TurnsPending != 0 ||
-		second.FeedstocksAcquired != 1 || second.FeedstocksAnnotated != 1 {
+		second.FeedstocksAcquired != 1 || second.FeedstocksDrawn != 1 {
 		t.Fatalf("second summary = %#v", second)
 	}
 }
@@ -397,7 +394,7 @@ func TestMaxTurnsPrioritizesPreviouslyAcquiredIncompleteFeedstock(t *testing.T) 
 		t.Fatal(err)
 	}
 	if summary.TurnsSelected != 1 || summary.TurnsPending != 1 ||
-		summary.FeedstocksAcquired != 0 || summary.FeedstocksAnnotated != 1 {
+		summary.FeedstocksAcquired != 0 || summary.FeedstocksDrawn != 1 {
 		t.Fatalf("summary = %#v", summary)
 	}
 	completed, _, err := dataStore.FindFeedstock(incompleteID)
@@ -486,7 +483,7 @@ func TestDrawClassifiesOnlyFeedstocksFromSelectedSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.FeedstocksAnnotated != 1 {
+	if summary.FeedstocksDrawn != 1 {
 		t.Fatalf("summary = %#v", summary)
 	}
 	unchanged, _, err := dataStore.FindFeedstock(unrelated.ID)
@@ -534,7 +531,7 @@ func TestConcurrentDrawsWaitAndRemainIdempotent(t *testing.T) {
 		}
 		summary := <-results
 		acquired += summary.FeedstocksAcquired
-		annotated += summary.FeedstocksAnnotated
+		annotated += summary.FeedstocksDrawn
 	}
 	if acquired != 1 || annotated != 1 {
 		t.Fatalf("combined summaries acquired = %d, annotated = %d", acquired, annotated)
@@ -716,7 +713,7 @@ func runGit(t *testing.T, repository string, arguments ...string) {
 	}
 }
 
-func TestAnnotationPromptIncludesFilteredDialogueWithoutReadInstructions(t *testing.T) {
+func TestDrawPromptIncludesFilteredDialogueWithoutReadInstructions(t *testing.T) {
 	dataStore, err := store.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -779,7 +776,7 @@ func TestAnnotationPromptIncludesFilteredDialogueWithoutReadInstructions(t *test
 		t.Fatalf("feedstock warnings = %#v", warnings)
 	}
 	cfg := config.Config{Path: "/configured/config.toml", Draw: config.Draw{ContextTurns: 0}}
-	summaryText, warnings, err := summaryPromptForTest(cfg, dataStore, target.ID)
+	promptText, warnings, err := drawPromptForTest(cfg, dataStore, target.ID, feedstocks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -787,57 +784,40 @@ func TestAnnotationPromptIncludesFilteredDialogueWithoutReadInstructions(t *test
 		t.Fatalf("warnings = %#v", warnings)
 	}
 	for _, required := range []string{
-		target.ID, `"user_input": "FULL USER REQUEST"`,
+		target.ID,
+		`"user_input": "FULL USER REQUEST"`,
 		`"agent_response": "VISIBLE ASSISTANT RESPONSE"`,
-		"Return one JSON object containing only summary",
-		"only the supplied user_input", "supplied agent_response action and result",
-	} {
-		if !strings.Contains(summaryText, required) {
-			t.Fatalf("summary prompt does not contain %q:\n%s", required, summaryText)
-		}
-	}
-	for _, forbidden := range []string{"SECRET THINKING", "SECRET TOOL CALL", "SECRET TOOL OUTPUT", "subject_master", "knowledge_type_master", "prior_turns", "feedstock summarize"} {
-		if strings.Contains(summaryText, forbidden) {
-			t.Fatalf("summary prompt contains %q:\n%s", forbidden, summaryText)
-		}
-	}
-	typeCandidateText, warnings, err := annotationPromptForTest(cfg, dataStore, target.ID, feedstocks)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(warnings) != 0 {
-		t.Fatalf("warnings = %#v", warnings)
-	}
-	for _, required := range []string{
-		`"target_user_input": "FULL USER REQUEST"`, `"prior_turns": []`,
+		`"prior_turns": []`,
 		`"cwd": "/vault"`, `"repo": "https://github.com/example/knowbrew.git"`,
 		`run "knowbrew feedstock context ` + target.ID + `" exactly once`,
-		"target assistant response, generated summary, and future turns are deliberately absent",
-		`Return exactly one JSON object containing only {"types": [...]}`,
-		"Treat knowledge_type_master as the sole authority",
-		"Select every type that could plausibly apply",
-		"Multiple types are allowed, and uncertainty is a reason to include a candidate",
+		`Return exactly one JSON object containing only {"summary": ..., "types": [...]}`,
+		"only the supplied user_input", "supplied agent_response action and result",
+		"treat knowledge_type_master as the sole authority",
+		"First state to yourself, in one sentence, the durable meaning this turn establishes",
+		"the turn has no durable meaning and types must be an empty array",
+		"Brew re-checks the excludes entries later",
 		"Do not decide statement wording, meaning boundaries, subject ownership, or final type assignment",
 		`"includes": [`, `"verified runtime behavior"`,
 		`"excludes": [`, `"temporary task progress"`,
 		`"name": "observation"`,
 	} {
-		if !strings.Contains(typeCandidateText, required) {
-			t.Fatalf("type candidate prompt does not contain %q:\n%s", required, typeCandidateText)
+		if !strings.Contains(promptText, required) {
+			t.Fatalf("draw prompt does not contain %q:\n%s", required, promptText)
 		}
 	}
 	for _, forbidden := range []string{
-		"VISIBLE ASSISTANT RESPONSE", "SECRET THINKING", "SECRET TOOL CALL", "SECRET TOOL OUTPUT",
-		`"summary"`, `"subject_master"`, `"name": "agent-model"`,
+		"SECRET THINKING", "SECRET TOOL CALL", "SECRET TOOL OUTPUT",
+		`"subject_master"`, `"name": "agent-model"`,
 		`"target_offset"`, `"offset": 0`, `"offset": 1`,
+		"feedstock draft",
 	} {
-		if strings.Contains(typeCandidateText, forbidden) {
-			t.Fatalf("type candidate prompt contains %q:\n%s", forbidden, typeCandidateText)
+		if strings.Contains(promptText, forbidden) {
+			t.Fatalf("draw prompt contains %q:\n%s", forbidden, promptText)
 		}
 	}
 }
 
-func TestWritingGuidesDoNotApplyToDrawPhases(t *testing.T) {
+func TestWritingGuidesDoNotApplyToDraw(t *testing.T) {
 	dataStore, err := store.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -869,30 +849,18 @@ func TestWritingGuidesDoNotApplyToDrawPhases(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.Config{Path: "/configured/config.toml"}
-	typeCandidateText, _, err := annotationPromptForTest(cfg, dataStore, target.ID, feedstocks)
+	typeCandidateText, _, err := drawPromptForTest(cfg, dataStore, target.ID, feedstocks)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, forbidden := range []string{"COMMON WRITING RULE", "KNOWLEDGE WRITING RULE", "DOCUMENT WRITING RULE"} {
 		if strings.Contains(typeCandidateText, forbidden) {
-			t.Fatalf("type candidate prompt contains writing guide %q:\n%s", forbidden, typeCandidateText)
-		}
-	}
-
-	summaryText, _, err := summaryPromptForTest(cfg, dataStore, target.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, forbidden := range []string{
-		"COMMON WRITING RULE", "KNOWLEDGE WRITING RULE", "DOCUMENT WRITING RULE",
-	} {
-		if strings.Contains(summaryText, forbidden) {
-			t.Fatalf("summary prompt contains writing guide %q:\n%s", forbidden, summaryText)
+			t.Fatalf("draw prompt contains writing guide %q:\n%s", forbidden, typeCandidateText)
 		}
 	}
 }
 
-func TestAnnotationPromptMarksMissingAssistantResponse(t *testing.T) {
+func TestDrawPromptMarksMissingAssistantResponse(t *testing.T) {
 	dataStore, err := store.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -918,10 +886,15 @@ func TestAnnotationPromptMarksMissingAssistantResponse(t *testing.T) {
 	if err := dataStore.WriteFeedstock(target); err != nil {
 		t.Fatal(err)
 	}
-	prompt, _, err := summaryPromptForTest(
+	feedstocks, _, err := dataStore.ListFeedstocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, _, err := drawPromptForTest(
 		config.Config{Path: "/configured/config.toml"},
 		dataStore,
 		target.ID,
+		feedstocks,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -984,7 +957,7 @@ func TestSummaryUsesMastersAddedJSONName(t *testing.T) {
 	}
 }
 
-func TestSummaryPromptLimitsOnlyAssistantResponse(t *testing.T) {
+func TestDrawPromptLimitsOnlyAssistantResponse(t *testing.T) {
 	dataStore, err := store.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -1000,10 +973,15 @@ func TestSummaryPromptLimitsOnlyAssistantResponse(t *testing.T) {
 		userText,
 		assistantText,
 	)
-	prompt, _, err := summaryPromptForTest(
+	feedstocks, _, err := dataStore.ListFeedstocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, _, err := drawPromptForTest(
 		config.Config{Path: "/configured/config.toml", Draw: config.Draw{ContextTurns: 0}},
 		dataStore,
 		target.ID,
+		feedstocks,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1022,7 +1000,7 @@ func TestSummaryPromptLimitsOnlyAssistantResponse(t *testing.T) {
 	}
 }
 
-func TestAnnotationPromptIncludesOnlyThreePriorTurnsWithinSession(t *testing.T) {
+func TestDrawPromptIncludesOnlyThreePriorTurnsWithinSession(t *testing.T) {
 	dataStore, err := store.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -1089,13 +1067,14 @@ func TestAnnotationPromptIncludesOnlyThreePriorTurnsWithinSession(t *testing.T) 
 		Draw: config.Draw{ContextTurns: 3},
 	}
 	snapshots := map[string][]domain.FeedstockCandidate{target.ID: candidates}
-	prompt, _, err := annotationPromptForTest(cfg, dataStore, target.ID, feedstocks, snapshots)
+	prompt, _, err := drawPromptForTest(cfg, dataStore, target.ID, feedstocks, snapshots)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
 		"BEFORE QUOTE 1", "BEFORE QUOTE 2", "BEFORE QUOTE 3",
 		"BEFORE RESPONSE 1", "BEFORE RESPONSE 2", "BEFORE RESPONSE 3",
+		"TARGET USER", "TARGET ASSISTANT",
 		`"offset": -3`, `"offset": -1`, `"prior_turns"`,
 	} {
 		if !strings.Contains(prompt, required) {
@@ -1104,7 +1083,6 @@ func TestAnnotationPromptIncludesOnlyThreePriorTurnsWithinSession(t *testing.T) 
 	}
 	for _, forbidden := range []string{
 		"BEFORE QUOTE 4",
-		"TARGET ASSISTANT",
 		"AFTER QUOTE 1", "AFTER QUOTE 2", "AFTER QUOTE 3", "AFTER QUOTE 4",
 		"AFTER RESPONSE 1", "AFTER RESPONSE 2", "AFTER RESPONSE 3", "AFTER RESPONSE 4",
 		"CROSS SESSION QUOTE",
@@ -1117,7 +1095,7 @@ func TestAnnotationPromptIncludesOnlyThreePriorTurnsWithinSession(t *testing.T) 
 
 	withoutContext := cfg
 	withoutContext.Draw.ContextTurns = 0
-	prompt, _, err = annotationPromptForTest(withoutContext, dataStore, target.ID, feedstocks, snapshots)
+	prompt, _, err = drawPromptForTest(withoutContext, dataStore, target.ID, feedstocks, snapshots)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1161,7 +1139,7 @@ func TestAnnotationContextUsesForkAncestorTurnsWithoutCrossingOtherSources(t *te
 	}
 }
 
-func TestAnnotationPromptIncludesBoundedPriorDialogueOnly(t *testing.T) {
+func TestDrawPromptIncludesBoundedPriorDialogueOnly(t *testing.T) {
 	dataStore, err := store.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -1224,7 +1202,7 @@ func TestAnnotationPromptIncludesBoundedPriorDialogueOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	targetID := parser.FeedstockID("claude", sessionID, "turn-target")
-	prompt, _, err := annotationPromptForTest(
+	prompt, _, err := drawPromptForTest(
 		config.Config{
 			Path: "/configured/config.toml",
 			Draw: config.Draw{ContextTurns: 1},
@@ -1237,10 +1215,11 @@ func TestAnnotationPromptIncludesBoundedPriorDialogueOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		`"target_user_input": "OK"`,
+		`"user_input": "OK"`,
 		`"prior_turns"`,
 		`"agent_response"`,
 		`"offset": -1`,
+		"Applied option A",
 		strings.TrimSpace(annotationContextAssistantTruncatedMarker),
 		"PREVIOUS ASSISTANT BEGIN",
 		"PREVIOUS ASSISTANT TAIL",
@@ -1249,7 +1228,7 @@ func TestAnnotationPromptIncludesBoundedPriorDialogueOnly(t *testing.T) {
 			t.Fatalf("prompt does not contain %q:\n%s", required, prompt)
 		}
 	}
-	for _, forbidden := range []string{"Applied option A", "What next?", afterAssistant, `"offset": 0`, `"offset": 1`} {
+	for _, forbidden := range []string{"What next?", afterAssistant, `"offset": 0`, `"offset": 1`} {
 		if strings.Contains(prompt, forbidden) {
 			t.Fatalf("prompt contains target response or future context %q:\n%s", forbidden, prompt)
 		}
@@ -1325,17 +1304,16 @@ type retryingAnnotatingRunner struct {
 }
 
 func (runner *retryingAnnotatingRunner) Run(_ context.Context, task llm.Task, feedstockID, _ string) (llm.RunResult, error) {
-	if task == llm.TaskSummarize {
-		return llm.RunResult{Output: json.RawMessage(`{"summary":"The user requested a tested change."}`)}, nil
-	}
-	if task != llm.TaskAnnotate {
+	if task != llm.TaskDraw {
 		return llm.RunResult{}, nil
 	}
 	if feedstockID == runner.failFeedstockID && runner.failuresLeft > 0 {
 		runner.failuresLeft--
 		return llm.RunResult{}, errors.New("temporary annotation failure")
 	}
-	return llm.RunResult{Output: json.RawMessage(`{"types":[]}`)}, nil
+	return llm.RunResult{
+		Output: json.RawMessage(`{"summary":"The user requested a tested change.","types":[]}`),
+	}, nil
 }
 
 func TestDrawContinuesAfterAnnotationFailureAndRetriesFeedstock(t *testing.T) {
@@ -1364,15 +1342,15 @@ func TestDrawContinuesAfterAnnotationFailureAndRetriesFeedstock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.FeedstocksFailed != 1 || first.FeedstocksAnnotated != 1 || len(first.Failures) != 1 {
+	if first.FeedstocksFailed != 1 || first.FeedstocksDrawn != 1 || len(first.Failures) != 1 {
 		t.Fatalf("first summary = %#v", first)
 	}
 	if first.Failures[0].FeedstockID != failedID ||
 		!strings.Contains(first.Failures[0].Reason, "temporary annotation failure") {
 		t.Fatalf("failure = %#v", first.Failures[0])
 	}
-	if !strings.Contains(progress.String(), "Type candidate selection failed · "+failedID) {
-		t.Fatalf("type candidate selection failure was not printed:\n%s", progress.String())
+	if !strings.Contains(progress.String(), "Draw failed · "+failedID) {
+		t.Fatalf("draw failure was not printed:\n%s", progress.String())
 	}
 	failed, _, err := dataStore.FindFeedstock(failedID)
 	if err != nil {
@@ -1386,7 +1364,7 @@ func TestDrawContinuesAfterAnnotationFailureAndRetriesFeedstock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.FeedstocksFailed != 0 || second.FeedstocksAnnotated != 1 || second.FeedstocksAcquired != 0 {
+	if second.FeedstocksFailed != 0 || second.FeedstocksDrawn != 1 || second.FeedstocksAcquired != 0 {
 		t.Fatalf("second summary = %#v", second)
 	}
 	if _, _, err := dataStore.FindFeedstock(failedID); err != nil {
@@ -1423,7 +1401,7 @@ func TestDrawReportsActualVerificationError(t *testing.T) {
 		t.Fatalf("summary = %#v", summary)
 	}
 	reason := summary.Failures[0].Reason
-	if !strings.Contains(reason, "apply summarize result") || !strings.Contains(reason, "unknown field") {
+	if !strings.Contains(reason, "apply draw result") || !strings.Contains(reason, "unknown field") {
 		t.Fatalf("failure reason = %q", reason)
 	}
 	if strings.Contains(reason, "did not finalize") {
@@ -1500,7 +1478,7 @@ func TestAcquisitionPersistsUnannotatedFeedstockAndResumeClassifiesIt(t *testing
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context cancellation", err)
 	}
-	if first.FeedstocksAcquired != 1 || first.FeedstocksAnnotated != 0 {
+	if first.FeedstocksAcquired != 1 || first.FeedstocksDrawn != 0 {
 		t.Fatalf("first summary = %#v", first)
 	}
 	id := parser.FeedstockID("claude", "phase-one", "turn-1")
@@ -1526,7 +1504,7 @@ func TestAcquisitionPersistsUnannotatedFeedstockAndResumeClassifiesIt(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.FeedstocksAcquired != 0 || second.FeedstocksAnnotated != 1 {
+	if second.FeedstocksAcquired != 0 || second.FeedstocksDrawn != 1 {
 		t.Fatalf("resume summary = %#v", second)
 	}
 	classified, _, err := dataStore.FindFeedstock(id)
@@ -1535,100 +1513,6 @@ func TestAcquisitionPersistsUnannotatedFeedstockAndResumeClassifiesIt(t *testing
 	}
 	if classified.AnnotatedAt == nil {
 		t.Fatal("resume did not annotate the pending feedstock")
-	}
-}
-
-type phaseOrderRunner struct {
-	store          *store.Store
-	mu             sync.Mutex
-	summarizeCalls int
-	annotateCalls  int
-	orderViolation bool
-}
-
-func (runner *phaseOrderRunner) Run(_ context.Context, task llm.Task, _ string, _ string) (llm.RunResult, error) {
-	switch task {
-	case llm.TaskSummarize:
-		runner.mu.Lock()
-		runner.summarizeCalls++
-		runner.mu.Unlock()
-		return llm.RunResult{Output: json.RawMessage(`{"summary":"target-only summary"}`)}, nil
-	case llm.TaskAnnotate:
-		feedstocks, _, err := runner.store.ListFeedstocks()
-		if err != nil {
-			return llm.RunResult{}, err
-		}
-		for _, feedstock := range feedstocks {
-			if strings.TrimSpace(feedstock.Summary) == "" {
-				runner.mu.Lock()
-				runner.orderViolation = true
-				runner.mu.Unlock()
-			}
-		}
-		runner.mu.Lock()
-		runner.annotateCalls++
-		runner.mu.Unlock()
-		return llm.RunResult{Output: json.RawMessage(`{"types":[]}`)}, nil
-	default:
-		return llm.RunResult{}, nil
-	}
-}
-
-type cancelOnSummaryWriter struct {
-	cancel context.CancelFunc
-}
-
-func (writer cancelOnSummaryWriter) Write(data []byte) (int, error) {
-	if strings.Contains(string(data), "Summarization complete ·") {
-		writer.cancel()
-	}
-	return len(data), nil
-}
-
-func TestDrawCompletesAllSummariesBeforeTypeCandidatesAndResumesAtAnnotationPhase(t *testing.T) {
-	root := t.TempDir()
-	dataStore, _ := store.New(root)
-	logPath := filepath.Join(t.TempDir(), "session.jsonl")
-	log := `{"type":"user","uuid":"turn-1","sessionId":"phase-order","timestamp":"2026-07-30T01:02:01Z","message":{"role":"user","content":"first"}}
-{"type":"user","uuid":"turn-2","sessionId":"phase-order","timestamp":"2026-07-30T01:02:02Z","message":{"role":"user","content":"second"}}
-{"type":"user","uuid":"turn-3","sessionId":"phase-order","timestamp":"2026-07-30T01:02:03Z","message":{"role":"user","content":"third"}}
-{"type":"user","sessionId":"phase-order","timestamp":"2026-07-30T01:02:04Z","message":{"role":"user","content":"[Request interrupted by user]"}}
-`
-	if err := os.WriteFile(logPath, []byte(log), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.Config{
-		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
-		LLM: config.LLM{Backend: "claude-cli"}, Draw: config.Draw{Concurrency: 3},
-		Sources: []config.Source{{Agent: "claude", Parser: "claude", Paths: []string{filepath.Dir(logPath)}}},
-	}
-	firstRunner := &phaseOrderRunner{store: dataStore}
-	ctx, cancel := context.WithCancel(context.Background())
-	first, err := Run(ctx, cfg, []string{logPath}, firstRunner, cancelOnSummaryWriter{cancel: cancel})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("first error = %v", err)
-	}
-	if first.FeedstocksSummarized != 3 || first.FeedstocksAnnotated != 0 ||
-		firstRunner.summarizeCalls != 3 || firstRunner.annotateCalls != 0 {
-		t.Fatalf("first summary = %#v, runner = %#v", first, firstRunner)
-	}
-	feedstocks, warnings, err := dataStore.ListFeedstocks()
-	if err != nil || len(warnings) != 0 {
-		t.Fatalf("feedstocks error = %v, warnings = %#v", err, warnings)
-	}
-	for _, feedstock := range feedstocks {
-		if feedstock.Summary == "" || feedstock.AnnotatedAt != nil {
-			t.Fatalf("partial feedstock = %#v", feedstock)
-		}
-	}
-	secondRunner := &phaseOrderRunner{store: dataStore}
-	second, err := Run(context.Background(), cfg, []string{logPath}, secondRunner, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.FeedstocksSummarized != 0 || second.FeedstocksAnnotated != 3 ||
-		secondRunner.summarizeCalls != 0 || secondRunner.annotateCalls != 3 || secondRunner.orderViolation {
-		t.Fatalf("second summary = %#v, runner = %#v", second, secondRunner)
 	}
 }
 
@@ -1647,7 +1531,7 @@ func (runner *concurrentAnnotatingRunner) Run(
 	_ string,
 	_ string,
 ) (llm.RunResult, error) {
-	if task != llm.TaskSummarize && task != llm.TaskAnnotate {
+	if task != llm.TaskDraw {
 		return llm.RunResult{}, nil
 	}
 	active := runner.active.Add(1)
@@ -1666,13 +1550,10 @@ func (runner *concurrentAnnotatingRunner) Run(
 	case <-ctx.Done():
 		return llm.RunResult{}, ctx.Err()
 	}
-	if task == llm.TaskSummarize {
-		return llm.RunResult{
-			Output: json.RawMessage(`{"summary":"The user requested concurrent classification."}`),
-			Usage:  runner.usage,
-		}, nil
-	}
-	return llm.RunResult{Output: json.RawMessage(`{"types":[]}`), Usage: runner.usage}, nil
+	return llm.RunResult{
+		Output: json.RawMessage(`{"summary":"The user requested concurrent classification.","types":[]}`),
+		Usage:  runner.usage,
+	}, nil
 }
 
 func TestDrawClassifiesAllFeedstocksWithConcurrentWorkers(t *testing.T) {
@@ -1709,7 +1590,7 @@ func TestDrawClassifiesAllFeedstocksWithConcurrentWorkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.FeedstocksAcquired != 8 || summary.FeedstocksAnnotated != 8 ||
+	if summary.FeedstocksAcquired != 8 || summary.FeedstocksDrawn != 8 ||
 		summary.FeedstocksFailed != 0 {
 		t.Fatalf("summary = %#v", summary)
 	}
@@ -1718,17 +1599,14 @@ func TestDrawClassifiesAllFeedstocksWithConcurrentWorkers(t *testing.T) {
 	}
 	if !strings.Contains(
 		progress.String(),
-		"Summarization complete · 8/8 feedstocks · in 8.0k tokens / out 800 tokens",
-	) || !strings.Contains(
-		progress.String(),
-		"Type candidate selection complete · 8/8 feedstocks · in 8.0k tokens / out 800 tokens",
+		"Draw complete · 8/8 feedstocks · in 8.0k tokens / out 800 tokens",
 	) {
-		t.Fatalf("draw phase progress did not reach all feedstocks:\n%s", progress.String())
+		t.Fatalf("draw progress did not reach all feedstocks:\n%s", progress.String())
 	}
 	if summary.Usage != (llm.UsageReport{
-		Backend: "claude-cli", TotalInputTokens: 16000,
-		StandardInputTokens: 6400, CacheReadInputTokens: 9600,
-		OutputTokens: 1600, TotalTokens: 17600,
+		Backend: "claude-cli", TotalInputTokens: 8000,
+		StandardInputTokens: 3200, CacheReadInputTokens: 4800,
+		OutputTokens: 800, TotalTokens: 8800,
 	}) {
 		t.Fatalf("usage report = %#v", summary.Usage)
 	}
@@ -1783,7 +1661,7 @@ func TestDrawContinuesAfterSourceParseFailure(t *testing.T) {
 	}
 	if summary.SourcesFailed != 1 || len(summary.SourceFailures) != 1 ||
 		summary.SourceFailures[0].Path != invalidPath ||
-		summary.FeedstocksAcquired != 1 || summary.FeedstocksAnnotated != 1 {
+		summary.FeedstocksAcquired != 1 || summary.FeedstocksDrawn != 1 {
 		t.Fatalf("summary = %#v", summary)
 	}
 	if !strings.Contains(progress.String(), "Acquisition failed · "+invalidPath) {
@@ -1880,17 +1758,15 @@ func TestDrawNonTTYProgressUsesPhaseLinesOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.FeedstocksAcquired != 2 || summary.FeedstocksAnnotated != 2 {
+	if summary.FeedstocksAcquired != 2 || summary.FeedstocksDrawn != 2 {
 		t.Fatalf("summary = %#v", summary)
 	}
 	text := output.String()
 	for _, required := range []string{
 		"Acquiring · 0/1 sources · 0 feedstocks",
 		"Acquisition complete · 2 feedstocks from 1 sources",
-		"Summarizing · 0/2 · 2 workers · in 0 tokens / out 0 tokens",
-		"Summarization complete · 2/2 feedstocks · in 2.0k tokens / out 200 tokens",
-		"Selecting type candidates · 0/2 · 2 workers · in 0 tokens / out 0 tokens",
-		"Type candidate selection complete · 2/2 feedstocks · in 2.0k tokens / out 200 tokens",
+		"Drawing · 0/2 · 2 workers · in 0 tokens / out 0 tokens",
+		"Draw complete · 2/2 feedstocks · in 2.0k tokens / out 200 tokens",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("progress does not contain %q:\n%s", required, text)
@@ -1898,8 +1774,7 @@ func TestDrawNonTTYProgressUsesPhaseLinesOnly(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"Acquiring " + logPath,
-		"Summarizing 1/2 complete:",
-		"Selecting type candidates 1/2 complete:",
+		"Drawing 1/2 complete:",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("non-TTY progress contains per-record line %q:\n%s", forbidden, text)
@@ -1943,7 +1818,7 @@ func BenchmarkDraw300TurnsByPhase(b *testing.B) {
 		started = time.Now()
 		second, err := Run(context.Background(), cfg, []string{logPath}, annotatingRunner{store: dataStore}, nil)
 		classificationTotal += time.Since(started)
-		if err != nil || second.FeedstocksAnnotated != 300 {
+		if err != nil || second.FeedstocksDrawn != 300 {
 			b.Fatalf("classification summary = %#v, error = %v", second, err)
 		}
 	}

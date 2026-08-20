@@ -631,7 +631,7 @@ func TestShowRawFlagValidation(t *testing.T) {
 	}
 }
 
-func TestFeedstockAnnotateTypeFlagsWriteMultipleCandidates(t *testing.T) {
+func TestFeedstockDraftTypeFlagsWriteSummaryAndMultipleCandidates(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
@@ -647,7 +647,6 @@ func TestFeedstockAnnotateTypeFlagsWriteMultipleCandidates(t *testing.T) {
 		Schema: domain.SchemaVersion, ID: "fs-type-flags", TurnID: "turn-type-flags",
 		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "claude",
-		Summary: "The user supplied an established property and relation.",
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
@@ -655,7 +654,8 @@ func TestFeedstockAnnotateTypeFlagsWriteMultipleCandidates(t *testing.T) {
 
 	command := newRootCommand()
 	command.SetArgs([]string{
-		"feedstock", "annotate", feedstock.ID,
+		"feedstock", "draft", feedstock.ID,
+		"--summary", "The user supplied an established property and relation.",
 		"--type", "property",
 		"--type", "relation",
 	})
@@ -665,6 +665,10 @@ func TestFeedstockAnnotateTypeFlagsWriteMultipleCandidates(t *testing.T) {
 	stored, _, err := dataStore.FindFeedstock(feedstock.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if stored.Summary != "The user supplied an established property and relation." ||
+		stored.AnnotatedAt == nil {
+		t.Fatalf("feedstock = %#v", stored)
 	}
 	if len(stored.Types) != 2 {
 		t.Fatalf("types = %#v", stored.Types)
@@ -681,7 +685,8 @@ func TestFeedstockAnnotateTypeFlagsWriteMultipleCandidates(t *testing.T) {
 	}
 	invalid := newRootCommand()
 	invalid.SetArgs([]string{
-		"feedstock", "annotate", invalidFeedstock.ID,
+		"feedstock", "draft", invalidFeedstock.ID,
+		"--summary", "summary",
 		"--type", "other",
 	})
 	err = invalid.Execute()
@@ -697,7 +702,8 @@ func TestFeedstockAnnotateTypeFlagsWriteMultipleCandidates(t *testing.T) {
 	}
 	removed := newRootCommand()
 	removed.SetArgs([]string{
-		"feedstock", "annotate", removedFlagFeedstock.ID,
+		"feedstock", "draft", removedFlagFeedstock.ID,
+		"--summary", "summary",
 		"--assertion", `{"type":"property"}`,
 	})
 	err = removed.Execute()
@@ -706,7 +712,7 @@ func TestFeedstockAnnotateTypeFlagsWriteMultipleCandidates(t *testing.T) {
 	}
 }
 
-func TestFeedstockSummarizeAndAnnotateAreSeparateCommands(t *testing.T) {
+func TestFeedstockDraftReplacesTheSeparateSummarizeAndAnnotateCommands(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(configPath, []byte("root = "+quoteTOML(rootDir)+"\n\n[llm]\nbackend = \"claude-cli\"\n"), 0o600); err != nil {
@@ -715,34 +721,51 @@ func TestFeedstockSummarizeAndAnnotateAreSeparateCommands(t *testing.T) {
 	t.Setenv(config.ConfigEnvironment, configPath)
 	dataStore, _ := store.New(rootDir)
 	feedstock := domain.Feedstock{
-		Schema: domain.SchemaVersion, ID: "fs-cli-phases", TurnID: "turn-cli-phases",
+		Schema: domain.SchemaVersion, ID: "fs-cli-draft", TurnID: "turn-cli-draft",
 		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: time.Now().UTC(), Agent: "claude",
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
 	}
-	summarize := newRootCommand()
-	summarize.SetArgs([]string{"feedstock", "summarize", feedstock.ID, "--summary", "target summary"})
-	if err := summarize.Execute(); err != nil {
-		t.Fatal(err)
+	subcommands := map[string]bool{}
+	for _, command := range newRootCommand().Commands() {
+		if command.Name() != "feedstock" {
+			continue
+		}
+		for _, sub := range command.Commands() {
+			subcommands[sub.Name()] = true
+		}
 	}
-	annotate := newRootCommand()
-	annotate.SetArgs([]string{"feedstock", "annotate", feedstock.ID})
-	if err := annotate.Execute(); err != nil {
+	if subcommands["summarize"] || subcommands["annotate"] {
+		t.Fatalf("separate summarize and annotate commands still exist: %#v", subcommands)
+	}
+	if !subcommands["draft"] {
+		t.Fatalf("draft command is missing: %#v", subcommands)
+	}
+	draft := newRootCommand()
+	draft.SetArgs([]string{
+		"feedstock", "draft", feedstock.ID,
+		"--summary", "target summary",
+		"--type", "property",
+	})
+	if err := draft.Execute(); err != nil {
 		t.Fatal(err)
 	}
 	stored, _, err := dataStore.FindFeedstock(feedstock.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Summary != "target summary" || stored.AnnotatedAt == nil {
+	if stored.Summary != "target summary" || stored.AnnotatedAt == nil ||
+		len(stored.Types) != 1 || stored.Types[0] != domain.KnowledgeType("property") {
 		t.Fatalf("feedstock = %#v", stored)
 	}
-	legacy := newRootCommand()
-	legacy.SetArgs([]string{"feedstock", "annotate", feedstock.ID, "--summary", "replacement"})
-	if err := legacy.Execute(); err == nil || !strings.Contains(err.Error(), "unknown flag: --summary") {
-		t.Fatalf("legacy annotate summary error = %v", err)
+	repeated := newRootCommand()
+	repeated.SetArgs([]string{
+		"feedstock", "draft", feedstock.ID, "--summary", "replacement",
+	})
+	if err := repeated.Execute(); err == nil || !strings.Contains(err.Error(), "already drawn") {
+		t.Fatalf("repeated draft error = %v", err)
 	}
 }
 

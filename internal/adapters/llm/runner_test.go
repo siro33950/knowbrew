@@ -33,7 +33,7 @@ exec /bin/sleep 5
 	}
 
 	started := time.Now()
-	_, err := runner.Run(context.Background(), TaskAnnotate, "claude-session-t000001", "classify")
+	_, err := runner.Run(context.Background(), TaskDraw, "claude-session-t000001", "classify")
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("error = %v, want ErrTimeout", err)
 	}
@@ -62,7 +62,7 @@ exit 7
 		Progress:   &progress,
 	}
 
-	_, err := runner.Run(context.Background(), TaskAnnotate, "claude-session-t000001", "classify")
+	_, err := runner.Run(context.Background(), TaskDraw, "claude-session-t000001", "classify")
 	if err == nil {
 		t.Fatal("expected backend failure")
 	}
@@ -93,7 +93,7 @@ echo "backend warning" >&2
 		WorkDir:    root,
 	}
 
-	_, err := runner.Run(context.Background(), TaskAnnotate, "feedstock-1", "classify")
+	_, err := runner.Run(context.Background(), TaskDraw, "feedstock-1", "classify")
 	if err == nil {
 		t.Fatal("expected a missing-result failure")
 	}
@@ -122,7 +122,7 @@ exit 7
 		WorkDir:    root,
 	}
 	prompt := "SECRET MULTILINE PROMPT\nthat must not appear in diagnostics"
-	_, err := runner.Run(context.Background(), TaskAnnotate, "feedstock-1", prompt)
+	_, err := runner.Run(context.Background(), TaskDraw, "feedstock-1", prompt)
 	if err == nil {
 		t.Fatal("expected backend failure")
 	}
@@ -229,7 +229,7 @@ echo "backend stderr marker" >&2
 			}
 			if _, err := runner.Run(
 				context.Background(),
-				TaskAnnotate,
+				TaskDraw,
 				"claude-session-t000001",
 				"classify",
 			); err != nil {
@@ -289,7 +289,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":450,"cached_inpu
 			}
 			usage, err := runner.RunWithUsage(
 				context.Background(),
-				TaskAnnotate,
+				TaskDraw,
 				"feedstock-1",
 				"classify",
 			)
@@ -349,8 +349,8 @@ func TestClaudeBrewPermissionsExposeFeedstockBrewTools(t *testing.T) {
 	}
 }
 
-func TestClaudeAnnotatePermissionsAllowOnlyBoundedContext(t *testing.T) {
-	permissions := strings.Join(claudeAllowedTools("/bin/knowbrew", TaskAnnotate), "\n")
+func TestClaudeDrawPermissionsAllowOnlyBoundedContext(t *testing.T) {
+	permissions := strings.Join(claudeAllowedTools("/bin/knowbrew", TaskDraw), "\n")
 	for _, required := range []string{
 		"/bin/knowbrew feedstock context *",
 	} {
@@ -358,17 +358,10 @@ func TestClaudeAnnotatePermissionsAllowOnlyBoundedContext(t *testing.T) {
 			t.Fatalf("permissions do not contain %q:\n%s", required, permissions)
 		}
 	}
-	for _, forbidden := range []string{"feedstock annotate", "show", "knowledge create", "knowledge invalidate", "feedstock --"} {
+	for _, forbidden := range []string{"feedstock draft", "show", "knowledge create", "knowledge invalidate", "feedstock --"} {
 		if strings.Contains(permissions, forbidden) {
-			t.Fatalf("annotate permissions contain %q:\n%s", forbidden, permissions)
+			t.Fatalf("draw permissions contain %q:\n%s", forbidden, permissions)
 		}
-	}
-}
-
-func TestClaudeSummarizePermissionsExposeNoTools(t *testing.T) {
-	permissions := strings.Join(claudeAllowedTools("/bin/knowbrew", TaskSummarize), "\n")
-	if permissions != "" {
-		t.Fatalf("permissions = %q, want no tools", permissions)
 	}
 }
 
@@ -408,8 +401,7 @@ exit 9
 		wantModel  string
 		wantEffort string
 	}{
-		{task: TaskSummarize, wantModel: "draw-fast", wantEffort: "low"},
-		{task: TaskAnnotate, wantModel: "draw-fast", wantEffort: "low"},
+		{task: TaskDraw, wantModel: "draw-fast", wantEffort: "low"},
 		{task: TaskBrew, wantModel: "brew-quality", wantEffort: "max"},
 		{task: TaskDistillSelect, wantModel: "distill-quality", wantEffort: "high"},
 		{task: TaskDistillGenerate, wantModel: "distill-quality", wantEffort: "high"},
@@ -467,8 +459,7 @@ exit 9
 		wantModel  string
 		wantEffort string
 	}{
-		{task: TaskSummarize, wantModel: "draw-fast", wantEffort: "low"},
-		{task: TaskAnnotate, wantModel: "draw-fast", wantEffort: "low"},
+		{task: TaskDraw, wantModel: "draw-fast", wantEffort: "low"},
 		{task: TaskBrew, wantModel: "brew-quality", wantEffort: "high"},
 		{task: TaskDistillSelect, wantModel: "distill-quality", wantEffort: "max"},
 		{task: TaskDistillGenerate, wantModel: "distill-quality", wantEffort: "max"},
@@ -532,7 +523,7 @@ exit 9
 				Executable: filepath.Join(root, "knowbrew"),
 				WorkDir:    root,
 			}
-			if _, err := runner.Run(context.Background(), TaskAnnotate, "feedstock-1", "prompt"); err == nil {
+			if _, err := runner.Run(context.Background(), TaskDraw, "feedstock-1", "prompt"); err == nil {
 				t.Fatal("expected the capture backend to exit unsuccessfully")
 			}
 			data, err := os.ReadFile(capturePath)

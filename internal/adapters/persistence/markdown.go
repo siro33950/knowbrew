@@ -49,16 +49,13 @@ func (repository *Markdown) WriteFeedstock(feedstock domain.Feedstock) error {
 	return repository.Store.WriteFeedstock(feedstock)
 }
 
-func (repository *Markdown) SummarizeFeedstock(id, summary string) error {
-	return repository.Store.SummarizeFeedstock(id, summary)
-}
-
-func (repository *Markdown) AnnotateFeedstock(
+func (repository *Markdown) DraftFeedstock(
 	id string,
+	summary string,
 	types []domain.KnowledgeType,
 	when time.Time,
 ) error {
-	return repository.Store.AnnotateFeedstock(id, types, when)
+	return repository.Store.DraftFeedstock(id, summary, types, when)
 }
 
 func (repository *Markdown) EnsureMaster(kind string, entry domain.MasterEntry) (bool, error) {

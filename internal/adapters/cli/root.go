@@ -658,35 +658,9 @@ func newFeedstockCommand() *cobra.Command {
 	parent.Flags().IntVar(&last, "last", 0, "Return the latest N feedstocks in oldest-to-newest order")
 	var typeValues []string
 	var summary string
-	summarize := &cobra.Command{
-		Use:   "summarize <feedstock-id>",
-		Short: "Write the target-turn summary for one pending feedstock",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(command *cobra.Command, args []string) error {
-			cfg, err := config.Load()
-			if err != nil {
-				return err
-			}
-			dataStore, err := store.New(cfg.Root)
-			if err != nil {
-				return err
-			}
-			if err := draw.Summarize(
-				command.Context(), repositoryFor(dataStore),
-				invocationadapter.Guard{Root: cfg.Root}, args[0], summary,
-			); err != nil {
-				return err
-			}
-			return writeJSON(os.Stdout, map[string]any{
-				"feedstock_id": args[0], "summarized": true,
-			})
-		},
-	}
-	summarize.Flags().StringVar(&summary, "summary", "", "One- or two-sentence factual summary of the target turn")
-	_ = summarize.MarkFlagRequired("summary")
-	annotate := &cobra.Command{
-		Use:   "annotate <feedstock-id>",
-		Short: "Write type candidates for one summarized feedstock",
+	draft := &cobra.Command{
+		Use:   "draft <feedstock-id>",
+		Short: "Write the target-turn summary and type candidates for one pending feedstock",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
 			cfg, err := config.Load()
@@ -701,20 +675,21 @@ func newFeedstockCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = draw.Annotate(
+			if err := draw.ApplyDraft(
 				command.Context(), repositoryFor(dataStore),
-				invocationadapter.Guard{Root: cfg.Root}, draw.Annotation{
-					FeedstockID: args[0], Types: types,
-				})
-			if err != nil {
+				invocationadapter.Guard{Root: cfg.Root}, draw.Draft{
+					FeedstockID: args[0], Summary: summary, Types: types,
+				}); err != nil {
 				return err
 			}
 			return writeJSON(os.Stdout, map[string]any{
-				"feedstock_id": args[0], "annotated": true,
+				"feedstock_id": args[0], "drawn": true,
 			})
 		},
 	}
-	annotate.Flags().StringArrayVar(&typeValues, "type", nil, "Knowledge type candidate (repeatable)")
+	draft.Flags().StringVar(&summary, "summary", "", "One- or two-sentence factual summary of the target turn")
+	_ = draft.MarkFlagRequired("summary")
+	draft.Flags().StringArrayVar(&typeValues, "type", nil, "Knowledge type candidate (repeatable)")
 	contextCommand := &cobra.Command{
 		Use:   "context <feedstock-id>",
 		Short: "Load bounded source context for one unresolved turn reference",
@@ -751,7 +726,7 @@ func newFeedstockCommand() *cobra.Command {
 			}{AnnotationContext: turnContext, Warnings: warnings})
 		},
 	}
-	parent.AddCommand(summarize, annotate, contextCommand)
+	parent.AddCommand(draft, contextCommand)
 	return parent
 }
 

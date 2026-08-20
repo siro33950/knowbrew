@@ -35,20 +35,7 @@ func ensureRepositorySubjectForTest(
 	)
 }
 
-func summaryPromptForTest(
-	cfg config.Config,
-	dataStore *store.Store,
-	feedstockID string,
-	snapshots ...map[string][]domain.FeedstockCandidate,
-) (string, []diagnostic.Warning, error) {
-	settings := promptSettingsForTest(cfg, dataStore.Root)
-	return summaryPrompt(
-		sourceadapter.New(settings.Sources), &persistenceadapter.Markdown{Store: dataStore},
-		feedstockID, snapshots...,
-	)
-}
-
-func annotationPromptForTest(
+func drawPromptForTest(
 	cfg config.Config,
 	dataStore *store.Store,
 	feedstockID string,
@@ -57,33 +44,21 @@ func annotationPromptForTest(
 ) (string, []diagnostic.Warning, error) {
 	repository := &persistenceadapter.Markdown{Store: dataStore}
 	settings := promptSettingsForTest(cfg, dataStore.Root)
-	return annotationPrompt(
+	return drawPrompt(
 		settings, sourceadapter.New(settings.Sources),
 		repository,
 		feedstockID, feedstocks, snapshots...,
 	)
 }
 
-func annotateForTest(
+func draftForTest(
 	ctx context.Context,
 	dataStore *store.Store,
-	annotation Annotation,
-) (int, error) {
-	return Annotate(
-		ctx, &persistenceadapter.Markdown{Store: dataStore},
-		invocationadapter.Guard{Root: dataStore.Root}, annotation,
-	)
-}
-
-func summarizeForTest(
-	ctx context.Context,
-	dataStore *store.Store,
-	feedstockID,
-	summary string,
+	draft Draft,
 ) error {
-	return Summarize(
+	return ApplyDraft(
 		ctx, &persistenceadapter.Markdown{Store: dataStore},
-		invocationadapter.Guard{Root: dataStore.Root}, feedstockID, summary,
+		invocationadapter.Guard{Root: dataStore.Root}, draft,
 	)
 }
 

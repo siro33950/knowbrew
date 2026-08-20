@@ -23,8 +23,7 @@ import (
 var ErrTimeout = errors.New("LLM backend timed out")
 
 const (
-	TaskSummarize       = agent.TaskSummarize
-	TaskAnnotate        = agent.TaskAnnotate
+	TaskDraw            = agent.TaskDraw
 	TaskBrew            = agent.TaskBrew
 	TaskDistillSelect   = agent.TaskDistillSelect
 	TaskDistillGenerate = agent.TaskDistillGenerate
@@ -101,7 +100,7 @@ func (runner *CommandRunner) Run(
 		return RunResult{}, err
 	}
 	defer func() { _ = os.Remove(resultPath) }()
-	if task == TaskAnnotate || task == TaskBrew {
+	if task == TaskDraw || task == TaskBrew {
 		prompt = fmt.Sprintf("%s\n\nUse this exact knowbrew executable only for the permitted operations: %s", prompt, runner.Executable)
 	}
 	switch runner.Config.LLM.Backend {
@@ -241,7 +240,7 @@ func (writer lockedWriter) Write(data []byte) (int, error) {
 
 func modelForTask(cfg config.Config, task Task) (string, error) {
 	switch task {
-	case TaskSummarize, TaskAnnotate:
+	case TaskDraw:
 		return strings.TrimSpace(cfg.LLM.DrawModel), nil
 	case TaskBrew:
 		return strings.TrimSpace(cfg.LLM.BrewModel), nil
@@ -254,7 +253,7 @@ func modelForTask(cfg config.Config, task Task) (string, error) {
 
 func effortForTask(cfg config.Config, task Task) (string, error) {
 	switch task {
-	case TaskSummarize, TaskAnnotate:
+	case TaskDraw:
 		return cfg.LLM.DrawEffort, nil
 	case TaskBrew:
 		return cfg.LLM.BrewEffort, nil
@@ -351,10 +350,10 @@ func claudeAllowedTools(executable string, task Task) []string {
 	pattern := func(command string) string {
 		return "Bash(" + executable + " " + command + ")"
 	}
-	if task == TaskSummarize || task == TaskDistillSelect || task == TaskDistillGenerate {
+	if task == TaskDistillSelect || task == TaskDistillGenerate {
 		return nil
 	}
-	if task == TaskAnnotate {
+	if task == TaskDraw {
 		return []string{pattern("feedstock context *")}
 	}
 	return []string{

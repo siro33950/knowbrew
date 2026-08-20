@@ -280,11 +280,8 @@ func (runner *ToolRunner) post(ctx context.Context, endpoint string, body any, t
 }
 
 func toolSystemPrompt(task Task) string {
-	if task == TaskSummarize {
-		return "Summarize exactly the target user input and target agent response supplied in the user prompt. Return only the required structured result. Do not infer from surrounding turns."
-	}
-	if task == TaskAnnotate {
-		return "Select broad Knowledge type candidates from the target user input and prior turns supplied in the user prompt. If an unresolved reference affects a possible candidate, feedstock_context may be called once. Return only the types array in the required structured result."
+	if task == TaskDraw {
+		return "Summarize the target turn supplied in the user prompt and select broad Knowledge type candidates for it. Do not infer from surrounding turns beyond resolving references. If an unresolved reference affects a possible candidate, feedstock_context may be called once. Return only the required structured result."
 	}
 	if task == TaskDistillSelect {
 		return "Select only supplied invocation-local Knowledge references that can support the supplied document Template. Return only the required structured result. Never call tools or edit files."
@@ -296,10 +293,10 @@ func toolSystemPrompt(task Task) string {
 }
 
 func toolSchemas(task Task, typeNames []string) []map[string]any {
-	if task == TaskSummarize || task == TaskDistillSelect || task == TaskDistillGenerate {
+	if task == TaskDistillSelect || task == TaskDistillGenerate {
 		return nil
 	}
-	if task == TaskAnnotate {
+	if task == TaskDraw {
 		return []map[string]any{
 			toolDefinition("feedstock_context", "Load the configured maximum source context for one unresolved target reference", map[string]any{
 				"type":     "object",
@@ -382,10 +379,10 @@ func knowledgeCandidateToolSchema(typeNames []string) map[string]any {
 }
 
 func toolAllowed(task Task, name string) bool {
-	if task == TaskSummarize || task == TaskDistillSelect || task == TaskDistillGenerate {
+	if task == TaskDistillSelect || task == TaskDistillGenerate {
 		return false
 	}
-	if task == TaskAnnotate {
+	if task == TaskDraw {
 		return name == "feedstock_context"
 	}
 	switch name {

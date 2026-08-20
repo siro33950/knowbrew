@@ -7,35 +7,22 @@ import (
 	"time"
 )
 
-func (f *Feedstock) ApplySummary(summary string) error {
+func (f *Feedstock) ApplyDraft(summary string, types []KnowledgeType, when time.Time) error {
 	if f.AnnotatedAt != nil {
-		return fmt.Errorf("feedstock %s is already annotated", f.ID)
-	}
-	if strings.TrimSpace(f.Summary) != "" {
-		return fmt.Errorf("feedstock %s is already summarized", f.ID)
+		return fmt.Errorf("feedstock %s is already drawn", f.ID)
 	}
 	summary = strings.TrimSpace(summary)
 	if summary == "" {
 		return errors.New("summary is required")
 	}
-	f.Summary = summary
-	return nil
-}
-
-func (f *Feedstock) ApplyAnnotation(types []KnowledgeType, when time.Time) error {
-	if f.AnnotatedAt != nil {
-		return fmt.Errorf("feedstock %s is already annotated", f.ID)
-	}
-	if strings.TrimSpace(f.Summary) == "" {
-		return fmt.Errorf("feedstock %s must be summarized before annotation", f.ID)
-	}
 	if when.IsZero() {
-		return errors.New("annotation time is required")
+		return errors.New("draw time is required")
 	}
 	types, err := NormalizeKnowledgeTypes(types)
 	if err != nil {
 		return err
 	}
+	f.Summary = summary
 	f.Types = types
 	f.AnnotatedAt = &when
 	return ValidateFeedstock(*f)
@@ -43,7 +30,7 @@ func (f *Feedstock) ApplyAnnotation(types []KnowledgeType, when time.Time) error
 
 func (f *Feedstock) ApplyBrewProgress(when time.Time) error {
 	if f.AnnotatedAt == nil {
-		return fmt.Errorf("feedstock %s is not annotated", f.ID)
+		return fmt.Errorf("feedstock %s is not drawn", f.ID)
 	}
 	if when.IsZero() {
 		return errors.New("brew time is required")

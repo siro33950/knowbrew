@@ -9,10 +9,8 @@ import (
 func TestFeedstockTransitionsUseTypeCandidatesAndTurnBrewProgress(t *testing.T) {
 	now := time.Date(2026, 8, 3, 1, 2, 3, 0, time.UTC)
 	feedstock := validFeedstock("fs-transition", now)
-	if err := feedstock.ApplySummary("  The user established durable behavior.  "); err != nil {
-		t.Fatal(err)
-	}
-	if err := feedstock.ApplyAnnotation(
+	if err := feedstock.ApplyDraft(
+		"  The user established durable behavior.  ",
 		[]KnowledgeType{"property", "decision", "property"},
 		now.Add(time.Minute),
 	); err != nil {
@@ -35,8 +33,11 @@ func TestFeedstockTransitionsUseTypeCandidatesAndTurnBrewProgress(t *testing.T) 
 func TestFeedstockWithoutTypeCandidatesIsNotPendingBrew(t *testing.T) {
 	now := time.Date(2026, 8, 3, 1, 2, 3, 0, time.UTC)
 	feedstock := validFeedstock("fs-empty", now)
-	feedstock.Summary = "No durable Knowledge was found."
-	if err := feedstock.ApplyAnnotation(nil, now.Add(time.Minute)); err != nil {
+	if err := feedstock.ApplyDraft(
+		"No durable Knowledge was found.",
+		nil,
+		now.Add(time.Minute),
+	); err != nil {
 		t.Fatal(err)
 	}
 	if feedstock.PendingBrew() {

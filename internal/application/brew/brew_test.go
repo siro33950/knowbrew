@@ -73,7 +73,7 @@ func TestSubmitRejectsAnnotateInvocation(t *testing.T) {
 	feedstock := writePendingFeedstock(t, dataStore, "fs-annotate-invocation", "knowbrew")
 	t.Setenv(config.InvocationIDEnvironment, "annotate-invocation")
 	t.Setenv(config.InvocationFeedstockEnvironment, feedstock.ID)
-	t.Setenv(config.InvocationTaskEnvironment, string(agent.TaskAnnotate))
+	t.Setenv(config.InvocationTaskEnvironment, string(agent.TaskDraw))
 	_, err := Submit(repositoryForTest(dataStore), invocationForTest(dataStore), SubmitInput{
 		FeedstockID: feedstock.ID,
 		Knowledge:   newCandidate("Annotate must not submit Knowledge."),

@@ -16,8 +16,7 @@ type Repository interface {
 	WriteFeedstock(domain.Feedstock) error
 	GetFeedstock(string) (domain.Feedstock, error)
 	ListFeedstocks() ([]domain.Feedstock, []diagnostic.Warning, error)
-	SummarizeFeedstock(string, string) error
-	AnnotateFeedstock(string, []domain.KnowledgeType, time.Time) error
+	DraftFeedstock(string, string, []domain.KnowledgeType, time.Time) error
 	LoadMasters(string) ([]domain.MasterEntry, []diagnostic.Warning, error)
 	EnsureMaster(string, domain.MasterEntry) (bool, error)
 	KnowledgeTypes() ([]domain.MasterEntry, error)

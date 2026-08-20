@@ -13,8 +13,7 @@ import (
 type Task string
 
 const (
-	TaskSummarize       Task = "summarize"
-	TaskAnnotate        Task = "annotate"
+	TaskDraw            Task = "draw"
 	TaskBrew            Task = "brew"
 	TaskDistillSelect   Task = "distill_select"
 	TaskDistillGenerate Task = "distill_generate"

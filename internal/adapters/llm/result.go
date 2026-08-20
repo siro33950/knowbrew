@@ -26,7 +26,7 @@ func DecodeResult(data json.RawMessage, target any) error {
 }
 
 func knowledgeTypeNames(ctx context.Context, task Task) ([]string, error) {
-	if task == TaskSummarize || task == TaskDistillSelect || task == TaskDistillGenerate {
+	if task == TaskDistillSelect || task == TaskDistillGenerate {
 		return nil, nil
 	}
 	return agent.KnowledgeTypesFromContext(ctx), nil
@@ -34,15 +34,11 @@ func knowledgeTypeNames(ctx context.Context, task Task) ([]string, error) {
 
 func resultSchema(task Task, typeNames []string) map[string]any {
 	switch task {
-	case TaskSummarize:
+	case TaskDraw:
 		return objectSchema(
-			[]string{"summary"},
-			map[string]any{"summary": map[string]any{"type": "string", "minLength": 1}},
-		)
-	case TaskAnnotate:
-		return objectSchema(
-			[]string{"types"},
+			[]string{"summary", "types"},
 			map[string]any{
+				"summary": map[string]any{"type": "string", "minLength": 1},
 				"types": map[string]any{
 					"type":  "array",
 					"items": typeSchema(typeNames),

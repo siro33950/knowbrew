@@ -318,26 +318,9 @@ func (s *Store) WriteBrewedFeedstock(feedstock domain.Feedstock, when time.Time)
 	return fsutil.AtomicWrite(path, data, 0o644)
 }
 
-func (s *Store) SummarizeFeedstock(id, summary string) error {
-	feedstock, path, err := s.FindFeedstock(id)
-	if err != nil {
-		return err
-	}
-	if err := feedstock.ApplySummary(summary); err != nil {
-		return err
-	}
-	if err := domain.ValidateFeedstock(feedstock); err != nil {
-		return err
-	}
-	data, err := encodeWithWikilinks(feedstock, "", "types")
-	if err != nil {
-		return err
-	}
-	return fsutil.AtomicWrite(path, data, 0o644)
-}
-
-func (s *Store) AnnotateFeedstock(
+func (s *Store) DraftFeedstock(
 	id string,
+	summary string,
 	types []domain.KnowledgeType,
 	when time.Time,
 ) error {
@@ -346,16 +329,13 @@ func (s *Store) AnnotateFeedstock(
 		return err
 	}
 	if feedstock.AnnotatedAt != nil {
-		return fmt.Errorf("feedstock %s is already annotated", id)
-	}
-	if strings.TrimSpace(feedstock.Summary) == "" {
-		return fmt.Errorf("feedstock %s must be summarized before annotation", id)
+		return fmt.Errorf("feedstock %s is already drawn", id)
 	}
 	types, err = s.NormalizeKnowledgeTypes(types)
 	if err != nil {
 		return fmt.Errorf("feedstock types: %w", err)
 	}
-	if err := feedstock.ApplyAnnotation(types, when); err != nil {
+	if err := feedstock.ApplyDraft(summary, types, when); err != nil {
 		return err
 	}
 	data, err := encodeWithWikilinks(feedstock, "", "types")

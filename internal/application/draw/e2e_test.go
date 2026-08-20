@@ -81,7 +81,7 @@ func TestRealLLMEndToEndWhenConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if drawSummary.FeedstocksAnnotated == 0 {
+	if drawSummary.FeedstocksDrawn == 0 {
 		t.Fatalf("draw summary = %#v", drawSummary)
 	}
 	if drawSummary.MastersAdded == 0 {
@@ -108,7 +108,7 @@ func TestRealLLMEndToEndWhenConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if brewSummary.FeedstocksProcessed != drawSummary.FeedstocksAnnotated {
+	if brewSummary.FeedstocksProcessed != drawSummary.FeedstocksDrawn {
 		t.Fatalf("brew summary = %#v, draw summary = %#v", brewSummary, drawSummary)
 	}
 	feedstocks, warnings, err := dataStore.ListFeedstocks()

@@ -493,8 +493,9 @@ func TestIncrementalFeedstockSyncUpdatesClassificationFields(t *testing.T) {
 	if before.Total != 0 {
 		t.Fatalf("unannotated search = %#v", before)
 	}
-	if err := dataStore.AnnotateFeedstock(
+	if err := dataStore.DraftFeedstock(
 		feedstock.ID,
+		feedstock.Summary,
 		[]domain.KnowledgeType{"property"},
 		time.Now().UTC(),
 	); err != nil {
