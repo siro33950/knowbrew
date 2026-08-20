@@ -20,12 +20,20 @@ type File struct {
 	Path   string
 }
 
+type Order string
+
+const (
+	OrderNewest Order = "newest"
+	OrderOldest Order = "oldest"
+)
+
 type Selection struct {
 	Paths         []string
 	MaxTurns      int
 	Sources       []string
 	ModifiedSince *time.Time
 	ModifiedUntil *time.Time
+	Order         Order
 }
 
 type Gateway interface {

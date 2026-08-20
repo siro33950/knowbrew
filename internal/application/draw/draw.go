@@ -213,7 +213,9 @@ func (service Service) RunWithOptions(
 			}
 		}
 	}
-	selected := selectUnfinishedCandidates(allCandidates, existingByID, options.MaxTurns)
+	selected := selectUnfinishedCandidates(
+		allCandidates, existingByID, options.MaxTurns, options.Order,
+	)
 	selectedIDs := make(map[string]struct{}, len(selected))
 	repositoryCache := map[string]string{}
 	for index := range selected {
@@ -350,6 +352,7 @@ func selectUnfinishedCandidates(
 	candidates []domain.FeedstockCandidate,
 	existing map[string]domain.Feedstock,
 	limit int,
+	order applicationsource.Order,
 ) []domain.FeedstockCandidate {
 	resumable := make([]domain.FeedstockCandidate, 0)
 	unacquired := make([]domain.FeedstockCandidate, 0)
@@ -362,18 +365,23 @@ func selectUnfinishedCandidates(
 			unacquired = append(unacquired, candidate)
 		}
 	}
-	newestFirst := func(left, right domain.FeedstockCandidate) int {
-		if compared := right.Timestamp.Compare(left.Timestamp); compared != 0 {
+	ordering := func(left, right domain.FeedstockCandidate) int {
+		compared := left.Timestamp.Compare(right.Timestamp)
+		if compared == 0 && left.Agent == right.Agent &&
+			left.Session.ID == right.Session.ID &&
+			left.SourceSequence != right.SourceSequence {
+			compared = cmp.Compare(left.SourceSequence, right.SourceSequence)
+		}
+		if compared == 0 {
+			return strings.Compare(left.ID, right.ID)
+		}
+		if order == applicationsource.OrderOldest {
 			return compared
 		}
-		if left.Agent == right.Agent && left.Session.ID == right.Session.ID &&
-			left.SourceSequence != right.SourceSequence {
-			return cmp.Compare(right.SourceSequence, left.SourceSequence)
-		}
-		return strings.Compare(left.ID, right.ID)
+		return -compared
 	}
-	slices.SortFunc(resumable, newestFirst)
-	slices.SortFunc(unacquired, newestFirst)
+	slices.SortFunc(resumable, ordering)
+	slices.SortFunc(unacquired, ordering)
 	selected := append(resumable, unacquired...)
 	if limit > 0 && len(selected) > limit {
 		selected = selected[:limit]
