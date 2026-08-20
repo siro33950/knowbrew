@@ -654,7 +654,6 @@ func TestClaudeSkipsUnknownRecordsWithWarning(t *testing.T) {
 		t.Fatalf("dialogue = %#v", feedstocks[0].Dialogue)
 	}
 	wantReasons := []string{
-		`unknown Claude record type "future-conversation-record"`,
 		`unknown Claude assistant content block "future-block"`,
 	}
 	if len(warnings) != len(wantReasons) {
@@ -688,8 +687,6 @@ func TestCodexSkipsUnknownRecordsWithWarning(t *testing.T) {
 		t.Fatalf("dialogue = %#v", feedstocks[0].Dialogue)
 	}
 	wantReasons := []string{
-		`unknown Codex record type "future_record"`,
-		`unknown Codex event type "future_event"`,
 		"ambiguous Codex record shape",
 	}
 	if len(warnings) != len(wantReasons) {

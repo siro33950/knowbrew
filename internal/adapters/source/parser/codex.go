@@ -76,30 +76,6 @@ type codexContentBlock struct {
 	Text string `json:"text"`
 }
 
-var ignoredCodexTopLevelTypes = map[string]struct{}{
-	"compacted": {}, "inter_agent_communication_metadata": {}, "world_state": {},
-}
-
-var ignoredCodexEventTypes = map[string]struct{}{
-	"agent_reasoning": {}, "context_compacted": {}, "error": {},
-	"exec_command_end": {}, "item_completed": {}, "mcp_tool_call_end": {},
-	"patch_apply_end": {}, "sub_agent_activity": {}, "task_started": {},
-	"thread_goal_updated": {}, "thread_rolled_back": {},
-	"thread_settings_applied": {}, "token_count": {}, "web_search_end": {},
-}
-
-var ignoredCodexResponseItemTypes = map[string]struct{}{
-	"agent_message": {}, "custom_tool_call": {}, "custom_tool_call_output": {},
-	"function_call": {}, "function_call_output": {}, "reasoning": {},
-	"tool_search_call": {}, "tool_search_output": {}, "web_search_call": {},
-}
-
-var ignoredCodexLegacyItemTypes = map[string]struct{}{
-	"custom_tool_call": {}, "custom_tool_call_output": {}, "function_call": {},
-	"function_call_output": {}, "reasoning": {}, "tool_search_call": {},
-	"tool_search_output": {}, "web_search_call": {},
-}
-
 func (Codex) SessionID(path string) (string, error) {
 	fallback := sessionIDFromPath(path)
 	found := ""
@@ -467,9 +443,6 @@ func decodeCodexRecord(raw []byte, warn func(reason string)) ([]sourceEvent, err
 		if err := json.Unmarshal(raw, &state); err != nil {
 			return nil, err
 		}
-		if state.RecordType != "state" {
-			warn(fmt.Sprintf("unknown legacy Codex record type %q", state.RecordType))
-		}
 		return []sourceEvent{{Kind: eventIgnored}}, nil
 	case codexLegacyItemRecord:
 		return decodeLegacyCodexItem(raw, warn)
@@ -486,9 +459,6 @@ func decodeCurrentCodexRecord(raw []byte, warn func(reason string)) ([]sourceEve
 	switch record.Type {
 	case "session_meta", "turn_context", "event_msg", "response_item":
 	default:
-		if _, ignored := ignoredCodexTopLevelTypes[record.Type]; !ignored {
-			warn(fmt.Sprintf("unknown Codex record type %q", record.Type))
-		}
 		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
 	var payload codexPayload
@@ -560,18 +530,12 @@ func decodeCodexEvent(
 	case "task_complete", "turn_aborted":
 		return []sourceEvent{{Kind: eventTurnCompleted, TurnID: payload.TurnID}}, nil
 	default:
-		if _, ignored := ignoredCodexEventTypes[payload.Type]; !ignored {
-			warn(fmt.Sprintf("unknown Codex event type %q", payload.Type))
-		}
 		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
 }
 
 func decodeCodexResponseItem(payload codexPayload, warn func(reason string)) ([]sourceEvent, error) {
 	if payload.Type != "message" {
-		if _, ignored := ignoredCodexResponseItemTypes[payload.Type]; !ignored {
-			warn(fmt.Sprintf("unknown Codex response item type %q", payload.Type))
-		}
 		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
 	if payload.Role != "assistant" {
@@ -608,9 +572,6 @@ func decodeLegacyCodexItem(raw []byte, warn func(reason string)) ([]sourceEvent,
 		return nil, fmt.Errorf("decode legacy Codex item: %w", err)
 	}
 	if item.Type != "message" {
-		if _, ignored := ignoredCodexLegacyItemTypes[item.Type]; !ignored {
-			warn(fmt.Sprintf("unknown legacy Codex item type %q", item.Type))
-		}
 		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
 	switch item.Role {
