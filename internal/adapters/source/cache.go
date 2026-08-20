@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	sourceCacheSchemaVersion = 1
+	sourceCacheSchemaVersion = 3
 	boundaryFingerprintBytes = 64 << 10
 )
 

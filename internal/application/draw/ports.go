@@ -31,6 +31,12 @@ type ConfiguredSource = applicationsource.Configured
 type SourceFile = applicationsource.File
 type SourceGateway = applicationsource.Gateway
 type Options = applicationsource.Selection
+type Order = applicationsource.Order
+
+const (
+	OrderNewest = applicationsource.OrderNewest
+	OrderOldest = applicationsource.OrderOldest
+)
 
 type Settings struct {
 	Concurrency     int

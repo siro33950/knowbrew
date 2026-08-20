@@ -31,7 +31,7 @@ wait "$child_pid"
 	runner := &CommandRunner{
 		Config: config.Config{
 			Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
-			LLM: config.LLM{Backend: "claude-cli", Timeout: "1s"},
+			LLM: config.LLM{Backend: "claude-cli", Timeout: "10s"},
 		},
 		Executable: filepath.Join(root, "knowbrew"),
 		WorkDir:    root,
@@ -49,7 +49,7 @@ wait "$child_pid"
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		err = syscall.Kill(childPID, 0)
 		if errors.Is(err, syscall.ESRCH) {

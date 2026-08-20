@@ -119,7 +119,7 @@ func TestDrawBrewAndDistillExposeCommonMaxFlag(t *testing.T) {
 
 func TestDrawExposesBoundedSourceSelectionFlags(t *testing.T) {
 	command := newDrawCommand()
-	for _, name := range []string{"hook", "max", "source", "since", "until"} {
+	for _, name := range []string{"hook", "max", "order", "source", "since", "until"} {
 		if command.Flags().Lookup(name) == nil {
 			t.Fatalf("draw has no --%s flag", name)
 		}
@@ -273,6 +273,7 @@ func TestDrawHookRejectsExplicitArgumentsAndFilters(t *testing.T) {
 		{"draw", "--hook", "--source", "codex"},
 		{"draw", "--hook", "--since", "1h"},
 		{"draw", "--hook", "--until", "1h"},
+		{"draw", "--hook", "--order", "oldest"},
 		{"draw", "--hook", "--verbose"},
 	} {
 		command := newRootCommand()
@@ -281,6 +282,15 @@ func TestDrawHookRejectsExplicitArgumentsAndFilters(t *testing.T) {
 		if err := command.Execute(); err == nil {
 			t.Fatalf("hook arguments were accepted: %v", args)
 		}
+	}
+}
+
+func TestDrawRejectsUnknownOrder(t *testing.T) {
+	command := newRootCommand()
+	command.SetArgs([]string{"draw", "--order", "ascending"})
+	err := command.Execute()
+	if err == nil || err.Error() != `invalid --order: "ascending" is not newest or oldest` {
+		t.Fatalf("--order error = %v", err)
 	}
 }
 

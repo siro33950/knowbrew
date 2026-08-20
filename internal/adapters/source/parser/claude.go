@@ -45,14 +45,6 @@ type claudeBlock struct {
 	Text string `json:"text"`
 }
 
-var ignoredClaudeRecordTypes = map[string]struct{}{
-	"ai-title": {}, "attachment": {}, "custom-title": {},
-	"file-history-delta": {}, "file-history-snapshot": {},
-	"last-prompt": {}, "mode": {}, "permission-mode": {}, "pr-link": {},
-	"progress": {}, "queue-operation": {}, "result": {}, "started": {},
-	"system": {},
-}
-
 var knownClaudeBlockTypes = map[string]struct{}{
 	"fallback": {}, "image": {}, "text": {}, "thinking": {},
 	"tool_result": {}, "tool_use": {},
@@ -204,9 +196,6 @@ func decodeClaudeRecord(raw []byte, warn func(reason string)) ([]sourceEvent, er
 	case "assistant":
 		return decodeClaudeAssistant(record, warn)
 	default:
-		if _, ignored := ignoredClaudeRecordTypes[record.Type]; !ignored {
-			warn(fmt.Sprintf("unknown Claude record type %q", record.Type))
-		}
 		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
 }

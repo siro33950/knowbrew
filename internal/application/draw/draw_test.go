@@ -360,6 +360,52 @@ func TestMaxTurnsProcessesNewestUnfinishedTurnsAndReportsBacklog(t *testing.T) {
 	}
 }
 
+func TestOldestOrderProcessesOldestUnfinishedTurnsFirst(t *testing.T) {
+	root := t.TempDir()
+	dataStore, _ := store.New(root)
+	sourceDir := t.TempDir()
+	logPath := filepath.Join(sourceDir, "session.jsonl")
+	log := `{"type":"user","uuid":"turn-1","sessionId":"backfill","timestamp":"2026-07-28T01:02:03Z","message":{"role":"user","content":"oldest"}}
+{"type":"user","uuid":"turn-2","sessionId":"backfill","timestamp":"2026-07-29T01:02:03Z","message":{"role":"user","content":"middle"}}
+{"type":"user","uuid":"turn-3","sessionId":"backfill","timestamp":"2026-07-30T01:02:03Z","message":{"role":"user","content":"newest"}}
+{"type":"user","sessionId":"backfill","timestamp":"2026-07-30T01:02:04Z","message":{"role":"user","content":"[Request interrupted by user]"}}
+`
+	if err := os.WriteFile(logPath, []byte(log), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-DefaultLookback - time.Hour)
+	if err := os.Chtimes(logPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{
+		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
+		LLM:     config.LLM{Backend: "claude-cli"},
+		Sources: []config.Source{{Agent: "claude", Parser: "claude", Paths: []string{sourceDir}}},
+	}
+
+	summary, err := RunWithOptions(
+		context.Background(), cfg, Options{MaxTurns: 2, Order: OrderOldest},
+		annotatingRunner{store: dataStore}, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TurnsSelected != 2 || summary.TurnsPending != 1 ||
+		summary.FeedstocksAcquired != 2 || summary.FeedstocksDrawn != 2 {
+		t.Fatalf("summary = %#v", summary)
+	}
+	for _, turnID := range []string{"turn-1", "turn-2"} {
+		id := parser.FeedstockID("claude", "backfill", turnID)
+		if _, _, err := dataStore.FindFeedstock(id); err != nil {
+			t.Fatalf("oldest selected turn %s was not processed: %v", turnID, err)
+		}
+	}
+	newestID := parser.FeedstockID("claude", "backfill", "turn-3")
+	if _, _, err := dataStore.FindFeedstock(newestID); err == nil {
+		t.Fatal("newest turn exceeded --max under the oldest order")
+	}
+}
+
 func TestMaxTurnsPrioritizesPreviouslyAcquiredIncompleteFeedstock(t *testing.T) {
 	root := t.TempDir()
 	dataStore, _ := store.New(root)
@@ -1720,9 +1766,13 @@ func TestSelectUnfinishedCandidatesUsesSourceSequenceWhenTimestampsMatch(t *test
 		{ID: "second", Session: domain.SessionRef{ID: "session"}, Timestamp: timestamp, SourceSequence: 2},
 		{ID: "third", Session: domain.SessionRef{ID: "session"}, Timestamp: timestamp, SourceSequence: 3},
 	}
-	selected := selectUnfinishedCandidates(candidates, nil, 2)
+	selected := selectUnfinishedCandidates(candidates, nil, 2, OrderNewest)
 	if len(selected) != 2 || selected[0].ID != "third" || selected[1].ID != "second" {
 		t.Fatalf("selected = %#v", selected)
+	}
+	oldest := selectUnfinishedCandidates(candidates, nil, 2, OrderOldest)
+	if len(oldest) != 2 || oldest[0].ID != "first" || oldest[1].ID != "second" {
+		t.Fatalf("oldest = %#v", oldest)
 	}
 }
 

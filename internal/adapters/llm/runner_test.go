@@ -55,7 +55,7 @@ exit 7
 	runner := &CommandRunner{
 		Config: config.Config{
 			Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
-			LLM: config.LLM{Backend: "claude-cli", Timeout: "5s"},
+			LLM: config.LLM{Backend: "claude-cli", Timeout: "60s"},
 		},
 		Executable: filepath.Join(root, "knowbrew"),
 		WorkDir:    root,

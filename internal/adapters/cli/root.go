@@ -88,6 +88,7 @@ func newDrawCommand() *cobra.Command {
 		sources []string
 		since   string
 		until   string
+		order   string
 	)
 	command := &cobra.Command{
 		Use:   "draw [path...]",
@@ -98,7 +99,7 @@ func newDrawCommand() *cobra.Command {
 				if strings.TrimSpace(os.Getenv(config.InvocationIDEnvironment)) != "" {
 					return nil
 				}
-				for _, name := range []string{"max", "source", "since", "until", "verbose"} {
+				for _, name := range []string{"max", "order", "source", "since", "until", "verbose"} {
 					if command.Flags().Changed(name) {
 						return fmt.Errorf("--hook cannot be used with --%s", name)
 					}
@@ -116,7 +117,11 @@ func newDrawCommand() *cobra.Command {
 				paths = []string{path}
 			}
 			now := time.Now()
-			options := draw.Options{Paths: paths, Sources: sources}
+			selectedOrder, err := parseDrawOrder(order)
+			if err != nil {
+				return err
+			}
+			options := draw.Options{Paths: paths, Sources: sources, Order: selectedOrder}
 			if command.Flags().Changed("max") {
 				if maximum < 1 {
 					return errors.New("--max must be greater than zero")
@@ -191,7 +196,22 @@ func newDrawCommand() *cobra.Command {
 	command.Flags().StringSliceVar(&sources, "source", nil, "Limit configured sources to claude or codex")
 	command.Flags().StringVar(&since, "since", "", "Use logs modified since a duration ago or timestamp")
 	command.Flags().StringVar(&until, "until", "", "Use logs modified until a duration ago or timestamp")
+	command.Flags().StringVar(
+		&order, "order", string(draw.OrderNewest),
+		"Process unfinished turns newest or oldest first",
+	)
 	return command
+}
+
+func parseDrawOrder(value string) (draw.Order, error) {
+	switch draw.Order(strings.TrimSpace(value)) {
+	case "", draw.OrderNewest:
+		return draw.OrderNewest, nil
+	case draw.OrderOldest:
+		return draw.OrderOldest, nil
+	default:
+		return "", fmt.Errorf("invalid --order: %q is not newest or oldest", value)
+	}
 }
 
 func drawHookTranscriptPath(reader io.Reader) (string, error) {
