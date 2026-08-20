@@ -276,6 +276,36 @@ func TestCodexReusedTurnContextTurnIDStaysDistinct(t *testing.T) {
 	}
 }
 
+func TestCodexResentTurnContextAfterCompletionKeepsFirstEnvironment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	content := `{"timestamp":"2026-07-30T01:00:00Z","type":"session_meta","payload":{"id":"session-id","cwd":"/first"}}
+{"timestamp":"2026-07-30T01:00:01Z","type":"turn_context","payload":{"turn_id":"X","cwd":"/first"}}
+{"timestamp":"2026-07-30T01:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"first"}}
+{"timestamp":"2026-07-30T01:00:03Z","type":"event_msg","payload":{"type":"agent_message","message":"reply one"}}
+{"timestamp":"2026-07-30T01:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"X"}}
+{"timestamp":"2026-07-30T01:00:05Z","type":"turn_context","payload":{"turn_id":"X","cwd":"/second"}}
+{"timestamp":"2026-07-30T01:00:06Z","type":"event_msg","payload":{"type":"user_message","message":"second"}}
+{"timestamp":"2026-07-30T01:00:07Z","type":"event_msg","payload":{"type":"agent_message","message":"reply two"}}
+{"timestamp":"2026-07-30T01:00:08Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"X"}}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feedstocks, warnings, err := (Codex{}).Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(feedstocks) != 2 {
+		t.Fatalf("feedstocks = %#v, warnings = %#v", feedstocks, warnings)
+	}
+	if feedstocks[0].CWD != "/first" {
+		t.Fatalf("completed turn adopted the next turn context: %#v", feedstocks[0])
+	}
+	if feedstocks[1].CWD != "/second" {
+		t.Fatalf("resumed turn kept the previous environment: %#v", feedstocks[1])
+	}
+}
+
 func TestCodexDoesNotParseNestedUserEventsFromToolOutput(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	content := `{"timestamp":"2026-07-30T01:00:00Z","type":"session_meta","payload":{"id":"session-id","cwd":"/repo"}}

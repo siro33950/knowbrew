@@ -216,11 +216,11 @@ func (service Service) RunWithOptions(
 	selected := selectUnfinishedCandidates(
 		allCandidates, existingByID, options.MaxTurns, options.Order,
 	)
-	selectedIDs := make(map[string]struct{}, len(selected))
+	selectedRanks := make(map[string]int, len(selected))
 	repositoryCache := map[string]string{}
 	for index := range selected {
 		candidate := &selected[index]
-		selectedIDs[candidate.ID] = struct{}{}
+		selectedRanks[candidate.ID] = index
 		if _, exists := existingByID[candidate.ID]; exists {
 			continue
 		}
@@ -279,7 +279,7 @@ func (service Service) RunWithOptions(
 	if err != nil {
 		return summary, err
 	}
-	drawPending := pendingFeedstocks(feedstocks, selectedIDs, func(feedstock domain.Feedstock) bool {
+	drawPending := pendingFeedstocks(feedstocks, selectedRanks, func(feedstock domain.Feedstock) bool {
 		return feedstock.AnnotatedAt == nil
 	})
 	if len(drawPending) > 0 && service.Runner == nil {
@@ -442,20 +442,17 @@ type drawItemResult struct {
 
 func pendingFeedstocks(
 	feedstocks []domain.Feedstock,
-	selectedIDs map[string]struct{},
+	selectedRanks map[string]int,
 	include func(domain.Feedstock) bool,
 ) []domain.Feedstock {
 	pending := make([]domain.Feedstock, 0, len(feedstocks))
 	for _, feedstock := range feedstocks {
-		if _, selected := selectedIDs[feedstock.ID]; selected && include(feedstock) {
+		if _, selected := selectedRanks[feedstock.ID]; selected && include(feedstock) {
 			pending = append(pending, feedstock)
 		}
 	}
 	slices.SortFunc(pending, func(left, right domain.Feedstock) int {
-		if compared := left.Timestamp.Compare(right.Timestamp); compared != 0 {
-			return compared
-		}
-		return strings.Compare(left.ID, right.ID)
+		return cmp.Compare(selectedRanks[left.ID], selectedRanks[right.ID])
 	})
 	return pending
 }

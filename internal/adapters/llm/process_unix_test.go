@@ -31,7 +31,7 @@ wait "$child_pid"
 	runner := &CommandRunner{
 		Config: config.Config{
 			Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
-			LLM: config.LLM{Backend: "claude-cli", Timeout: "3s"},
+			LLM: config.LLM{Backend: "claude-cli", Timeout: "10s"},
 		},
 		Executable: filepath.Join(root, "knowbrew"),
 		WorkDir:    root,

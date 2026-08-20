@@ -200,7 +200,8 @@ func (assembler *turnAssembler) Apply(event sourceEvent) error {
 			return fmt.Errorf("turn context has no turn ID")
 		}
 		assembler.updateEnvironment(event)
-		if assembler.current != nil && assembler.currentSourceID == event.TurnID {
+		if assembler.current != nil && !assembler.currentComplete &&
+			assembler.currentSourceID == event.TurnID {
 			assembler.current.CWD = assembler.cwd
 			assembler.current.Repo = assembler.repo
 			assembler.current.Branch = assembler.branch
