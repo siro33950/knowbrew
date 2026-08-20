@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,25 @@ import (
 type annotatingRunner struct {
 	store *store.Store
 	usage llm.Usage
+}
+
+type annotationResultRunner struct {
+	output json.RawMessage
+}
+
+func (runner annotationResultRunner) Run(
+	_ context.Context,
+	task llm.Task,
+	_, _ string,
+) (llm.RunResult, error) {
+	switch task {
+	case llm.TaskSummarize:
+		return llm.RunResult{Output: json.RawMessage(`{"summary":"A durable property was established."}`)}, nil
+	case llm.TaskAnnotate:
+		return llm.RunResult{Output: runner.output}, nil
+	default:
+		return llm.RunResult{}, nil
+	}
 }
 
 func (runner annotatingRunner) Run(_ context.Context, task llm.Task, _ string, _ string) (llm.RunResult, error) {
@@ -102,6 +122,87 @@ func TestDrawIsIdempotentWithoutPersistentSessionState(t *testing.T) {
 	}
 	if len(feedstocks) != 1 || feedstocks[0].Schema != domain.SchemaVersion {
 		t.Fatalf("feedstocks = %#v", feedstocks)
+	}
+}
+
+func TestDrawValidatesAndPersistsAnnotationTypes(t *testing.T) {
+	tests := []struct {
+		name          string
+		output        string
+		wantAnnotated bool
+		wantTypes     []domain.KnowledgeType
+		wantPending   bool
+		wantFailed    int
+	}{
+		{name: "missing types", output: `{}`, wantFailed: 1},
+		{name: "empty types", output: `{"types":[]}`, wantAnnotated: true},
+		{
+			name: "valid type", output: `{"types":["property"]}`,
+			wantAnnotated: true, wantTypes: []domain.KnowledgeType{"property"}, wantPending: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			dataStore, err := store.New(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sourceDir := t.TempDir()
+			logPath := filepath.Join(sourceDir, "session.jsonl")
+			log := `{"type":"user","uuid":"turn-1","sessionId":"session-id","timestamp":"2026-07-30T01:02:03Z","cwd":"/repo","message":{"role":"user","content":"remember this property"}}
+{"type":"user","sessionId":"session-id","timestamp":"2026-07-30T01:02:04Z","message":{"role":"user","content":"[Request interrupted by user]"}}
+`
+			if err := os.WriteFile(logPath, []byte(log), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.Config{
+				Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
+				LLM: config.LLM{Backend: "claude-cli"},
+				Sources: []config.Source{{
+					Agent: "claude", Parser: "claude", Paths: []string{sourceDir},
+				}},
+			}
+			summary, err := Run(
+				context.Background(),
+				cfg,
+				[]string{logPath},
+				annotationResultRunner{output: json.RawMessage(test.output)},
+				nil,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if summary.TypeCandidateSelectionFailed != test.wantFailed {
+				t.Fatalf("summary = %#v", summary)
+			}
+			if test.wantFailed != 0 {
+				if len(summary.Failures) != 1 ||
+					summary.Failures[0].Phase != "type_candidate_selection" ||
+					!strings.Contains(summary.Failures[0].Reason, "annotation result types are required") {
+					t.Fatalf("failures = %#v", summary.Failures)
+				}
+			} else if len(summary.Failures) != 0 {
+				t.Fatalf("failures = %#v", summary.Failures)
+			}
+			feedstocks, warnings, err := dataStore.ListFeedstocks()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(warnings) != 0 || len(feedstocks) != 1 {
+				t.Fatalf("feedstocks = %#v, warnings = %#v", feedstocks, warnings)
+			}
+			feedstock := feedstocks[0]
+			if (feedstock.AnnotatedAt != nil) != test.wantAnnotated {
+				t.Fatalf("AnnotatedAt = %v, want annotated %t", feedstock.AnnotatedAt, test.wantAnnotated)
+			}
+			if !slices.Equal(feedstock.Types, test.wantTypes) {
+				t.Fatalf("types = %#v, want %#v", feedstock.Types, test.wantTypes)
+			}
+			if feedstock.PendingBrew() != test.wantPending {
+				t.Fatalf("PendingBrew() = %t, want %t", feedstock.PendingBrew(), test.wantPending)
+			}
+		})
 	}
 }
 

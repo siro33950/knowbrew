@@ -84,6 +84,16 @@ func ResolveKnowledge(
 	}
 	working := cloneKnowledgeRecords(records)
 	changed := make(map[string]KnowledgeRecord)
+	nextKnowledgeID := func() (string, error) {
+		id := strings.TrimSpace(newKnowledgeID())
+		if err := ValidateKnowledgeID(id); err != nil {
+			return "", err
+		}
+		if _, exists := working[id]; exists {
+			return "", fmt.Errorf("knowledge ID %s already exists", id)
+		}
+		return id, nil
+	}
 	result := KnowledgeResolution{
 		Results: make([]ResolutionResult, 0, len(candidates)),
 		Changed: changed,
@@ -97,7 +107,11 @@ func ResolveKnowledge(
 		itemResult := ResolutionResult{}
 		switch resolution.Kind {
 		case ResolutionNew:
-			record, err := newKnowledgeRecord(source, candidate, nil, newKnowledgeID(), now)
+			id, err := nextKnowledgeID()
+			if err != nil {
+				return KnowledgeResolution{}, fmt.Errorf("knowledge candidate %d: %w", index+1, err)
+			}
+			record, err := newKnowledgeRecord(source, candidate, nil, id, now)
 			if err != nil {
 				return KnowledgeResolution{}, fmt.Errorf("knowledge candidate %d: %w", index+1, err)
 			}
@@ -134,11 +148,15 @@ func ResolveKnowledge(
 				itemResult.Outcome = "historical_conflict_ignored"
 				break
 			}
+			id, err := nextKnowledgeID()
+			if err != nil {
+				return KnowledgeResolution{}, fmt.Errorf("knowledge candidate %d: %w", index+1, err)
+			}
 			record, err := newKnowledgeRecord(
 				source,
 				candidate,
 				replacementPredecessors(target, working),
-				newKnowledgeID(),
+				id,
 				now,
 			)
 			if err != nil {
@@ -152,8 +170,8 @@ func ResolveKnowledge(
 		case ResolutionComplements:
 			target := working[resolution.KnowledgeIDs[0]]
 			draft := *resolution.Draft
-			id := strings.TrimSpace(newKnowledgeID())
-			if err := ValidateKnowledgeID(id); err != nil {
+			id, err := nextKnowledgeID()
+			if err != nil {
 				return KnowledgeResolution{}, fmt.Errorf("knowledge candidate %d: %w", index+1, err)
 			}
 			knowledge := Knowledge{

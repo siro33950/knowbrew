@@ -155,7 +155,7 @@ func (runner *CommandRunner) Run(
 	invocationID := newInvocationID()
 	defer invocation.Cleanup(runner.Config.Root, invocationID)
 	command.Env = invocationEnvironment(
-		os.Environ(), runner.Config.Path, feedstockID, invocationID,
+		os.Environ(), runner.Config.Path, feedstockID, invocationID, task,
 	)
 	stdout := newTailWriter(32 << 10)
 	stderr := newTailWriter(32 << 10)
@@ -402,11 +402,16 @@ func claudeStructuredOutput(data []byte) (json.RawMessage, error) {
 	return nil, errors.New("claude returned no structured output")
 }
 
-func invocationEnvironment(base []string, configPath, feedstockID, invocationID string) []string {
+func invocationEnvironment(
+	base []string,
+	configPath, feedstockID, invocationID string,
+	task Task,
+) []string {
 	values := map[string]string{
 		config.ConfigEnvironment:              configPath,
 		config.InvocationFeedstockEnvironment: feedstockID,
 		config.InvocationIDEnvironment:        invocationID,
+		config.InvocationTaskEnvironment:      string(task),
 	}
 	out := make([]string, 0, len(base)+len(values))
 	for _, entry := range base {
@@ -419,6 +424,7 @@ func invocationEnvironment(base []string, configPath, feedstockID, invocationID 
 		config.ConfigEnvironment,
 		config.InvocationFeedstockEnvironment,
 		config.InvocationIDEnvironment,
+		config.InvocationTaskEnvironment,
 	} {
 		out = append(out, key+"="+values[key])
 	}

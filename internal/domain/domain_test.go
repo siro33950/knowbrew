@@ -93,6 +93,24 @@ func TestResolveKnowledgeAppliesMultipleCandidatesToOneWorkingSet(t *testing.T) 
 	}
 }
 
+func TestResolveKnowledgeRejectsDuplicateGeneratedID(t *testing.T) {
+	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	_, err := ResolveKnowledge(
+		annotatedFeedstock("fs-source", now),
+		[]KnowledgeCandidate{
+			candidate("First independently maintainable statement.", Resolution{Kind: ResolutionNew}),
+			candidate("Second independently maintainable statement.", Resolution{Kind: ResolutionNew}),
+		},
+		nil,
+		testVocabulary(),
+		func() string { return "kn-duplicate" },
+		now.Add(time.Minute),
+	)
+	if err == nil || !strings.Contains(err.Error(), "knowledge candidate 2: knowledge ID kn-duplicate already exists") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestResolveKnowledgeRejectsWholeBatchWhenOneCandidateFails(t *testing.T) {
 	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
 	_, err := ResolveKnowledge(

@@ -136,7 +136,7 @@ func TestTargetedSearchVisibilityAndShow(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(encoded), `"feedstocks"`) {
-		t.Fatalf("unsafe content escaped its JSON string: %s", encoded)
+		t.Fatalf("show JSON does not contain the feedstocks key: %s", encoded)
 	}
 }
 

@@ -862,6 +862,7 @@ func TestKnowledgeSubmitRequiresInvocationAndValidatesType(t *testing.T) {
 	}
 	t.Setenv(config.InvocationFeedstockEnvironment, feedstock.ID)
 	t.Setenv(config.InvocationIDEnvironment, "submit-invalid-type")
+	t.Setenv(config.InvocationTaskEnvironment, "brew")
 	invalid := newRootCommand()
 	invalid.SetArgs([]string{
 		"knowledge", "submit", feedstock.ID,
@@ -904,6 +905,7 @@ func TestKnowledgeSubmitRegistersCandidateWithoutWritingKnowledge(t *testing.T) 
 	}
 	t.Setenv(config.InvocationFeedstockEnvironment, feedstock.ID)
 	t.Setenv(config.InvocationIDEnvironment, "submit-subject")
+	t.Setenv(config.InvocationTaskEnvironment, "brew")
 	catalog := newRootCommand()
 	catalog.SetArgs([]string{
 		"knowledge", "catalog", "--subject", "knowbrew",

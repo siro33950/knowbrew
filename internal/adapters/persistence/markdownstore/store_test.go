@@ -608,15 +608,52 @@ func TestDefaultTypeMastersAreGeneratedOnlyWhenEmpty(t *testing.T) {
 	want := map[string]struct {
 		definition string
 		example    string
+		excludes   []string
 	}{
-		"definition": {"The established meaning or boundary of a term or concept.", "A feedstock is an immutable record of one source turn."},
-		"property":   {"A durable established attribute or capability of a subject.", "The service accepts JSON Lines input."},
-		"relation":   {"An established relationship between two or more subjects or concepts.", "The archive belongs to the research collection."},
-		"principle":  {"An established generalized causal relationship, mechanism, or recurring tendency.", "Higher fermentation temperatures generally accelerate fermentation."},
-		"constraint": {"An established limit or required condition imposed by something other than a choice recorded here.", "The venue cannot admit more than 200 people."},
-		"decision":   {"An established policy, rule, design direction, or operating practice that governs future behavior until changed.", "The local rebuildable index uses SQLite."},
-		"intent":     {"A durable intended outcome or quality that explains why a subject, rule, or design exists, independently of the current means used to achieve it.", "Feedstock classification remains consistent with its type candidates so unclassified records are not presented as ready for Brew."},
-		"preference": {"A stable stated preference of a person or group, rather than a one-time request or binding decision.", "The user prefers concise headings."},
+		"definition": {
+			"The established meaning or boundary of a term or concept.",
+			"A feedstock is an immutable record of one source turn.",
+			[]string{
+				"Governing policies, choices, or operating practices established as decisions.",
+				"Intended outcomes or desired qualities.",
+				"Personal or group preferences.",
+				"Temporary task terminology, implementation notes, assignments, or one-time work instructions.",
+			},
+		},
+		"property": {"A durable established attribute or capability of a subject.", "The service accepts JSON Lines input.", nil},
+		"relation": {
+			"An established relationship between two or more subjects or concepts.",
+			"The archive belongs to the research collection.",
+			[]string{
+				"Governing policies, choices, or operating practices established as decisions.",
+				"Intended outcomes or desired qualities.",
+				"Personal or group preferences.",
+				"Temporary task dependencies, implementation steps, assignments, or one-time work instructions.",
+			},
+		},
+		"principle": {
+			"An established generalized causal relationship, mechanism, or recurring tendency.",
+			"Higher fermentation temperatures generally accelerate fermentation.",
+			[]string{
+				"Governing policies, choices, or operating practices established as decisions.",
+				"Intended outcomes or desired qualities.",
+				"Personal or group preferences.",
+				"Temporary observations, task progress, implementation steps, assignments, or one-time work instructions.",
+			},
+		},
+		"constraint": {
+			"An established limit or required condition imposed by something other than a choice recorded here.",
+			"The venue cannot admit more than 200 people.",
+			[]string{
+				"Governing policies, choices, or operating practices established as decisions.",
+				"Intended outcomes or desired qualities.",
+				"Personal or group preferences.",
+				"Temporary task limits, implementation steps, assignments, or one-time work instructions.",
+			},
+		},
+		"decision":   {"An established policy, rule, design direction, or operating practice that governs future behavior until changed.", "The local rebuildable index uses SQLite.", nil},
+		"intent":     {"A durable intended outcome or quality that explains why a subject, rule, or design exists, independently of the current means used to achieve it.", "Feedstock classification remains consistent with its type candidates so unclassified records are not presented as ready for Brew.", nil},
+		"preference": {"A stable stated preference of a person or group, rather than a one-time request or binding decision.", "The user prefers concise headings.", nil},
 	}
 	for _, entry := range types {
 		expected, ok := want[entry.Name]
@@ -625,6 +662,9 @@ func TestDefaultTypeMastersAreGeneratedOnlyWhenEmpty(t *testing.T) {
 		}
 		if entry.Definition != expected.definition || entry.Example != expected.example {
 			t.Fatalf("default type master %q = %#v", entry.Name, entry)
+		}
+		if expected.excludes != nil && !slices.Equal(entry.Excludes, expected.excludes) {
+			t.Fatalf("default type master %q excludes = %#v", entry.Name, entry.Excludes)
 		}
 		if entry.Name == "decision" {
 			for _, exclusion := range []string{

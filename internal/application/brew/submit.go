@@ -171,6 +171,7 @@ func Submit(dataStore Repository, reads Invocation, input SubmitInput) (SubmitRe
 			return SubmitResult{}, errors.New("knowledge candidate duplicates a submitted statement")
 		}
 		if submitted.Resolution.Kind == ResolutionConflicts &&
+			len(submitted.Resolution.KnowledgeIDs) != 0 &&
 			candidate.Resolution.Kind == ResolutionConflicts &&
 			submitted.Resolution.KnowledgeIDs[0] == candidate.Resolution.KnowledgeIDs[0] {
 			return SubmitResult{}, fmt.Errorf(

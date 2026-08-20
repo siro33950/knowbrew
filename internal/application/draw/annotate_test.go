@@ -94,8 +94,8 @@ func TestAnnotateRejectsDifferentInvocationFeedstock(t *testing.T) {
 	dataStore, _ := store.New(t.TempDir())
 	t.Setenv(config.InvocationFeedstockEnvironment, "fs-one")
 	_, err := annotateForTest(context.Background(), dataStore, Annotation{FeedstockID: "fs-two"})
-	if err == nil {
-		t.Fatal("expected an annotation for a different invocation feedstock to fail")
+	if err == nil || !strings.Contains(err.Error(), "feedstock fs-two does not match invocation feedstock fs-one") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

@@ -179,14 +179,16 @@ func TestInvocationEnvironmentReplacesAllInvocationScope(t *testing.T) {
 		config.ConfigEnvironment + "=/stale/config.toml",
 		config.InvocationFeedstockEnvironment + "=stale-feedstock",
 		config.InvocationIDEnvironment + "=stale-invocation",
+		config.InvocationTaskEnvironment + "=annotate",
 	}
 	environment := invocationEnvironment(
-		base, "/current/config.toml", "feedstock-1", "invocation-1",
+		base, "/current/config.toml", "feedstock-1", "invocation-1", TaskBrew,
 	)
 	for _, test := range []struct{ key, want string }{
 		{config.ConfigEnvironment, "/current/config.toml"},
 		{config.InvocationFeedstockEnvironment, "feedstock-1"},
 		{config.InvocationIDEnvironment, "invocation-1"},
+		{config.InvocationTaskEnvironment, "brew"},
 	} {
 		var matches []string
 		for _, entry := range environment {

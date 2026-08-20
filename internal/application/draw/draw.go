@@ -551,13 +551,17 @@ func runDrawPhase(
 					}
 				case agent.TaskAnnotate:
 					var output struct {
-						Types []domain.KnowledgeType `json:"types"`
+						Types *[]domain.KnowledgeType `json:"types"`
 					}
 					if applyErr = agent.DecodeResult(runResult.Output, &output); applyErr == nil {
-						_, applyErr = Annotate(ctx, dataStore, nil, Annotation{
-							FeedstockID: feedstock.ID,
-							Types:       output.Types,
-						})
+						if output.Types == nil {
+							applyErr = errors.New("annotation result types are required")
+						} else {
+							_, applyErr = Annotate(ctx, dataStore, nil, Annotation{
+								FeedstockID: feedstock.ID,
+								Types:       *output.Types,
+							})
+						}
 					}
 				default:
 					applyErr = fmt.Errorf("unsupported draw task %q", phase.task)

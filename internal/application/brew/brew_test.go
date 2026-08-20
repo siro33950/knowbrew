@@ -38,11 +38,57 @@ func TestSubmitRejectsDuplicateStatementInSameTurn(t *testing.T) {
 	}
 }
 
+func TestSubmitIgnoresMissingConflictTargetInSubmittedState(t *testing.T) {
+	dataStore := newBrewStore(t, "knowbrew")
+	feedstock := writePendingFeedstock(t, dataStore, "fs-corrupt-submitted", "knowbrew")
+	writeKnowledge(t, dataStore, "kn-existing", feedstock, "knowbrew", "Existing statement.")
+	invocation := newMemoryInvocation(feedstock.ID)
+	if _, err := Catalog(repositoryForTest(dataStore), invocation, "knowbrew", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Show(repositoryForTest(dataStore), invocation, []string{"kn-existing"}); err != nil {
+		t.Fatal(err)
+	}
+	invocation.state.Submitted = []domain.KnowledgeCandidate{{
+		Resolution: domain.Resolution{Kind: domain.ResolutionConflicts},
+	}}
+	candidate := newCandidate("A conflicting statement.")
+	candidate.Resolution = domain.Resolution{
+		Kind: domain.ResolutionConflicts, KnowledgeIDs: []string{"kn-existing"},
+	}
+	result, err := Submit(repositoryForTest(dataStore), invocation, SubmitInput{
+		FeedstockID: feedstock.ID,
+		Knowledge:   candidate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Submitted != 2 {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestSubmitRejectsAnnotateInvocation(t *testing.T) {
+	dataStore := newBrewStore(t, "knowbrew")
+	feedstock := writePendingFeedstock(t, dataStore, "fs-annotate-invocation", "knowbrew")
+	t.Setenv(config.InvocationIDEnvironment, "annotate-invocation")
+	t.Setenv(config.InvocationFeedstockEnvironment, feedstock.ID)
+	t.Setenv(config.InvocationTaskEnvironment, string(agent.TaskAnnotate))
+	_, err := Submit(repositoryForTest(dataStore), invocationForTest(dataStore), SubmitInput{
+		FeedstockID: feedstock.ID,
+		Knowledge:   newCandidate("Annotate must not submit Knowledge."),
+	})
+	if err == nil || !strings.Contains(err.Error(), "only inside a Brew invocation") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestCatalogCanRunRepeatedlyPerSubjectAndDetectsStaleDigest(t *testing.T) {
 	dataStore := newBrewStore(t, "knowbrew", "other")
 	feedstock := writePendingFeedstock(t, dataStore, "fs-catalog", "knowbrew")
 	t.Setenv(config.InvocationIDEnvironment, "inv-catalog")
 	t.Setenv(config.InvocationFeedstockEnvironment, feedstock.ID)
+	t.Setenv(config.InvocationTaskEnvironment, string(agent.TaskBrew))
 	guard := invocationForTest(dataStore)
 	for _, subject := range []string{"knowbrew", "other", "knowbrew"} {
 		if _, err := Catalog(repositoryForTest(dataStore), guard, subject, nil); err != nil {

@@ -19,6 +19,7 @@ const (
 	APIURLEnvironment              = "KNOWBREW_API_URL"
 	InvocationFeedstockEnvironment = "KNOWBREW_INVOCATION_FEEDSTOCK"
 	InvocationIDEnvironment        = "KNOWBREW_INVOCATION_ID"
+	InvocationTaskEnvironment      = "KNOWBREW_INVOCATION_TASK"
 	DefaultLLMTimeout              = 5 * time.Minute
 	DefaultContextMaxTokens        = 2000
 	DefaultDrawConcurrency         = 5

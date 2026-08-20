@@ -116,7 +116,7 @@ func (runner *ToolRunner) Run(
 			configureCommandTermination(command)
 			command.Dir = runner.WorkDir
 			command.Env = invocationEnvironment(
-				os.Environ(), runner.Config.Path, feedstockID, invocationID,
+				os.Environ(), runner.Config.Path, feedstockID, invocationID, task,
 			)
 			output, commandErr := command.CombinedOutput()
 			result := string(output)

@@ -32,7 +32,8 @@ func (guard Guard) Mutate(change func() error) error {
 
 func (guard Guard) IsBrewInvocation() bool {
 	return strings.TrimSpace(os.Getenv(config.InvocationIDEnvironment)) != "" &&
-		strings.TrimSpace(os.Getenv(config.InvocationFeedstockEnvironment)) != ""
+		strings.TrimSpace(os.Getenv(config.InvocationFeedstockEnvironment)) != "" &&
+		strings.TrimSpace(os.Getenv(config.InvocationTaskEnvironment)) == string(agent.TaskBrew)
 }
 
 func (guard Guard) RecordCatalog(subject string, ids []string, digest string) error {
