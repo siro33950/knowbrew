@@ -306,6 +306,30 @@ func TestCodexResentTurnContextAfterCompletionKeepsFirstEnvironment(t *testing.T
 	}
 }
 
+func TestCodexPaddedTurnIDMatchesAcrossEvents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	content := `{"timestamp":"2026-07-30T01:00:00Z","type":"session_meta","payload":{"id":"session-id","cwd":"/repo"}}
+{"timestamp":"2026-07-30T01:00:01Z","type":"turn_context","payload":{"turn_id":" X ","cwd":"/repo"}}
+{"timestamp":"2026-07-30T01:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"first"}}
+{"timestamp":"2026-07-30T01:00:03Z","type":"turn_context","payload":{"turn_id":" X ","cwd":"/resumed"}}
+{"timestamp":"2026-07-30T01:00:04Z","type":"event_msg","payload":{"type":"agent_message","message":"reply"}}
+{"timestamp":"2026-07-30T01:00:05Z","type":"event_msg","payload":{"type":"task_complete","turn_id":" X "}}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feedstocks, warnings, err := (Codex{}).Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(feedstocks) != 1 {
+		t.Fatalf("padded turn ID split the turn: %#v, warnings = %#v", feedstocks, warnings)
+	}
+	if feedstocks[0].TurnID != "X" || feedstocks[0].CWD != "/resumed" {
+		t.Fatalf("feedstock = %#v", feedstocks[0])
+	}
+}
+
 func TestCodexDoesNotParseNestedUserEventsFromToolOutput(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	content := `{"timestamp":"2026-07-30T01:00:00Z","type":"session_meta","payload":{"id":"session-id","cwd":"/repo"}}

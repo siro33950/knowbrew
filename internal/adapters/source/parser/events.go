@@ -196,12 +196,13 @@ func (assembler *turnAssembler) Apply(event sourceEvent) error {
 		}
 		assembler.updateEnvironment(event)
 	case eventTurnStarted:
-		if strings.TrimSpace(event.TurnID) == "" {
+		startedTurnID := strings.TrimSpace(event.TurnID)
+		if startedTurnID == "" {
 			return fmt.Errorf("turn context has no turn ID")
 		}
 		assembler.updateEnvironment(event)
 		if assembler.current != nil && !assembler.currentComplete &&
-			assembler.currentSourceID == event.TurnID {
+			assembler.currentSourceID == startedTurnID {
 			assembler.current.CWD = assembler.cwd
 			assembler.current.Repo = assembler.repo
 			assembler.current.Branch = assembler.branch
@@ -211,7 +212,7 @@ func (assembler *turnAssembler) Apply(event sourceEvent) error {
 			assembler.currentComplete = true
 			assembler.flush()
 		}
-		assembler.pendingTurnID = event.TurnID
+		assembler.pendingTurnID = startedTurnID
 	case eventUserMessage:
 		if event.SessionID != "" {
 			assembler.sessionID = event.SessionID
@@ -269,8 +270,9 @@ func (assembler *turnAssembler) Apply(event sourceEvent) error {
 			assembler.currentComplete = true
 		}
 	case eventTurnCompleted:
+		completedTurnID := strings.TrimSpace(event.TurnID)
 		if assembler.current != nil &&
-			(event.TurnID == "" || event.TurnID == assembler.currentSourceID) {
+			(completedTurnID == "" || completedTurnID == assembler.currentSourceID) {
 			assembler.currentComplete = true
 		}
 	default:
