@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -50,10 +51,12 @@ type turnAssembler struct {
 	branch           string
 	pendingTurnID    string
 	current          *domain.FeedstockCandidate
+	currentSourceID  string
 	currentComplete  bool
 	assistantText    string
 	assistantRank    assistantPriority
 	sequence         *int64
+	usedTurnIDs      map[string]struct{}
 	candidates       []domain.FeedstockCandidate
 }
 
@@ -66,9 +69,11 @@ type turnAssemblerCheckpoint struct {
 	Branch           string               `json:"branch"`
 	PendingTurnID    string               `json:"pending_turn_id"`
 	Current          *candidateCheckpoint `json:"current,omitempty"`
+	CurrentSourceID  string               `json:"current_source_turn_id,omitempty"`
 	CurrentComplete  bool                 `json:"current_complete"`
 	AssistantText    string               `json:"assistant_text"`
 	AssistantRank    assistantPriority    `json:"assistant_rank"`
+	UsedTurnIDs      []string             `json:"used_turn_ids,omitempty"`
 }
 
 type candidateCheckpoint struct {
@@ -107,9 +112,16 @@ func restoreTurnAssembler(
 		sessionTimestamp: checkpoint.SessionTimestamp,
 		cwd:              checkpoint.CWD, repo: checkpoint.Repo, branch: checkpoint.Branch,
 		pendingTurnID:   checkpoint.PendingTurnID,
+		currentSourceID: checkpoint.CurrentSourceID,
 		currentComplete: checkpoint.CurrentComplete,
 		assistantText:   checkpoint.AssistantText, assistantRank: checkpoint.AssistantRank,
 		sequence: sequence,
+	}
+	if len(checkpoint.UsedTurnIDs) > 0 {
+		assembler.usedTurnIDs = make(map[string]struct{}, len(checkpoint.UsedTurnIDs))
+		for _, turnID := range checkpoint.UsedTurnIDs {
+			assembler.usedTurnIDs[turnID] = struct{}{}
+		}
 	}
 	if checkpoint.Current != nil {
 		current := checkpoint.Current.candidate()
@@ -124,8 +136,16 @@ func (assembler *turnAssembler) checkpoint() turnAssemblerCheckpoint {
 		SessionTimestamp: assembler.sessionTimestamp,
 		CWD:              assembler.cwd, Repo: assembler.repo, Branch: assembler.branch,
 		PendingTurnID:   assembler.pendingTurnID,
+		CurrentSourceID: assembler.currentSourceID,
 		CurrentComplete: assembler.currentComplete,
 		AssistantText:   assembler.assistantText, AssistantRank: assembler.assistantRank,
+	}
+	if len(assembler.usedTurnIDs) > 0 {
+		checkpoint.UsedTurnIDs = make([]string, 0, len(assembler.usedTurnIDs))
+		for turnID := range assembler.usedTurnIDs {
+			checkpoint.UsedTurnIDs = append(checkpoint.UsedTurnIDs, turnID)
+		}
+		slices.Sort(checkpoint.UsedTurnIDs)
 	}
 	if assembler.current != nil {
 		current := checkpointCandidate(*assembler.current)
@@ -180,7 +200,7 @@ func (assembler *turnAssembler) Apply(event sourceEvent) error {
 			return fmt.Errorf("turn context has no turn ID")
 		}
 		assembler.updateEnvironment(event)
-		if assembler.current != nil && assembler.current.TurnID == event.TurnID {
+		if assembler.current != nil && assembler.currentSourceID == event.TurnID {
 			assembler.current.CWD = assembler.cwd
 			assembler.current.Repo = assembler.repo
 			assembler.current.Branch = assembler.branch
@@ -211,6 +231,8 @@ func (assembler *turnAssembler) Apply(event sourceEvent) error {
 		if turnID == "" {
 			return fmt.Errorf("user message has no source turn identity")
 		}
+		sourceTurnID := turnID
+		turnID = assembler.claimTurnID(turnID)
 		timestamp := event.Timestamp
 		if timestamp.IsZero() {
 			timestamp = assembler.sessionTimestamp
@@ -219,6 +241,7 @@ func (assembler *turnAssembler) Apply(event sourceEvent) error {
 			return fmt.Errorf("user message has no timestamp")
 		}
 		(*assembler.sequence)++
+		assembler.currentSourceID = sourceTurnID
 		assembler.current = &domain.FeedstockCandidate{
 			ID:             FeedstockID(assembler.agent, assembler.sessionID, turnID),
 			TurnID:         turnID,
@@ -246,13 +269,28 @@ func (assembler *turnAssembler) Apply(event sourceEvent) error {
 		}
 	case eventTurnCompleted:
 		if assembler.current != nil &&
-			(event.TurnID == "" || event.TurnID == assembler.current.TurnID) {
+			(event.TurnID == "" || event.TurnID == assembler.currentSourceID) {
 			assembler.currentComplete = true
 		}
 	default:
 		return fmt.Errorf("unsupported normalized source event %d", event.Kind)
 	}
 	return nil
+}
+
+func (assembler *turnAssembler) claimTurnID(turnID string) string {
+	if assembler.usedTurnIDs == nil {
+		assembler.usedTurnIDs = map[string]struct{}{}
+	}
+	unique := turnID
+	for occurrence := 2; ; occurrence++ {
+		if _, taken := assembler.usedTurnIDs[unique]; !taken {
+			break
+		}
+		unique = fmt.Sprintf("%s.%d", turnID, occurrence)
+	}
+	assembler.usedTurnIDs[unique] = struct{}{}
+	return unique
 }
 
 func (assembler *turnAssembler) Finish(includeOpen bool) []domain.FeedstockCandidate {
@@ -300,6 +338,7 @@ func (assembler *turnAssembler) flush() {
 		assembler.candidates = append(assembler.candidates, *assembler.current)
 	}
 	assembler.current = nil
+	assembler.currentSourceID = ""
 	assembler.currentComplete = false
 	assembler.assistantText = ""
 	assembler.assistantRank = 0

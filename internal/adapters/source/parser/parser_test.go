@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/siro33950/knowbrew/internal/domain"
 )
 
 func TestParsers(t *testing.T) {
@@ -225,6 +227,52 @@ func TestCodexUsesTurnContextTurnID(t *testing.T) {
 	if feedstocks[0].CWD != "/resumed-repo" || len(feedstocks[0].Dialogue) == 0 ||
 		feedstocks[0].Dialogue[0].Content != "actual human request" {
 		t.Fatalf("repeated turn context split the feedstock: %#v", feedstocks[0])
+	}
+}
+
+func TestCodexReusedTurnContextTurnIDStaysDistinct(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	content := `{"timestamp":"2026-07-30T01:00:00Z","type":"session_meta","payload":{"id":"session-id","cwd":"/repo"}}
+{"timestamp":"2026-07-30T01:00:01Z","type":"turn_context","payload":{"turn_id":"X","cwd":"/repo"}}
+{"timestamp":"2026-07-30T01:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"first"}}
+{"timestamp":"2026-07-30T01:00:03Z","type":"event_msg","payload":{"type":"agent_message","message":"reply one"}}
+{"timestamp":"2026-07-30T01:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"X"}}
+{"timestamp":"2026-07-30T01:00:05Z","type":"turn_context","payload":{"turn_id":"Y","cwd":"/repo"}}
+{"timestamp":"2026-07-30T01:00:06Z","type":"event_msg","payload":{"type":"user_message","message":"second"}}
+{"timestamp":"2026-07-30T01:00:07Z","type":"event_msg","payload":{"type":"agent_message","message":"reply two"}}
+{"timestamp":"2026-07-30T01:00:08Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"Y"}}
+{"timestamp":"2026-07-30T01:00:09Z","type":"turn_context","payload":{"turn_id":"X","cwd":"/repo"}}
+{"timestamp":"2026-07-30T01:00:10Z","type":"event_msg","payload":{"type":"user_message","message":"third"}}
+{"timestamp":"2026-07-30T01:00:11Z","type":"event_msg","payload":{"type":"agent_message","message":"reply three"}}
+{"timestamp":"2026-07-30T01:00:12Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"X"}}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feedstocks, warnings, err := (Codex{}).Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(feedstocks) != 3 {
+		t.Fatalf("feedstocks = %#v, warnings = %#v", feedstocks, warnings)
+	}
+	wantTurnIDs := []string{"X", "Y", "X.2"}
+	wantTexts := []string{"first", "second", "third"}
+	seen := map[string]struct{}{}
+	for index, feedstock := range feedstocks {
+		if feedstock.TurnID != wantTurnIDs[index] {
+			t.Fatalf("turn %d = %q, want %q", index, feedstock.TurnID, wantTurnIDs[index])
+		}
+		if feedstock.Dialogue[0].Content != wantTexts[index] {
+			t.Fatalf("turn %d text = %q", index, feedstock.Dialogue[0].Content)
+		}
+		if err := domain.ValidateIdentifier(feedstock.TurnID, "source turn ID"); err != nil {
+			t.Fatal(err)
+		}
+		if _, duplicated := seen[feedstock.ID]; duplicated {
+			t.Fatalf("duplicate candidate ID %s", feedstock.ID)
+		}
+		seen[feedstock.ID] = struct{}{}
 	}
 }
 
