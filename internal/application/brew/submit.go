@@ -259,7 +259,7 @@ func validateSubmittedCandidates(dataStore Repository, state agent.ReadState) er
 		)
 	}
 	seenStatements := make(map[string]struct{}, len(state.Submitted))
-	conflictsTargets := make(map[string]struct{})
+	replacementTargets := make(map[string]struct{})
 	vocabulary, err := knowledgeVocabulary(dataStore)
 	if err != nil {
 		return err
@@ -297,12 +297,13 @@ func validateSubmittedCandidates(dataStore Repository, state agent.ReadState) er
 			return fmt.Errorf("knowledge candidate %d duplicates a submitted statement", index+1)
 		}
 		seenStatements[key] = struct{}{}
-		if candidate.Resolution.Kind == ResolutionConflicts {
+		if candidate.Resolution.Kind == ResolutionConflicts ||
+			candidate.Resolution.Kind == ResolutionComplements {
 			target := candidate.Resolution.KnowledgeIDs[0]
-			if _, exists := conflictsTargets[target]; exists {
-				return fmt.Errorf("knowledge %s is the conflicts target of multiple candidates", target)
+			if _, exists := replacementTargets[target]; exists {
+				return fmt.Errorf("knowledge %s is the replacement target of multiple candidates", target)
 			}
-			conflictsTargets[target] = struct{}{}
+			replacementTargets[target] = struct{}{}
 		}
 	}
 	return nil

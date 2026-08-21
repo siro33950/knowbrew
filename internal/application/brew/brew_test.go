@@ -361,6 +361,79 @@ func TestValidateSubmittedCandidatesCachesVocabularyAndCatalogBySubject(t *testi
 	}
 }
 
+func TestValidateSubmittedCandidatesRejectsDuplicateComplementsTarget(t *testing.T) {
+	repository, state := replacementTargetState(t,
+		complementsCandidateForTarget("kn-existing", "First independently maintainable statement."),
+		complementsCandidateForTarget("kn-existing", "Second independently maintainable statement."),
+	)
+	err := validateSubmittedCandidates(repository, state)
+	if err == nil ||
+		!strings.Contains(err.Error(), "kn-existing is the replacement target of multiple candidates") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestValidateSubmittedCandidatesRejectsComplementsAndConflictsOnSameTarget(t *testing.T) {
+	conflicting := newCandidate("A conflicting statement.")
+	conflicting.Resolution = domain.Resolution{
+		Kind: domain.ResolutionConflicts, KnowledgeIDs: []string{"kn-existing"},
+	}
+	repository, state := replacementTargetState(t,
+		complementsCandidateForTarget("kn-existing", "A merged statement."),
+		conflicting,
+	)
+	err := validateSubmittedCandidates(repository, state)
+	if err == nil ||
+		!strings.Contains(err.Error(), "kn-existing is the replacement target of multiple candidates") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestValidateSubmittedCandidatesAcceptsComplementsOnDistinctTargets(t *testing.T) {
+	repository, state := replacementTargetState(t,
+		complementsCandidateForTarget("kn-existing", "A merged statement."),
+		complementsCandidateForTarget("kn-second", "Another merged statement."),
+	)
+	if err := validateSubmittedCandidates(repository, state); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func replacementTargetState(
+	t *testing.T,
+	candidates ...domain.KnowledgeCandidate,
+) (Repository, agent.ReadState) {
+	t.Helper()
+	dataStore := newBrewStore(t, "knowbrew")
+	feedstock := writePendingFeedstock(t, dataStore, "fs-replacement-target", "knowbrew")
+	writeKnowledge(t, dataStore, "kn-existing", feedstock, "knowbrew", "An existing statement.")
+	writeKnowledge(t, dataStore, "kn-second", feedstock, "knowbrew", "A second existing statement.")
+	repository := repositoryForTest(dataStore)
+	_, digest, err := catalogSnapshot(repository, "knowbrew")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspected := []string{"kn-existing", "kn-second"}
+	return repository, agent.ReadState{
+		Subjects: map[string]agent.SubjectReadState{
+			"knowbrew": {Catalog: inspected, Digest: digest},
+		},
+		Inspected: inspected,
+		Submitted: candidates,
+	}
+}
+
+func complementsCandidateForTarget(target, statement string) domain.KnowledgeCandidate {
+	candidate := newCandidate(statement)
+	candidate.Resolution = domain.Resolution{
+		Kind: domain.ResolutionComplements, KnowledgeIDs: []string{target},
+		Draft: &domain.KnowledgeDraft{
+			Type: "property", Subject: "knowbrew", Statement: statement + " Merged.",
+		},
+	}
+	return candidate
+}
+
 func TestFeedstockPromptContainsTurnMastersAndNoDrawTypeCandidates(t *testing.T) {
 	dataStore := newBrewStore(t, "knowbrew")
 	target := writePendingFeedstock(t, dataStore, "fs-prompt", "knowbrew")
