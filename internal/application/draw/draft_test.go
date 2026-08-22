@@ -67,7 +67,7 @@ func TestDraftAllowsEmptyTypeCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if drawn.AnnotatedAt == nil || len(drawn.Types) != 0 || drawn.PendingBrew() {
+	if drawn.AnnotatedAt == nil || len(drawn.Types) != 0 || !drawn.PendingExtraction() {
 		t.Fatalf("feedstock = %#v", drawn)
 	}
 }

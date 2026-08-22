@@ -28,19 +28,19 @@ func (f *Feedstock) ApplyDraft(summary string, types []KnowledgeType, when time.
 	return ValidateFeedstock(*f)
 }
 
-func (f *Feedstock) ApplyBrewProgress(when time.Time) error {
+func (f *Feedstock) ApplyExtractionProgress(when time.Time) error {
 	if f.AnnotatedAt == nil {
 		return fmt.Errorf("feedstock %s is not drawn", f.ID)
 	}
 	if when.IsZero() {
-		return errors.New("brew time is required")
+		return errors.New("extraction time is required")
 	}
-	if f.BrewedAt == nil {
-		f.BrewedAt = &when
+	if f.ExtractedAt == nil {
+		f.ExtractedAt = &when
 	}
 	return ValidateFeedstock(*f)
 }
 
-func (f Feedstock) PendingBrew() bool {
-	return f.AnnotatedAt != nil && len(f.Types) > 0 && f.BrewedAt == nil
+func (f Feedstock) PendingExtraction() bool {
+	return f.AnnotatedAt != nil && f.ExtractedAt == nil
 }

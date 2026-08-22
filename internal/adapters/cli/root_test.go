@@ -11,7 +11,6 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/siro33950/knowbrew/internal/adapters/config"
-	invocationstate "github.com/siro33950/knowbrew/internal/adapters/invocation/state"
 	"github.com/siro33950/knowbrew/internal/adapters/persistence/markdownstore"
 	"github.com/siro33950/knowbrew/internal/adapters/source/parser"
 	"github.com/siro33950/knowbrew/internal/application/draw"
@@ -216,7 +215,7 @@ func TestDrawHookProcessesOnlyPayloadTranscriptAndWritesNoSummary(t *testing.T) 
 	}
 }
 
-func TestDrawHookExitsQuietlyWhileAnotherRunHoldsTheLock(t *testing.T) {
+func TestDrawHookIgnoresRetiredGlobalLock(t *testing.T) {
 	rootDir := t.TempDir()
 	sourceDir := t.TempDir()
 	transcriptPath := filepath.Join(sourceDir, "session.jsonl")
@@ -841,155 +840,15 @@ func TestFeedstockContextReadsBoundedTurnsFromSource(t *testing.T) {
 }
 
 func TestSubjectCreationFlagIsUnavailable(t *testing.T) {
-	for _, args := range [][]string{
-		{
-			"feedstock", "annotate", "fs-source",
-			"--new-subject", "invented=Invented subject.",
-		},
-		{
-			"knowledge", "submit", "fs-source",
-			"--knowledge", `{}`,
-			"--new-subject", "invented=Invented subject.",
-		},
-	} {
-		command := newRootCommand()
-		command.SetArgs(args)
-		err := command.Execute()
-		if err == nil ||
-			!strings.Contains(err.Error(), "unknown flag: --new-subject") {
-			t.Fatalf("%v error = %v", args, err)
-		}
+	args := []string{
+		"feedstock", "annotate", "fs-source",
+		"--new-subject", "invented=Invented subject.",
 	}
-}
-
-func TestKnowledgeSubmitRequiresInvocationAndValidatesType(t *testing.T) {
-	rootDir := t.TempDir()
-	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
-	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("KNOWBREW_CONFIG", configPath)
-	dataStore, err := store.New(rootDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	feedstock := domain.Feedstock{
-		Schema: domain.SchemaVersion, ID: "fs-source", TurnID: "turn-source",
-		Session:   domain.SessionRef{ID: "session"},
-		Timestamp: time.Now().UTC(), Agent: "claude",
-		Types: []domain.KnowledgeType{"property"}, Summary: "The user supplied a reusable property.",
-		AnnotatedAt: func() *time.Time { value := time.Now().UTC(); return &value }(),
-	}
-	if err := dataStore.WriteFeedstock(feedstock); err != nil {
-		t.Fatal(err)
-	}
-	outside := newRootCommand()
-	outside.SetArgs([]string{
-		"knowledge", "submit", feedstock.ID,
-		"--knowledge", `{"type":"property","subject":"knowbrew","statement":"Use the tested behavior.","rationale":"","resolution":{"kind":"new","knowledge_ids":[],"draft":null}}`,
-	})
-	if err := outside.Execute(); err == nil ||
-		!strings.Contains(err.Error(), "only inside a Brew invocation") {
-		t.Fatalf("outside invocation error = %v", err)
-	}
-	t.Setenv(config.InvocationFeedstockEnvironment, feedstock.ID)
-	t.Setenv(config.InvocationIDEnvironment, "submit-invalid-type")
-	t.Setenv(config.InvocationTaskEnvironment, "brew")
-	invalid := newRootCommand()
-	invalid.SetArgs([]string{
-		"knowledge", "submit", feedstock.ID,
-		"--knowledge", `{"type":"other","subject":"knowbrew","statement":"Use the tested behavior.","rationale":"","resolution":{"kind":"new","knowledge_ids":[],"draft":null}}`,
-	})
-	if err := invalid.Execute(); err == nil ||
-		!strings.Contains(err.Error(), "not defined in masters/types") {
-		t.Fatalf("invalid type error = %v", err)
-	}
-}
-
-func TestKnowledgeSubmitRegistersCandidateWithoutWritingKnowledge(t *testing.T) {
-	rootDir := t.TempDir()
-	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
-	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(config.ConfigEnvironment, configPath)
-	dataStore, err := store.New(rootDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{
-		Name: "knowbrew", Definition: "The existing knowbrew subject.",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	annotatedAt := time.Now().UTC()
-	feedstock := domain.Feedstock{
-		Schema: domain.SchemaVersion, ID: "fs-subject-flag", TurnID: "turn-subject-flag",
-		Session:   domain.SessionRef{ID: "session"},
-		Timestamp: annotatedAt, Agent: "claude",
-		Types:       []domain.KnowledgeType{domain.KnowledgeType("property")},
-		Summary:     "The user supplied a reusable fact.",
-		AnnotatedAt: &annotatedAt,
-	}
-	if err := dataStore.WriteFeedstock(feedstock); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(config.InvocationFeedstockEnvironment, feedstock.ID)
-	t.Setenv(config.InvocationIDEnvironment, "submit-subject")
-	t.Setenv(config.InvocationTaskEnvironment, "brew")
-	catalog := newRootCommand()
-	catalog.SetArgs([]string{
-		"knowledge", "catalog", "--subject", "knowbrew",
-		"--query", "The subject flag preserves attribution.",
-	})
-	if err := catalog.Execute(); err != nil {
-		t.Fatal(err)
-	}
-	var submitOutput bytes.Buffer
 	command := newRootCommand()
-	command.SetOut(&submitOutput)
-	command.SetArgs([]string{
-		"knowledge", "submit", feedstock.ID,
-		"--knowledge", `{"type":"property","subject":"knowbrew","statement":"The subject flag preserves attribution.","rationale":"","resolution":{"kind":"new","knowledge_ids":[],"draft":null}}`,
-	})
-	if err := command.Execute(); err != nil {
-		t.Fatal(err)
-	}
-	var submitted struct {
-		Submitted int `json:"submitted"`
-	}
-	if err := json.Unmarshal(submitOutput.Bytes(), &submitted); err != nil {
-		t.Fatal(err)
-	}
-	if submitted.Submitted != 1 {
-		t.Fatalf("submit output = %s", submitOutput.String())
-	}
-	state, err := invocationstate.ReadStateForInvocation(rootDir, "submit-subject")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(state.Submitted) != 1 || state.Submitted[0].Subject != "knowbrew" {
-		t.Fatalf("invocation state = %#v", state)
-	}
-	files, _, err := dataStore.ListAllKnowledge()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(files) != 0 {
-		t.Fatalf("submit wrote Knowledge: %#v", files)
-	}
-
-	legacy := newRootCommand()
-	legacy.SetArgs([]string{
-		"knowledge", "submit", feedstock.ID,
-		"--knowledge", `{}`,
-		"--slug", "legacy-subject-flag",
-		"--pro" + "ject", "knowbrew",
-	})
-	if err := legacy.Execute(); err == nil || !strings.Contains(err.Error(), "unknown flag") {
-		t.Fatalf("removed flag error = %v", err)
+	command.SetArgs(args)
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "unknown flag: --new-subject") {
+		t.Fatalf("%v error = %v", args, err)
 	}
 }
 
@@ -1023,7 +882,7 @@ func TestKnowledgeCommandsUseFeedstockTerminologyOnly(t *testing.T) {
 	for _, command := range knowledge.Commands() {
 		names[command.Name()] = true
 	}
-	if len(names) != 3 || !names["show"] || !names["catalog"] || !names["submit"] {
+	if len(names) != 1 || !names["show"] {
 		t.Fatalf("knowledge subcommands = %#v", names)
 	}
 }

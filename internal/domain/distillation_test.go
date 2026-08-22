@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDistillationDomainRules(t *testing.T) {
@@ -46,7 +47,8 @@ func TestSemanticSubjectExcludesDistillationTemplateAssignments(t *testing.T) {
 }
 
 func TestDistillationKnowledgeEligibilityAndReferenceValidation(t *testing.T) {
-	active := Knowledge{ID: "kn-active", Subject: "knowbrew", Approved: true}
+	organizedAt := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	active := Knowledge{ID: "kn-active", Subject: "knowbrew", Approved: true, OrganizedAt: &organizedAt}
 	if !IsDistillableKnowledge(active, "[[knowbrew]]") {
 		t.Fatal("approved current Knowledge should be distillable")
 	}

@@ -316,35 +316,10 @@ func TestClippedAPIPreservesUTF8(t *testing.T) {
 	}
 }
 
-func TestClaudeBrewPermissionsExposeFeedstockBrewTools(t *testing.T) {
-	normalization := strings.Join(claudeAllowedTools("/bin/knowbrew", TaskBrew), "\n")
-	for _, required := range []string{
-		"/bin/knowbrew knowledge catalog *",
-		"/bin/knowbrew knowledge show *",
-		"/bin/knowbrew knowledge submit *",
-		"/bin/knowbrew feedstock context *",
-	} {
-		if !strings.Contains(normalization, required) {
-			t.Fatalf("normalization permissions do not contain %q:\n%s", required, normalization)
-		}
-	}
-	for _, forbidden := range []string{
-		"Bash(/bin/knowbrew show *",
-		"feedstock annotate",
-		"knowledge --include-pending",
-		"knowledge --include-retired",
-	} {
-		if strings.Contains(normalization, forbidden) {
-			t.Fatalf("normalization permissions expose source or extraction command %q:\n%s", forbidden, normalization)
-		}
-	}
-	for _, forbidden := range []string{
-		"knowledge create",
-		"knowledge add-feedstock",
-		"knowledge invalidate",
-	} {
-		if strings.Contains(normalization, forbidden) {
-			t.Fatalf("brew permissions expose %q:\n%s", forbidden, normalization)
+func TestClaudeExtractAndBrewExposeNoTools(t *testing.T) {
+	for _, task := range []Task{TaskExtract, TaskBrew} {
+		if allowed := claudeAllowedTools("/bin/knowbrew", task); len(allowed) != 0 {
+			t.Fatalf("%s permissions = %#v", task, allowed)
 		}
 	}
 }
@@ -460,6 +435,7 @@ exit 9
 		wantEffort string
 	}{
 		{task: TaskDraw, wantModel: "draw-fast", wantEffort: "low"},
+		{task: TaskExtract, wantModel: "brew-quality", wantEffort: "high"},
 		{task: TaskBrew, wantModel: "brew-quality", wantEffort: "high"},
 		{task: TaskDistillSelect, wantModel: "distill-quality", wantEffort: "max"},
 		{task: TaskDistillGenerate, wantModel: "distill-quality", wantEffort: "max"},
@@ -482,7 +458,8 @@ exit 9
 			t.Fatalf("%s arguments = %#v, want --model %s", test.task, args, test.wantModel)
 		}
 		wantSandbox := "workspace-write"
-		if test.task == TaskDistillSelect || test.task == TaskDistillGenerate {
+		if test.task == TaskExtract || test.task == TaskBrew ||
+			test.task == TaskDistillSelect || test.task == TaskDistillGenerate {
 			wantSandbox = "read-only"
 		}
 		if !containsArgumentPair(args, "--sandbox", wantSandbox) {

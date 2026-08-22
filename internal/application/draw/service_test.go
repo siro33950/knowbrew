@@ -3,7 +3,6 @@ package draw
 import (
 	"context"
 	"io"
-	"path/filepath"
 	"time"
 
 	"github.com/siro33950/knowbrew/internal/adapters/config"
@@ -15,6 +14,7 @@ import (
 	sourceadapter "github.com/siro33950/knowbrew/internal/adapters/source"
 	"github.com/siro33950/knowbrew/internal/application/agent"
 	"github.com/siro33950/knowbrew/internal/application/diagnostic"
+	applicationsource "github.com/siro33950/knowbrew/internal/application/source"
 	"github.com/siro33950/knowbrew/internal/domain"
 )
 
@@ -22,7 +22,11 @@ const DefaultLookback = 24 * time.Hour
 
 func collectFiles(cfg config.Config, options Options, now time.Time) ([]SourceFile, error) {
 	settings := settingsFromConfig(cfg)
-	return sourceadapter.New(settings.Sources).Collect(settings.Sources, options, now)
+	return sourceadapter.New(settings.Sources).Collect(settings.Sources, applicationsource.Selection{
+		Paths: options.Paths, MaxTurns: options.MaxTurns, Sources: options.Sources,
+		ModifiedSince: options.ModifiedSince, ModifiedUntil: options.ModifiedUntil,
+		Order: options.Order,
+	}, now)
 }
 
 func ensureRepositorySubjectForTest(
@@ -90,9 +94,8 @@ func RunWithOptions(
 		Repository: &persistenceadapter.Markdown{Store: dataStore},
 		Sources:    sourceadapter.New(settings.Sources),
 		Runner:     runner, Progress: progressui.From(progress),
-		RunLock: runlock.FileLock{
-			Path: filepath.Join(cfg.Root, ".knowbrew", "state", "draw.lock"),
-			Name: "draw",
+		Claimer: runlock.FileClaimer{
+			Root: cfg.Root, Namespace: "feedstock-claims",
 		},
 	}
 	if len(indexes) > 0 {

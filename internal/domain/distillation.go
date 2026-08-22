@@ -98,7 +98,7 @@ func ValidateDistilledDocument(document DistilledDocument) error {
 }
 
 func IsDistillableKnowledge(knowledge Knowledge, subject string) bool {
-	return MasterName(knowledge.Subject) == MasterName(subject) &&
+	return knowledge.OrganizedAt != nil && MasterName(knowledge.Subject) == MasterName(subject) &&
 		EffectiveKnowledgeStatus(knowledge) == StatusActive
 }
 

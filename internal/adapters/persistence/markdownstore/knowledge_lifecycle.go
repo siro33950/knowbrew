@@ -37,7 +37,7 @@ func (s *Store) ReplacePendingKnowledgeEvidence(
 	if err != nil {
 		return err
 	}
-	if current.Status != domain.StatusPending {
+	if current.OrganizedAt == nil || current.Status != domain.StatusPending {
 		return fmt.Errorf("only pending knowledge can be revised; %s is %s", id, current.Status)
 	}
 	replacement.Created = current.Created
@@ -99,6 +99,9 @@ func (s *Store) SupersedePendingKnowledge(
 	knowledge, body, err := s.ReadKnowledge(path)
 	if err != nil {
 		return false, err
+	}
+	if knowledge.OrganizedAt == nil {
+		return false, errors.New("cannot supersede unorganized knowledge")
 	}
 	if knowledge.Status == domain.StatusSuperseded {
 		if knowledge.SupersededBy != successor {

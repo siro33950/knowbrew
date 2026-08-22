@@ -44,7 +44,7 @@ func distilled(subject, templateName, body string) domain.DistilledDocument {
 	}
 }
 
-func TestBuildInjectsAlwaysAndMatchedSubjectDocuments(t *testing.T) {
+func TestB015B033BuildInjectsAlwaysAndMatchedSubjectDocuments(t *testing.T) {
 	repo := fakeRepository{
 		subjects: []domain.MasterEntry{
 			{Name: "owner", Definition: "Owner.", Documents: []string{"persona"}},
@@ -57,6 +57,7 @@ func TestBuildInjectsAlwaysAndMatchedSubjectDocuments(t *testing.T) {
 			template("concept", ""),
 		},
 		documents: map[string]domain.DistilledDocument{
+			"/decisions":      distilled("", "decisions", "# subjectless\n\nMust not be injected."),
 			"owner/persona":   distilled("owner", "persona", "# owner\n\nPersona body."),
 			"alpha/decisions": distilled("alpha", "decisions", "# alpha\n\nAlpha decisions body."),
 			"alpha/concept":   distilled("alpha", "concept", "# alpha\n\nAlpha concept body."),
@@ -80,7 +81,7 @@ func TestBuildInjectsAlwaysAndMatchedSubjectDocuments(t *testing.T) {
 			t.Fatalf("output does not contain %q:\n%s", expected, output)
 		}
 	}
-	for _, unexpected := range []string{"beta", "concept body"} {
+	for _, unexpected := range []string{"beta", "concept body", "Must not be injected"} {
 		if strings.Contains(output, unexpected) {
 			t.Fatalf("output leaked %q:\n%s", unexpected, output)
 		}

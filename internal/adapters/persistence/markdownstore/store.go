@@ -61,6 +61,7 @@ type knowledgeFrontmatter struct {
 	SupersededBy  string               `yaml:"superseded_by,omitempty"`
 	SupersededAt  *time.Time           `yaml:"superseded_at,omitempty"`
 	InvalidatedAt *time.Time           `yaml:"invalidated_at,omitempty"`
+	OrganizedAt   *time.Time           `yaml:"organized_at,omitempty"`
 	// DeprecatedTrigger absorbs the retired trigger key from existing files;
 	// the strict frontmatter decoder would otherwise reject them. The value
 	// is discarded.
@@ -81,7 +82,7 @@ type readableFeedstockFrontmatter struct {
 	Types       []domain.KnowledgeType `yaml:"types"`
 	Summary     string                 `yaml:"summary"`
 	AnnotatedAt *time.Time             `yaml:"annotated_at,omitempty"`
-	BrewedAt    *time.Time             `yaml:"brewed_at,omitempty"`
+	ExtractedAt *time.Time             `yaml:"extracted_at,omitempty"`
 }
 
 type readableSessionRef struct {
@@ -95,7 +96,7 @@ func (header readableFeedstockFrontmatter) domainFeedstock() domain.Feedstock {
 		Session:   domain.SessionRef{ID: header.Session.ID},
 		Timestamp: header.Timestamp, Agent: header.Agent, CWD: header.CWD,
 		Repo: header.Repo, Branch: header.Branch, Types: header.Types,
-		Summary: header.Summary, AnnotatedAt: header.AnnotatedAt, BrewedAt: header.BrewedAt,
+		Summary: header.Summary, AnnotatedAt: header.AnnotatedAt, ExtractedAt: header.ExtractedAt,
 	}
 }
 
@@ -112,6 +113,7 @@ type writableKnowledgeFrontmatter struct {
 	SupersededBy  string               `yaml:"superseded_by,omitempty"`
 	SupersededAt  *time.Time           `yaml:"superseded_at,omitempty"`
 	InvalidatedAt *time.Time           `yaml:"invalidated_at,omitempty"`
+	OrganizedAt   *time.Time           `yaml:"organized_at,omitempty"`
 }
 
 func New(root string) (*Store, error) {
@@ -211,7 +213,7 @@ func (s *Store) WriteFeedstock(feedstock domain.Feedstock) error {
 		if readErr != nil {
 			return readErr
 		}
-		if equalFeedstockExceptBrewed(existing, feedstock) {
+		if equalFeedstockExceptExtracted(existing, feedstock) {
 			return nil
 		}
 		return fmt.Errorf("feedstock %s is immutable and already exists", feedstock.ID)
@@ -300,7 +302,7 @@ func (s *Store) ListFeedstocks() ([]domain.Feedstock, []diagnostic.Warning, erro
 	return feedstocks, warnings, err
 }
 
-func (s *Store) WriteBrewedFeedstock(feedstock domain.Feedstock, when time.Time) error {
+func (s *Store) WriteExtractedFeedstock(feedstock domain.Feedstock, when time.Time) error {
 	current, path, err := s.FindFeedstock(feedstock.ID)
 	if err != nil {
 		return err
@@ -308,7 +310,7 @@ func (s *Store) WriteBrewedFeedstock(feedstock domain.Feedstock, when time.Time)
 	if current.AnnotatedAt == nil {
 		return fmt.Errorf("feedstock %s is not annotated", feedstock.ID)
 	}
-	if err := current.ApplyBrewProgress(when); err != nil {
+	if err := current.ApplyExtractionProgress(when); err != nil {
 		return err
 	}
 	data, err := encodeWithWikilinks(current, "", "types")
@@ -369,9 +371,12 @@ func (s *Store) WriteNewKnowledge(id string, knowledge domain.Knowledge, body st
 	}
 	knowledge.Approved = false
 	knowledge.Status = domain.StatusPending
-	knowledge.InvalidatedAt = nil
-	knowledge.SupersededBy = ""
-	knowledge.SupersededAt = nil
+	if knowledge.OrganizedAt == nil {
+		knowledge.InvalidatedAt = nil
+		knowledge.Supersedes = nil
+		knowledge.SupersededBy = ""
+		knowledge.SupersededAt = nil
+	}
 	knowledge.Subject = domain.MasterName(knowledge.Subject)
 	knowledge.EstablishedBy = domain.MasterName(knowledge.EstablishedBy)
 	knowledge.Feedstocks = normalizeFeedstockLinks(knowledge.Feedstocks)
@@ -384,9 +389,6 @@ func (s *Store) WriteNewKnowledge(id string, knowledge domain.Knowledge, body st
 	}
 	if strings.TrimSpace(body) == "" {
 		return errors.New("knowledge body is required")
-	}
-	if knowledge.Subject == "" {
-		return errors.New("knowledge subject is required")
 	}
 	for _, feedstock := range knowledge.Feedstocks {
 		if _, _, err := s.FindFeedstock(feedstock); err != nil {
@@ -449,6 +451,9 @@ func (s *Store) ListKnowledge(includePending bool) ([]KnowledgeFile, []diagnosti
 	}
 	var files []KnowledgeFile
 	for _, file := range all {
+		if file.Knowledge.OrganizedAt == nil {
+			continue
+		}
 		status := file.Knowledge.Status
 		if status == domain.StatusInvalidated ||
 			status == domain.StatusSuperseded ||
@@ -587,6 +592,9 @@ func (s *Store) InvalidateKnowledge(id string, feedstocks []string, when time.Ti
 	knowledge, body, err := s.ReadKnowledge(path)
 	if err != nil {
 		return err
+	}
+	if knowledge.OrganizedAt == nil {
+		return errors.New("cannot invalidate unorganized knowledge")
 	}
 	if knowledge.Status == domain.StatusInvalidated {
 		return nil
@@ -875,7 +883,7 @@ func knowledgeFromFrontmatter(header knowledgeFrontmatter) (domain.Knowledge, er
 		Subject: header.Subject, Feedstocks: header.Feedstocks,
 		Approved: approved, Supersedes: header.Supersedes,
 		SupersededBy: header.SupersededBy, SupersededAt: header.SupersededAt,
-		InvalidatedAt: header.InvalidatedAt,
+		InvalidatedAt: header.InvalidatedAt, OrganizedAt: header.OrganizedAt,
 	}
 	knowledge.Status = domain.EffectiveKnowledgeStatus(knowledge)
 	return knowledge, nil
@@ -890,6 +898,7 @@ func encodeKnowledge(knowledge domain.Knowledge, body string) ([]byte, error) {
 		Approved:   knowledge.Approved,
 		Supersedes: knowledge.Supersedes, SupersededBy: knowledge.SupersededBy,
 		SupersededAt: knowledge.SupersededAt, InvalidatedAt: knowledge.InvalidatedAt,
+		OrganizedAt: knowledge.OrganizedAt,
 	}
 	return encodeWithWikilinks(
 		header,
@@ -952,9 +961,9 @@ func linkWikilinkNode(node *yaml.Node) {
 	}
 }
 
-func equalFeedstockExceptBrewed(left, right domain.Feedstock) bool {
-	left.BrewedAt = nil
-	right.BrewedAt = nil
+func equalFeedstockExceptExtracted(left, right domain.Feedstock) bool {
+	left.ExtractedAt = nil
+	right.ExtractedAt = nil
 	leftJSON, _ := json.Marshal(left)
 	rightJSON, _ := json.Marshal(right)
 	return string(leftJSON) == string(rightJSON)

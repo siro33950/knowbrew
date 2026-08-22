@@ -92,7 +92,7 @@ func newDrawCommand() *cobra.Command {
 	)
 	command := &cobra.Command{
 		Use:   "draw [path...]",
-		Short: "Acquire feedstocks, then classify unannotated records concurrently",
+		Short: "Draw feedstocks and extract unorganized Knowledge concurrently",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(command *cobra.Command, paths []string) error {
 			if hook {
@@ -121,7 +121,7 @@ func newDrawCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			options := draw.Options{Paths: paths, Sources: sources, Order: selectedOrder}
+			options := draw.Options{Paths: paths, Sources: sources, Order: selectedOrder, Hook: hook}
 			if command.Flags().Changed("max") {
 				if maximum < 1 {
 					return errors.New("--max must be greater than zero")
@@ -159,18 +159,13 @@ func newDrawCommand() *cobra.Command {
 			service := draw.Service{
 				Settings: settings, Repository: repositoryFor(dataStore),
 				Sources: sourceGateway, Runner: runner, Progress: display,
-				RunLock: runlock.FileLock{
-					Path:      filepath.Join(cfg.Root, ".knowbrew", "state", "draw.lock"),
-					Name:      "draw",
-					Immediate: hook,
+				Claimer: runlock.FileClaimer{
+					Root: cfg.Root, Namespace: "feedstock-claims",
 				},
 				SearchIndex: drawSearchIndex{Config: cfg, Store: dataStore},
 			}
 			summary, err := service.RunWithOptions(command.Context(), options)
 			if err != nil {
-				if hook && errors.Is(err, runlock.ErrBusy) {
-					return nil
-				}
 				var acquisitionErr draw.AcquisitionFailuresError
 				if errors.As(err, &acquisitionErr) {
 					if hook {
@@ -300,7 +295,7 @@ func newBrewCommand() *cobra.Command {
 	)
 	command := &cobra.Command{
 		Use:   "brew",
-		Short: "Brew pending feedstocks into Knowledge",
+		Short: "Organize pending Knowledge by Subject",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			options := brew.Options{}
@@ -319,43 +314,29 @@ func newBrewCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			index, err := searchSynchronizer(cfg, repository.Store)
-			if err != nil {
-				return err
-			}
-			sourceGateway := sourceadapter.NewCached(cfg.Root, configuredSources(cfg))
 			service := brew.Service{
 				Settings: brew.Settings{
-					ContextTurns: cfg.Draw.ContextTurns,
-					Backend:      cfg.LLM.Backend,
-					Model:        cfg.LLM.BrewModel,
+					Concurrency: cfg.Draw.Concurrency,
+					Backend:     cfg.LLM.Backend,
+					Model:       cfg.LLM.BrewModel,
 				},
 				Repository: repository,
 				Lifecycle:  repository,
-				Dialogue: dialogueadapter.Query{
-					Store: repository.Store, Source: sourceGateway,
+				Runner:     runner,
+				Progress:   display,
+				Claimer: runlock.FileClaimer{
+					Root: cfg.Root, Namespace: "subject-claims",
 				},
-				Runner:   runner,
-				Progress: display,
-				RunLock: runlock.FileLock{
-					Path: filepath.Join(cfg.Root, ".knowbrew", "state", "brew.lock"),
-					Name: "brew",
-				},
-				SearchIndex: index,
 			}
 			summary, err := service.RunWithOptions(command.Context(), options)
-			closeErr := index.Close()
 			if err != nil {
 				display.Abort()
-				return errors.Join(err, closeErr)
+				return err
 			}
-			if closeErr != nil {
-				return closeErr
-			}
-			return writeJSON(os.Stdout, summary)
+			return writeJSON(command.OutOrStdout(), summary)
 		},
 	}
-	command.Flags().IntVar(&maximum, "max", 0, "Process at most N pending feedstocks")
+	command.Flags().IntVar(&maximum, "max", 0, "Process at most N pending subjects")
 	command.Flags().BoolVar(&verbose, "verbose", false, "Stream agent output and per-record progress")
 	return command
 }
@@ -758,7 +739,7 @@ func newKnowledgeCommand() *cobra.Command {
 	parent := &cobra.Command{
 		Use:     "knowledge [keywords...]",
 		Aliases: []string{"kn"},
-		Short:   "Search knowledge as JSON or apply validated knowledge operations",
+		Short:   "Search or inspect Knowledge as JSON",
 		Args:    cobra.ArbitraryArgs,
 		RunE: func(command *cobra.Command, keywords []string) error {
 			response, err := runSearch(command, searchapp.TargetKnowledge, keywords, flags, searchapp.Options{
@@ -774,58 +755,8 @@ func newKnowledgeCommand() *cobra.Command {
 	addSearchFlags(parent, &flags, true)
 	parent.Flags().BoolVar(&includePending, "include-pending", false, "Include pending knowledge")
 	parent.Flags().BoolVar(&includeRetired, "include-retired", false, "Include invalidated and superseded knowledge")
-	parent.AddCommand(newKnowledgeCatalogCommand(), newKnowledgeShowCommand(), newKnowledgeSubmitCommand())
+	parent.AddCommand(newKnowledgeShowCommand())
 	return parent
-}
-
-func newKnowledgeCatalogCommand() *cobra.Command {
-	var subject, queryText string
-	command := &cobra.Command{
-		Use:    "catalog",
-		Short:  "List compact Knowledge semantics for one subject",
-		Hidden: true,
-		Args:   cobra.NoArgs,
-		RunE: func(command *cobra.Command, _ []string) error {
-			cfg, err := config.Load()
-			if err != nil {
-				return err
-			}
-			dataStore, err := store.New(cfg.Root)
-			if err != nil {
-				return err
-			}
-			encoder, err := embeddingadapter.Open(cfg.Root, cfg.Embedding)
-			if err != nil {
-				return err
-			}
-			searchService := searchapp.Service{Gateway: query.Gateway{Store: dataStore, Encoder: encoder}}
-			candidateIDs, err := searchService.CandidateIDs(command.Context(), searchapp.Options{
-				Target: searchapp.TargetKnowledge, Keywords: []string{queryText}, Subject: subject,
-				IncludePending: true, Limit: 30,
-			})
-			if encoder != nil {
-				err = errors.Join(err, encoder.Close())
-			}
-			if err != nil {
-				return err
-			}
-			entries, err := brew.Catalog(
-				repositoryFor(dataStore), invocationadapter.Guard{Root: dataStore.Root},
-				subject, candidateIDs,
-			)
-			if err != nil {
-				return err
-			}
-			return writeJSON(command.OutOrStdout(), map[string]any{
-				"subject": domain.MasterName(subject), "knowledge": entries,
-			})
-		},
-	}
-	command.Flags().StringVar(&subject, "subject", "", "Exact Knowledge subject")
-	command.Flags().StringVar(&queryText, "query", "", "Candidate Knowledge statement")
-	_ = command.MarkFlagRequired("subject")
-	_ = command.MarkFlagRequired("query")
-	return command
 }
 
 func newKnowledgeShowCommand() *cobra.Command {
@@ -837,17 +768,6 @@ func newKnowledgeShowCommand() *cobra.Command {
 			dataStore, err := configuredStore()
 			if err != nil {
 				return err
-			}
-			if _, internal := os.LookupEnv(config.InvocationIDEnvironment); internal {
-				results, err := brew.Show(
-					repositoryFor(dataStore), invocationadapter.Guard{Root: dataStore.Root}, ids,
-				)
-				if err != nil {
-					return err
-				}
-				return writeJSON(command.OutOrStdout(), map[string]any{
-					"knowledge": results,
-				})
 			}
 			_, warnings, err := knowledgeapp.Reconcile(command.Context(), repositoryFor(dataStore))
 			if err != nil {
@@ -876,53 +796,6 @@ func newKnowledgeShowCommand() *cobra.Command {
 		},
 	}
 	return command
-}
-
-func newKnowledgeSubmitCommand() *cobra.Command {
-	var knowledgeValue string
-	command := &cobra.Command{
-		Use:    "submit <feedstock-id>",
-		Short:  "Register one Knowledge candidate for the current Brew invocation",
-		Hidden: true,
-		Args:   cobra.ExactArgs(1),
-		RunE: func(command *cobra.Command, args []string) error {
-			dataStore, err := configuredStore()
-			if err != nil {
-				return err
-			}
-			var candidate domain.KnowledgeCandidate
-			if err := decodeStrictJSON(knowledgeValue, &candidate); err != nil {
-				return fmt.Errorf("decode --knowledge: %w", err)
-			}
-			result, err := brew.Submit(
-				repositoryFor(dataStore),
-				invocationadapter.Guard{Root: dataStore.Root}, brew.SubmitInput{
-					FeedstockID: args[0], Knowledge: candidate,
-				})
-			if err != nil {
-				return err
-			}
-			return writeJSON(command.OutOrStdout(), result)
-		},
-	}
-	command.Flags().StringVar(&knowledgeValue, "knowledge", "", "Complete Knowledge candidate as JSON")
-	_ = command.MarkFlagRequired("knowledge")
-	return command
-}
-
-func decodeStrictJSON(value string, target any) error {
-	decoder := json.NewDecoder(strings.NewReader(value))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		if err == nil {
-			return errors.New("multiple JSON values")
-		}
-		return err
-	}
-	return nil
 }
 
 func configuredStore() (*store.Store, error) {
@@ -1011,16 +884,6 @@ func withConfiguredSearch(run func(searchapp.Service) error) error {
 		return runErr
 	}
 	return errors.Join(runErr, encoder.Close())
-}
-
-func searchSynchronizer(cfg config.Config, dataStore *store.Store) (query.Synchronizer, error) {
-	encoder, err := embeddingadapter.Open(cfg.Root, cfg.Embedding)
-	if err != nil {
-		return query.Synchronizer{}, err
-	}
-	return query.Synchronizer{Service: searchapp.Service{
-		Gateway: query.Gateway{Store: dataStore, Encoder: encoder},
-	}, Encoder: encoder}, nil
 }
 
 type drawSearchIndex struct {

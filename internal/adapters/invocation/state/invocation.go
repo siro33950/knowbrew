@@ -14,15 +14,7 @@ import (
 )
 
 type ReadState struct {
-	Subjects          map[string]SubjectReadState `json:"subjects,omitempty"`
-	Inspected         []string                    `json:"inspected,omitempty"`
-	Submitted         []domain.KnowledgeCandidate `json:"submitted,omitempty"`
-	AnnotationContext bool                        `json:"annotation_context,omitempty"`
-}
-
-type SubjectReadState struct {
-	Catalog []string `json:"catalog,omitempty"`
-	Digest  string   `json:"digest"`
+	AnnotationContext bool `json:"annotation_context,omitempty"`
 }
 
 func RecordAnnotationContext(root string) error {
@@ -123,41 +115,6 @@ func claimPath(root, id string) (string, bool) {
 	}
 	path, err := fsutil.ResolveWithin(root, ".knowbrew", "state", "runs", id+".operation")
 	return path, err == nil
-}
-
-func RecordCatalog(root, subject string, ids []string, digest string) error {
-	state, path, err := readState(root)
-	if err != nil {
-		return err
-	}
-	subject = domain.MasterName(subject)
-	if state.Subjects == nil {
-		state.Subjects = make(map[string]SubjectReadState)
-	}
-	previous := state.Subjects[subject]
-	state.Subjects[subject] = SubjectReadState{
-		Catalog: domain.UniqueSorted(append(previous.Catalog, ids...)),
-		Digest:  strings.TrimSpace(digest),
-	}
-	return writeState(path, state)
-}
-
-func RecordInspected(root string, ids []string) error {
-	state, path, err := readState(root)
-	if err != nil {
-		return err
-	}
-	state.Inspected = domain.UniqueSorted(append(state.Inspected, ids...))
-	return writeState(path, state)
-}
-
-func RecordSubmitted(root string, candidate domain.KnowledgeCandidate) error {
-	state, path, err := readState(root)
-	if err != nil {
-		return err
-	}
-	state.Submitted = append(state.Submitted, candidate)
-	return writeState(path, state)
 }
 
 func CurrentReadState(root string) (ReadState, error) {

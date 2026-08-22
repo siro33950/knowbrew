@@ -36,22 +36,21 @@ knowbrew init
 酒造のメタファーに沿って処理します。
 
 ```text
-セッションログ ─draw─▶ feedstock ─brew─▶ knowledge ─承認─▶ distill ─▶ documents
-(手を加えない)          (何が起きたか)       (持続する主張)             (派生文書)
+セッションログ ─draw─▶ feedstock + 未整理knowledge ─brew─▶ 整理済みknowledge ─承認/distill─▶ documents
+(手を加えない)          (何が起きたか)                         (持続する主張)                      (派生文書)
 ```
 
 **`draw`** はセッションログを読み、1ターンにつき1件の *feedstock* を記録します。
-短い要約と、幅広く選んだKnowledgeの型候補が入ります。生の対話はソースログに
-置いたままです。feedstockにはエージェントとセッションIDだけを保存し、原文が必要な
-ときは設定済みソースから現在の配置場所を解決します。
+短い要約と幅広く選んだKnowledgeの型候補を保存し、同じ実行内で対話と前後文脈から
+未整理Knowledgeを抽出します。生の対話はソースログに置いたままで、
+抽出完了後の後続工程では必要ありません。
 
-**`brew`** はその証拠を読み、*knowledge* を書きます。元のターンを越えて有用な
-主張です。1件につき型（type）と対象（subject）が1つずつ付き、以降の変化に応じて
-訂正・置換・統合されていきます。
+**`brew`** はセッションログを読まず、保存済みKnowledgeをsubject単位で整理します。
+新しい主張とそのsubjectの現行Knowledge head全件を比較し、保持・統合・置換・破棄します。
 
-**承認するのはあなた** — 新しい knowledge は `approved` が未チェックの状態で
-作られます。Obsidian でチェックするか、Markdown を `approved: true` に書き換えて
-ください。そこで初めてエージェントから見えるようになります。
+**承認するのはあなた** — Brew後の整理済みknowledgeも `approved` が未チェックです。
+Obsidian でチェックするか、Markdown を `approved: true` に書き換えてください。
+そこで初めてエージェントから見えるようになります。
 
 **`distill`** は、承認済みかつ現行のknowledgeからsubjectごとの読み物を再生成します。
 各文書はsubjectに割り当てたTemplateに従い、実際に利用したKnowledge IDを記録します。
@@ -74,8 +73,8 @@ knowbrew init
 そのうえで知識ベースを構築します。
 
 ```sh
-knowbrew draw    # セッションログ → feedstock
-knowbrew brew    # feedstock → 未承認のknowledge
+knowbrew draw    # セッションログ → feedstock + 未整理knowledge
+knowbrew brew    # 未整理knowledge → 整理済みの未承認knowledge
 # knowledgeを確認・承認した後:
 knowbrew distill # 承認済みknowledge → subject文書
 ```
@@ -97,7 +96,8 @@ knowbrew distill --max 2
 
 drawのサマリには、今回の対象数を`turns_selected`、対象範囲に残る未完了数を
 `turns_pending`として出力します。
-Brewの`--max`は処理待ちfeedstockを数えます。DistillではSubject文書を数えます。
+Brewの`--max`は未整理Knowledgeを持つSubjectを数えます。
+DistillではSubject文書を数えます。
 上限付きDistillは次回、次のSubjectとTemplateから続行するため、各文書が再生成可能な
 ままでも、繰り返し実行すれば割り当て済み文書を順番に処理できます。
 
@@ -193,8 +193,10 @@ subject ノートには `definition`・`includes`・`excludes`・`documents` を
 
 subject を作れるのはあなただけです。knowbrew が勝手に作ることはありません。
 未知の `--subject` はエラーで、`--new-subject` のようなフラグもありません。
-作成・改名・統合・削除は Vault 上で直接行ってください。どの subject にも
-該当しなかった主張は保留されるので、後から subject を整えれば対象になります。
+作成・改名・統合・削除は Vault 上で直接行ってください。どのsubjectにも
+該当しない主張はsubjectなしの未整理Knowledgeとして保存されます。
+既存subjectをKnowledgeファイルに割り当てるまで、
+Brew・検索・Distill・SessionStart注入の対象にはなりません。
 
 ## 蒸留文書
 
@@ -309,8 +311,8 @@ go install github.com/siro33950/knowbrew/cmd/knowbrew@latest
 
 ```text
 knowbrew init                      対話セットアップ
-knowbrew draw [flags] [path...]    セッションログ → feedstock
-knowbrew brew [flags]              feedstock → 未承認のknowledge
+knowbrew draw [flags] [path...]    セッションログ → feedstock + 未整理knowledge
+knowbrew brew [flags]              未整理 → 整理済みの未承認knowledge
 knowbrew distill [flags]           承認済みknowledge → subject文書
 knowbrew knowledge [keywords...]   knowledgeを検索（別名: kn）
 knowbrew knowledge show <id...>    任意の状態のknowledgeを表示

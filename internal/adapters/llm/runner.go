@@ -17,13 +17,13 @@ import (
 	"github.com/siro33950/knowbrew/internal/adapters/config"
 	"github.com/siro33950/knowbrew/internal/adapters/invocation/state"
 	"github.com/siro33950/knowbrew/internal/application/agent"
-	"github.com/siro33950/knowbrew/internal/domain"
 )
 
 var ErrTimeout = errors.New("LLM backend timed out")
 
 const (
 	TaskDraw            = agent.TaskDraw
+	TaskExtract         = agent.TaskExtract
 	TaskBrew            = agent.TaskBrew
 	TaskDistillSelect   = agent.TaskDistillSelect
 	TaskDistillGenerate = agent.TaskDistillGenerate
@@ -100,7 +100,7 @@ func (runner *CommandRunner) Run(
 		return RunResult{}, err
 	}
 	defer func() { _ = os.Remove(resultPath) }()
-	if task == TaskDraw || task == TaskBrew {
+	if task == TaskDraw {
 		prompt = fmt.Sprintf("%s\n\nUse this exact knowbrew executable only for the permitted operations: %s", prompt, runner.Executable)
 	}
 	switch runner.Config.LLM.Backend {
@@ -133,7 +133,8 @@ func (runner *CommandRunner) Run(
 			args = append(args, "-c", "model_reasoning_effort="+effort)
 		}
 		sandbox := "workspace-write"
-		if task == TaskDistillSelect || task == TaskDistillGenerate {
+		if task == TaskExtract || task == TaskBrew ||
+			task == TaskDistillSelect || task == TaskDistillGenerate {
 			sandbox = "read-only"
 		}
 		args = append(args,
@@ -203,16 +204,7 @@ func (runner *CommandRunner) Run(
 }
 
 func applicationReadState(reads invocation.ReadState) agent.ReadState {
-	subjects := make(map[string]agent.SubjectReadState, len(reads.Subjects))
-	for subject, entry := range reads.Subjects {
-		subjects[subject] = agent.SubjectReadState{
-			Catalog: append([]string(nil), entry.Catalog...),
-			Digest:  entry.Digest,
-		}
-	}
 	return agent.ReadState{
-		Subjects: subjects, Inspected: append([]string(nil), reads.Inspected...),
-		Submitted:         append([]domain.KnowledgeCandidate(nil), reads.Submitted...),
 		AnnotationContext: reads.AnnotationContext,
 	}
 }
@@ -242,7 +234,7 @@ func modelForTask(cfg config.Config, task Task) (string, error) {
 	switch task {
 	case TaskDraw:
 		return strings.TrimSpace(cfg.LLM.DrawModel), nil
-	case TaskBrew:
+	case TaskExtract, TaskBrew:
 		return strings.TrimSpace(cfg.LLM.BrewModel), nil
 	case TaskDistillSelect, TaskDistillGenerate:
 		return strings.TrimSpace(cfg.LLM.DistillModel), nil
@@ -255,7 +247,7 @@ func effortForTask(cfg config.Config, task Task) (string, error) {
 	switch task {
 	case TaskDraw:
 		return cfg.LLM.DrawEffort, nil
-	case TaskBrew:
+	case TaskExtract, TaskBrew:
 		return cfg.LLM.BrewEffort, nil
 	case TaskDistillSelect, TaskDistillGenerate:
 		return cfg.LLM.DistillEffort, nil
@@ -350,18 +342,14 @@ func claudeAllowedTools(executable string, task Task) []string {
 	pattern := func(command string) string {
 		return "Bash(" + executable + " " + command + ")"
 	}
-	if task == TaskDistillSelect || task == TaskDistillGenerate {
+	if task == TaskExtract || task == TaskBrew ||
+		task == TaskDistillSelect || task == TaskDistillGenerate {
 		return nil
 	}
 	if task == TaskDraw {
 		return []string{pattern("feedstock context *")}
 	}
-	return []string{
-		pattern("knowledge catalog *"),
-		pattern("knowledge show *"),
-		pattern("knowledge submit *"),
-		pattern("feedstock context *"),
-	}
+	return nil
 }
 
 func writeTemporaryFile(pattern string, data []byte) (string, error) {
@@ -436,29 +424,6 @@ func commandForTool(executable string, name string, arguments map[string]any) ([
 		return []string{
 			executable, "feedstock", "context", stringValue(arguments, "feedstock_id"),
 		}, nil
-	case "knowledge_catalog":
-		args := []string{
-			"knowledge", "catalog", "--subject", stringValue(arguments, "subject"),
-			"--query", stringValue(arguments, "query"),
-		}
-		return append([]string{executable}, args...), nil
-	case "knowledge_show":
-		args := []string{"knowledge", "show"}
-		args = append(args, stringSlice(arguments["knowledge_ids"])...)
-		return append([]string{executable}, args...), nil
-	case "knowledge_submit":
-		knowledge, err := json.Marshal(arguments["knowledge"])
-		if err != nil {
-			return nil, fmt.Errorf("encode knowledge submit argument: %w", err)
-		}
-		return []string{
-			executable,
-			"knowledge",
-			"submit",
-			stringValue(arguments, "feedstock_id"),
-			"--knowledge",
-			string(knowledge),
-		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported tool %q", name)
 	}
@@ -467,21 +432,4 @@ func commandForTool(executable string, name string, arguments map[string]any) ([
 func stringValue(values map[string]any, key string) string {
 	value, _ := values[key].(string)
 	return value
-}
-
-func stringSlice(value any) []string {
-	switch typed := value.(type) {
-	case []string:
-		return typed
-	case []any:
-		out := make([]string, 0, len(typed))
-		for _, item := range typed {
-			if text, ok := item.(string); ok {
-				out = append(out, text)
-			}
-		}
-		return out
-	default:
-		return nil
-	}
 }

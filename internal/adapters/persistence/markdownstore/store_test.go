@@ -15,7 +15,7 @@ import (
 	"github.com/siro33950/knowbrew/internal/domain"
 )
 
-func TestFeedstockIsImmutableExceptBrewedAt(t *testing.T) {
+func TestFeedstockIsImmutableExceptExtractedAt(t *testing.T) {
 	dataStore, err := New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -30,24 +30,24 @@ func TestFeedstockIsImmutableExceptBrewedAt(t *testing.T) {
 	if err := dataStore.WriteFeedstock(changed); err == nil {
 		t.Fatal("expected immutable feedstock update to fail")
 	}
-	brewedAt := time.Now().UTC()
-	if err := dataStore.WriteBrewedFeedstock(feedstock, brewedAt); err != nil {
+	extractedAt := time.Now().UTC()
+	if err := dataStore.WriteExtractedFeedstock(feedstock, extractedAt); err != nil {
 		t.Fatal(err)
 	}
 	stored, _, err := dataStore.FindFeedstock(feedstock.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.BrewedAt == nil || !stored.BrewedAt.Equal(brewedAt) {
-		t.Fatalf("brewed_at = %v", stored.BrewedAt)
+	if stored.ExtractedAt == nil || !stored.ExtractedAt.Equal(extractedAt) {
+		t.Fatalf("extracted_at = %v", stored.ExtractedAt)
 	}
-	later := brewedAt.Add(time.Hour)
-	if err := dataStore.WriteBrewedFeedstock(stored, later); err != nil {
+	later := extractedAt.Add(time.Hour)
+	if err := dataStore.WriteExtractedFeedstock(stored, later); err != nil {
 		t.Fatal(err)
 	}
 	stored, _, _ = dataStore.FindFeedstock(feedstock.ID)
-	if !stored.BrewedAt.Equal(brewedAt) {
-		t.Fatal("brewed_at was changed after first processing")
+	if !stored.ExtractedAt.Equal(extractedAt) {
+		t.Fatal("extracted_at was changed after first processing")
 	}
 }
 
@@ -97,7 +97,8 @@ func TestKnowledgeLifecycleAndFeedstocks(t *testing.T) {
 	now := time.Now().UTC()
 	knowledge := domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
-		Subject: "subject", Feedstocks: []string{feedstock.ID}, Status: domain.StatusActive,
+		OrganizedAt: &now,
+		Subject:     "subject", Feedstocks: []string{feedstock.ID}, Status: domain.StatusActive,
 	}
 	if err := dataStore.WriteNewKnowledge("testing-rule", knowledge, "# Testing rule"); err != nil {
 		t.Fatal(err)
@@ -153,16 +154,18 @@ func TestApprovedSuccessorRetiresPredecessorOnLaterReconciliation(t *testing.T) 
 	now := time.Now().UTC()
 	base := domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
-		Subject:    "subject",
-		Feedstocks: []string{feedstock.ID},
+		OrganizedAt: &now,
+		Subject:     "subject",
+		Feedstocks:  []string{feedstock.ID},
 	}
 	if err := dataStore.WriteNewKnowledge("old-rule", base, "## Claim\n\nUse the old rule."); err != nil {
 		t.Fatal(err)
 	}
 	if err := dataStore.WriteNewKnowledge("combined-rule", domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
-		Subject:    "subject",
-		Feedstocks: []string{feedstock.ID}, Supersedes: []string{"old-rule"},
+		OrganizedAt: &now,
+		Subject:     "subject",
+		Feedstocks:  []string{feedstock.ID}, Supersedes: []string{"old-rule"},
 	}, "## Claim\n\nUse the combined rule."); err != nil {
 		t.Fatal(err)
 	}
@@ -257,8 +260,9 @@ func TestPendingSuccessorRetiresAndRestoresPendingPredecessor(t *testing.T) {
 			now := time.Now().UTC()
 			base := domain.Knowledge{
 				Created: now, Updated: now, Type: domain.KnowledgeType("property"),
-				Subject:    "subject",
-				Feedstocks: []string{feedstock.ID},
+				OrganizedAt: &now,
+				Subject:     "subject",
+				Feedstocks:  []string{feedstock.ID},
 			}
 			if err := dataStore.WriteNewKnowledge(
 				"old-rule",
@@ -269,8 +273,9 @@ func TestPendingSuccessorRetiresAndRestoresPendingPredecessor(t *testing.T) {
 			}
 			if err := dataStore.WriteNewKnowledge("combined-rule", domain.Knowledge{
 				Created: now, Updated: now, Type: domain.KnowledgeType("property"),
-				Subject:    "subject",
-				Feedstocks: []string{feedstock.ID}, Supersedes: []string{"old-rule"},
+				OrganizedAt: &now,
+				Subject:     "subject",
+				Feedstocks:  []string{feedstock.ID}, Supersedes: []string{"old-rule"},
 			}, "## Claim\n\nUse the combined rule."); err != nil {
 				t.Fatal(err)
 			}
@@ -325,8 +330,9 @@ func TestPendingSuccessorDoesNotRetireApprovedPredecessorUntilApproved(t *testin
 	now := time.Now().UTC()
 	base := domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
-		Subject:    "subject",
-		Feedstocks: []string{feedstock.ID},
+		OrganizedAt: &now,
+		Subject:     "subject",
+		Feedstocks:  []string{feedstock.ID},
 	}
 	if err := dataStore.WriteNewKnowledge(
 		"pending-rule",
@@ -358,9 +364,10 @@ func TestPendingSuccessorDoesNotRetireApprovedPredecessorUntilApproved(t *testin
 	}
 	if err := dataStore.WriteNewKnowledge("combined-rule", domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
-		Subject:    "subject",
-		Feedstocks: []string{feedstock.ID},
-		Supersedes: []string{"pending-rule", "approved-rule"},
+		OrganizedAt: &now,
+		Subject:     "subject",
+		Feedstocks:  []string{feedstock.ID},
+		Supersedes:  []string{"pending-rule", "approved-rule"},
 	}, "## Claim\n\nUse the combined rule."); err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +438,9 @@ func TestLegacyKnowledgeStatusIsReadWithoutRewritingTheFile(t *testing.T) {
 	legacy := fmt.Sprintf(`---
 created: 2026-07-30T15:02:50Z
 updated: 2026-07-30T15:02:50Z
+organized_at: 2026-07-30T15:02:50Z
 type: "[[property]]"
+subject: "[[subject]]"
 feedstocks:
   - "[[%s]]"
 status: active
@@ -652,7 +661,7 @@ func TestDefaultTypeMastersAreGeneratedOnlyWhenEmpty(t *testing.T) {
 			},
 		},
 		"decision":   {"An established policy, rule, design direction, or operating practice that governs future behavior until changed.", "The local rebuildable index uses SQLite.", nil},
-		"intent":     {"A durable intended outcome or quality that explains why a subject, rule, or design exists, independently of the current means used to achieve it.", "Feedstock classification remains consistent with its type candidates so unclassified records are not presented as ready for Brew.", nil},
+		"intent":     {"A durable intended outcome or quality that explains why a subject, rule, or design exists, independently of the current means used to achieve it.", "Feedstock classification remains consistent with its type candidates so unclassified records are not presented as ready for extraction.", nil},
 		"preference": {"A stable stated preference of a person or group, rather than a one-time request or binding decision.", "The user prefers concise headings.", nil},
 	}
 	for _, entry := range types {
@@ -922,7 +931,8 @@ func TestMasterReferencesWriteAsWikilinksAndReadAsPlainNames(t *testing.T) {
 	now := time.Now().UTC()
 	knowledge := domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
-		Subject: "subject", Feedstocks: []string{feedstock.ID},
+		OrganizedAt: &now,
+		Subject:     "subject", Feedstocks: []string{feedstock.ID},
 		Status: domain.StatusPending,
 	}
 	if err := dataStore.WriteNewKnowledge("linked-knowledge", knowledge, "# Linked knowledge"); err != nil {
@@ -1045,7 +1055,8 @@ func TestListingsSkipBrokenMarkdownAndCollectWarnings(t *testing.T) {
 	now := time.Now().UTC()
 	if err := dataStore.WriteNewKnowledge("valid-knowledge", domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
-		Subject: "subject", Feedstocks: []string{feedstock.ID}, Status: domain.StatusPending,
+		OrganizedAt: &now,
+		Subject:     "subject", Feedstocks: []string{feedstock.ID}, Status: domain.StatusPending,
 	}, "# Valid knowledge"); err != nil {
 		t.Fatal(err)
 	}
@@ -1115,7 +1126,7 @@ func TestFeedstockIgnoresSessionPathAndDoesNotWriteIt(t *testing.T) {
 	}
 	legacyPath := filepath.Join(t.TempDir(), "legacy.md")
 	legacy := `---
-schema: 6
+schema: 7
 id: fs-legacy-path
 turn_id: turn-legacy
 session:
@@ -1191,7 +1202,8 @@ func TestReadKnowledgeToleratesLegacyTriggerKey(t *testing.T) {
 	}
 	if err := dataStore.WriteNewKnowledge("legacy-rule", domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
-		Subject: "subject", Feedstocks: []string{"fs-legacy"},
+		OrganizedAt: &now,
+		Subject:     "subject", Feedstocks: []string{"fs-legacy"},
 		Status: domain.StatusPending,
 	}, "## Claim\n\nLegacy trigger files stay readable."); err != nil {
 		t.Fatal(err)

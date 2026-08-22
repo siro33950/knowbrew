@@ -14,12 +14,14 @@ func TestReconcileDefinesOneAtomicLifecycleUpdate(t *testing.T) {
 	now := time.Now().UTC()
 	predecessor := domain.Knowledge{
 		ID: "kn-predecessor", Created: now, Updated: now,
-		Type: "property", Subject: "knowbrew", Feedstocks: []string{"fs-source"},
+		OrganizedAt: &now,
+		Type:        "property", Subject: "knowbrew", Feedstocks: []string{"fs-source"},
 		Status: domain.StatusPending,
 	}
 	successor := domain.Knowledge{
 		ID: "kn-successor", Created: now, Updated: now,
-		Type: "property", Subject: "knowbrew", Feedstocks: []string{"fs-source"},
+		OrganizedAt: &now,
+		Type:        "property", Subject: "knowbrew", Feedstocks: []string{"fs-source"},
 		Supersedes: []string{predecessor.ID},
 		Status:     domain.StatusPending,
 	}
@@ -78,6 +80,8 @@ func (transaction lifecycleTransaction) StageKnowledgeMetadata(knowledge domain.
 	return nil
 }
 
-func (transaction lifecycleTransaction) StageBrewedFeedstock(domain.Feedstock, time.Time) error {
+func (transaction lifecycleTransaction) StageExtractedFeedstock(domain.Feedstock, time.Time) error {
 	return nil
 }
+
+func (transaction lifecycleTransaction) DeleteKnowledge(string) error { return nil }

@@ -62,8 +62,8 @@ func (repository *Markdown) EnsureMaster(kind string, entry domain.MasterEntry) 
 	return repository.Store.EnsureMaster(kind, entry)
 }
 
-func (repository *Markdown) WriteBrewedFeedstock(feedstock domain.Feedstock, when time.Time) error {
-	return repository.Store.WriteBrewedFeedstock(feedstock, when)
+func (repository *Markdown) WriteExtractedFeedstock(feedstock domain.Feedstock, when time.Time) error {
+	return repository.Store.WriteExtractedFeedstock(feedstock, when)
 }
 
 func (repository *Markdown) LoadMasters(kind string) (
@@ -202,9 +202,13 @@ func (transaction markdownTransaction) StageKnowledgeMetadata(knowledge domain.K
 	return transaction.transaction.StageKnowledge(knowledge, file.Body)
 }
 
-func (transaction markdownTransaction) StageBrewedFeedstock(
+func (transaction markdownTransaction) StageExtractedFeedstock(
 	feedstock domain.Feedstock,
 	when time.Time,
 ) error {
-	return transaction.transaction.StageBrewedFeedstock(feedstock, when)
+	return transaction.transaction.StageExtractedFeedstock(feedstock, when)
+}
+
+func (transaction markdownTransaction) DeleteKnowledge(id string) error {
+	return transaction.transaction.DeleteKnowledge(id)
 }

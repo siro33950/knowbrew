@@ -114,9 +114,10 @@ func (repository *fakeRepository) DeleteDistilledDocument(
 
 type fakeTransaction struct{}
 
-func (fakeTransaction) StageKnowledge(domain.KnowledgeRecord) error            { return nil }
-func (fakeTransaction) StageKnowledgeMetadata(domain.Knowledge) error          { return nil }
-func (fakeTransaction) StageBrewedFeedstock(domain.Feedstock, time.Time) error { return nil }
+func (fakeTransaction) StageKnowledge(domain.KnowledgeRecord) error               { return nil }
+func (fakeTransaction) StageKnowledgeMetadata(domain.Knowledge) error             { return nil }
+func (fakeTransaction) StageExtractedFeedstock(domain.Feedstock, time.Time) error { return nil }
+func (fakeTransaction) DeleteKnowledge(string) error                              { return nil }
 
 type fakeRunLock struct{}
 
@@ -179,14 +180,16 @@ func testTemplate() domain.DocumentTemplate {
 }
 
 func testKnowledge(id, subject, statement string, approved bool) storage.KnowledgeDocument {
+	organizedAt := time.Now().UTC()
 	knowledge := domain.Knowledge{
 		ID: id, Subject: subject, Type: "property", Approved: approved,
+		OrganizedAt: &organizedAt,
 	}
 	knowledge.Status = domain.EffectiveKnowledgeStatus(knowledge)
 	return storage.KnowledgeDocument{Knowledge: knowledge, Statement: statement}
 }
 
-func TestRunSeparatesSelectionAndGenerationAndPersistsOnlyUsedKnowledge(t *testing.T) {
+func TestB013B032RunUsesOnlyOrganizedApprovedCurrentKnowledge(t *testing.T) {
 	template := testTemplate()
 	rootID := "kn-0000000000000001"
 	candidateID := "kn-0000000000000002"
@@ -198,6 +201,7 @@ func TestRunSeparatesSelectionAndGenerationAndPersistsOnlyUsedKnowledge(t *testi
 			testKnowledge(rootID, "knowbrew", "Existing evidence.", true),
 			testKnowledge(candidateID, "knowbrew", "New evidence.", true),
 			testKnowledge(pendingID, "knowbrew", "Pending evidence.", false),
+			{Knowledge: domain.Knowledge{ID: "kn-subjectless", Type: "property"}, Statement: "Subjectless evidence."},
 		},
 		documents: map[string]domain.DistilledDocument{
 			"knowbrew/concept": {

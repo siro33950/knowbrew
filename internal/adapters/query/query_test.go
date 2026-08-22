@@ -26,7 +26,7 @@ func (reader rawReaderFunc) Read(feedstockID string) ([]domain.DialogueMessage, 
 	return reader(feedstockID)
 }
 
-func TestTargetedSearchVisibilityAndShow(t *testing.T) {
+func TestB028B029B031TargetedSearchVisibilityAndFeedstockShow(t *testing.T) {
 	dataStore := newStore(t)
 	now := time.Date(2026, 7, 30, 1, 0, 0, 0, time.UTC)
 	feedstock := writeFeedstock(t, dataStore, "claude-session-t000001", now, "focused testing")
@@ -140,6 +140,59 @@ func TestTargetedSearchVisibilityAndShow(t *testing.T) {
 	}
 }
 
+func TestB014B017UnorganizedKnowledgeIsNeverSearchableAndRemovesAnIndexedRecord(t *testing.T) {
+	dataStore := newStore(t)
+	feedstock := writeFeedstock(t, dataStore, "fs-unorganized", time.Now().UTC(), "unorganized source")
+	now := time.Now().UTC()
+	if err := dataStore.WriteNewKnowledge("never-indexed", domain.Knowledge{
+		Created: now, Updated: now, Type: "property",
+		Feedstocks: []string{feedstock.ID},
+	}, "## Claim\n\nSubjectless unorganized claim."); err != nil {
+		t.Fatal(err)
+	}
+	path := writeKnowledge(
+		t, dataStore, "previously-indexed", feedstock.ID,
+		domain.StatusPending, "previously indexed claim",
+	)
+	visible, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetKnowledge, Keywords: []string{"previously indexed"},
+		Subject: "subject", IncludePending: true, Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if visible.Total != 1 || visible.Results[0].ID != "previously-indexed" {
+		t.Fatalf("organized search = %#v", visible)
+	}
+	knowledge, body, err := dataStore.ReadKnowledge(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledge.OrganizedAt = nil
+	knowledge.Approved = false
+	knowledge.Supersedes = nil
+	knowledge.SupersededBy = ""
+	knowledge.SupersededAt = nil
+	knowledge.InvalidatedAt = nil
+	if err := writeKnowledgeForTest(path, knowledge, body); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Second)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+	hidden, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetKnowledge, Keywords: []string{"claim"},
+		Subject: "subject", IncludePending: true, Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hidden.Total != 0 {
+		t.Fatalf("unorganized search = %#v", hidden)
+	}
+}
+
 func TestKnowledgeSearchTimestampUsesEstablishedSourceEvent(t *testing.T) {
 	dataStore := newStore(t)
 	olderAt := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -149,8 +202,9 @@ func TestKnowledgeSearchTimestampUsesEstablishedSourceEvent(t *testing.T) {
 	fileTime := time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC)
 	if err := dataStore.WriteNewKnowledge("temporal-provenance", domain.Knowledge{
 		Created: fileTime, Updated: fileTime, Type: domain.KnowledgeType("property"),
-		Subject:    "subject",
-		Feedstocks: []string{older.ID, newer.ID}, EstablishedBy: older.ID,
+		OrganizedAt: &fileTime,
+		Subject:     "subject",
+		Feedstocks:  []string{older.ID, newer.ID}, EstablishedBy: older.ID,
 	}, "## Claim\n\nUse source-event time for semantic recency."); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +232,8 @@ func TestSearchIndexesWikilinkFilesAsPlainNames(t *testing.T) {
 	now := time.Now().UTC()
 	if err := dataStore.WriteNewKnowledge("linked-claim", domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
-		Subject: "indexed-subject", Feedstocks: []string{feedstock.ID},
+		OrganizedAt: &now,
+		Subject:     "indexed-subject", Feedstocks: []string{feedstock.ID},
 		Status: domain.StatusPending,
 	}, "## Claim\n\nLinked claim"); err != nil {
 		t.Fatal(err)
@@ -567,7 +622,7 @@ func TestKnowledgeMtimeUpdateAndDeletionAreImmediate(t *testing.T) {
 	}
 }
 
-func TestSearchReconcilesDirectApprovalAndHidesSupersededKnowledge(t *testing.T) {
+func TestB030SearchReconcilesDirectApprovalAndHidesSupersededKnowledge(t *testing.T) {
 	dataStore := newStore(t)
 	now := time.Now().UTC()
 	feedstock := writeFeedstock(t, dataStore, "claude-session-t000001", now, "lifecycle")
@@ -581,9 +636,10 @@ func TestSearchReconcilesDirectApprovalAndHidesSupersededKnowledge(t *testing.T)
 	)
 	if err := dataStore.WriteNewKnowledge("new-lifecycle-rule", domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
-		Subject:    "subject",
-		Feedstocks: []string{feedstock.ID},
-		Supersedes: []string{"old-lifecycle-rule"},
+		OrganizedAt: &now,
+		Subject:     "subject",
+		Feedstocks:  []string{feedstock.ID},
+		Supersedes:  []string{"old-lifecycle-rule"},
 	}, "## Claim\n\nlifecycle new rule"); err != nil {
 		t.Fatal(err)
 	}
@@ -650,9 +706,10 @@ func TestSearchHidesPendingPredecessorOfPendingSuccessor(t *testing.T) {
 	)
 	if err := dataStore.WriteNewKnowledge("new-pending-rule", domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
-		Subject:    "subject",
-		Feedstocks: []string{feedstock.ID},
-		Supersedes: []string{"old-pending-rule"},
+		OrganizedAt: &now,
+		Subject:     "subject",
+		Feedstocks:  []string{feedstock.ID},
+		Supersedes:  []string{"old-pending-rule"},
 	}, "## Claim\n\npending lifecycle new rule"); err != nil {
 		t.Fatal(err)
 	}
@@ -1098,7 +1155,8 @@ func writeKnowledge(
 	now := time.Now().UTC()
 	if err := dataStore.WriteNewKnowledge(slug, domain.Knowledge{
 		Created: now, Updated: now, Type: domain.KnowledgeType("property"),
-		Subject: "subject", Feedstocks: []string{source},
+		OrganizedAt: &now,
+		Subject:     "subject", Feedstocks: []string{source},
 		Status: domain.StatusPending,
 	}, "## Claim\n\n"+claim); err != nil {
 		t.Fatal(err)
