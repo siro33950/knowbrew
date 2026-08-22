@@ -2,10 +2,50 @@ package runlock
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestKeyedClaimPathIsStableAndSharded(t *testing.T) {
+	root := t.TempDir()
+	claimer := FileClaimer{Root: root, Namespace: "feedstock-claims"}
+	digest := sha256.Sum256([]byte("feedstock-key"))
+	encoded := fmt.Sprintf("%x", digest)
+	path := filepath.Join(
+		root, ".knowbrew", "state", "feedstock-claims", encoded[:2], encoded+".lock",
+	)
+
+	release, err := claimer.Claim(context.Background(), "feedstock-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	release, err = claimer.Claim(context.Background(), "feedstock-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("same key did not reuse the same lock file")
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestKeyedClaimsWaitForTheSameKeyButNotDifferentKeys(t *testing.T) {
 	claimer := FileClaimer{Root: t.TempDir(), Namespace: "subject-claims"}
