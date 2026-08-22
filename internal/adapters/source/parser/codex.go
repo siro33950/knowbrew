@@ -41,6 +41,7 @@ type codexPayload struct {
 	Role      string          `json:"role"`
 	Phase     string          `json:"phase"`
 	Content   json.RawMessage `json:"content"`
+	Item      json.RawMessage `json:"item"`
 	Git       struct {
 		Branch        string `json:"branch"`
 		RepositoryURL string `json:"repository_url"`
@@ -74,6 +75,11 @@ type codexLegacyItem struct {
 type codexContentBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
+}
+
+type codexCompletedItem struct {
+	Type    string              `json:"type"`
+	Content []codexContentBlock `json:"content"`
 }
 
 func (Codex) SessionID(path string) (string, error) {
@@ -527,11 +533,44 @@ func decodeCodexEvent(
 		return []sourceEvent{{
 			Kind: eventAssistantMessage, Text: payload.Message, Priority: assistantEvent,
 		}}, nil
+	case "item_completed":
+		return decodeCodexCompletedItem(record, payload, raw, warn)
 	case "task_complete", "turn_aborted":
 		return []sourceEvent{{Kind: eventTurnCompleted, TurnID: payload.TurnID}}, nil
 	default:
 		return []sourceEvent{{Kind: eventIgnored}}, nil
 	}
+}
+
+func decodeCodexCompletedItem(
+	record codexRecord,
+	payload codexPayload,
+	raw []byte,
+	warn func(reason string),
+) ([]sourceEvent, error) {
+	if len(payload.Item) == 0 || string(payload.Item) == "null" {
+		return nil, fmt.Errorf("Codex item_completed event has no item")
+	}
+	var item codexCompletedItem
+	if err := json.Unmarshal(payload.Item, &item); err != nil {
+		return nil, fmt.Errorf("decode Codex completed item: %w", err)
+	}
+	if item.Type != "UserMessage" {
+		return []sourceEvent{{Kind: eventIgnored}}, nil
+	}
+	text := textFromCodexBlocks(item.Content, "text", warn)
+	if strings.TrimSpace(text) == "" {
+		return []sourceEvent{{Kind: eventIgnored}}, nil
+	}
+	timestamp, err := time.Parse(time.RFC3339Nano, record.Timestamp)
+	if err != nil {
+		return nil, fmt.Errorf("parse Codex user timestamp: %w", err)
+	}
+	return []sourceEvent{{
+		Kind: eventUserMessage, TurnID: payload.TurnID,
+		FallbackTurnID: sourceTurnID("", raw), Timestamp: timestamp,
+		Text: text,
+	}}, nil
 }
 
 func decodeCodexResponseItem(payload codexPayload, warn func(reason string)) ([]sourceEvent, error) {
