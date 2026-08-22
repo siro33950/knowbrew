@@ -8,8 +8,8 @@ import (
 )
 
 func (f *Feedstock) ApplyDraft(summary string, types []KnowledgeType, when time.Time) error {
-	if f.AnnotatedAt != nil {
-		return fmt.Errorf("feedstock %s is already drawn", f.ID)
+	if f.DraftedAt != nil {
+		return fmt.Errorf("feedstock %s is already drafted", f.ID)
 	}
 	summary = strings.TrimSpace(summary)
 	if summary == "" {
@@ -24,13 +24,13 @@ func (f *Feedstock) ApplyDraft(summary string, types []KnowledgeType, when time.
 	}
 	f.Summary = summary
 	f.Types = types
-	f.AnnotatedAt = &when
+	f.DraftedAt = &when
 	return ValidateFeedstock(*f)
 }
 
 func (f *Feedstock) ApplyExtractionProgress(when time.Time) error {
-	if f.AnnotatedAt == nil {
-		return fmt.Errorf("feedstock %s is not drawn", f.ID)
+	if f.DraftedAt == nil {
+		return fmt.Errorf("feedstock %s is not drafted", f.ID)
 	}
 	if when.IsZero() {
 		return errors.New("extraction time is required")
@@ -42,5 +42,5 @@ func (f *Feedstock) ApplyExtractionProgress(when time.Time) error {
 }
 
 func (f Feedstock) PendingExtraction() bool {
-	return f.AnnotatedAt != nil && f.ExtractedAt == nil
+	return f.DraftedAt != nil && f.ExtractedAt == nil
 }

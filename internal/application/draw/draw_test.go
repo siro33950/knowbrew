@@ -146,12 +146,12 @@ func TestB002DrawExtractionUsesConfiguredConcurrency(t *testing.T) {
 	snapshots := make(map[string][]domain.FeedstockCandidate)
 	for index := range 2 {
 		id := fmt.Sprintf("fs-concurrent-%d", index)
-		annotatedAt := base
+		draftedAt := base
 		feedstock := domain.Feedstock{
 			Schema: domain.SchemaVersion, ID: id, TurnID: "turn-" + id,
 			Session: domain.SessionRef{ID: "session-" + id}, Timestamp: base.Add(time.Duration(index) * time.Minute),
 			Agent: "codex", Types: []domain.KnowledgeType{"property"}, Summary: "Durable fact.",
-			AnnotatedAt: &annotatedAt,
+			DraftedAt: &draftedAt,
 		}
 		if err := dataStore.WriteFeedstock(feedstock); err != nil {
 			t.Fatal(err)
@@ -234,11 +234,11 @@ func TestB008B009B011B016ExtractionPersistenceRules(t *testing.T) {
 	repository := &persistenceadapter.Markdown{Store: dataStore}
 	base := time.Now().UTC()
 	writeSource := func(id string, at time.Time) domain.Feedstock {
-		annotatedAt := at
+		draftedAt := at
 		feedstock := domain.Feedstock{
 			Schema: domain.SchemaVersion, ID: id, TurnID: "turn-" + id,
 			Session: domain.SessionRef{ID: "session-" + id}, Timestamp: at, Agent: "codex",
-			Types: []domain.KnowledgeType{"property"}, Summary: "Durable fact.", AnnotatedAt: &annotatedAt,
+			Types: []domain.KnowledgeType{"property"}, Summary: "Durable fact.", DraftedAt: &draftedAt,
 		}
 		if err := dataStore.WriteFeedstock(feedstock); err != nil {
 			t.Fatal(err)
@@ -392,23 +392,23 @@ func TestB027DrawIsIdempotentWithoutPersistentSessionState(t *testing.T) {
 
 func TestDrawValidatesAndPersistsDraftResults(t *testing.T) {
 	tests := []struct {
-		name          string
-		output        string
-		wantAnnotated bool
-		wantTypes     []domain.KnowledgeType
-		wantPending   bool
-		wantFailed    int
+		name        string
+		output      string
+		wantDrafted bool
+		wantTypes   []domain.KnowledgeType
+		wantPending bool
+		wantFailed  int
 	}{
 		{name: "missing types", output: `{"summary":"A durable property was established."}`, wantFailed: 1},
 		{
-			name:          "empty types",
-			output:        `{"summary":"A durable property was established.","types":[]}`,
-			wantAnnotated: true,
+			name:        "empty types",
+			output:      `{"summary":"A durable property was established.","types":[]}`,
+			wantDrafted: true,
 		},
 		{
-			name:          "valid type",
-			output:        `{"summary":"A durable property was established.","types":["property"]}`,
-			wantAnnotated: true, wantTypes: []domain.KnowledgeType{"property"},
+			name:        "valid type",
+			output:      `{"summary":"A durable property was established.","types":["property"]}`,
+			wantDrafted: true, wantTypes: []domain.KnowledgeType{"property"},
 		},
 	}
 	for _, test := range tests {
@@ -463,8 +463,8 @@ func TestDrawValidatesAndPersistsDraftResults(t *testing.T) {
 				t.Fatalf("feedstocks = %#v, warnings = %#v", feedstocks, warnings)
 			}
 			feedstock := feedstocks[0]
-			if (feedstock.AnnotatedAt != nil) != test.wantAnnotated {
-				t.Fatalf("AnnotatedAt = %v, want annotated %t", feedstock.AnnotatedAt, test.wantAnnotated)
+			if (feedstock.DraftedAt != nil) != test.wantDrafted {
+				t.Fatalf("DraftedAt = %v, want drafted %t", feedstock.DraftedAt, test.wantDrafted)
 			}
 			if !slices.Equal(feedstock.Types, test.wantTypes) {
 				t.Fatalf("types = %#v, want %#v", feedstock.Types, test.wantTypes)
@@ -720,7 +720,7 @@ func TestMaxTurnsPrioritizesPreviouslyAcquiredIncompleteFeedstock(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if completed.AnnotatedAt == nil {
+	if completed.DraftedAt == nil {
 		t.Fatal("previously acquired incomplete feedstock was not resumed first")
 	}
 	newID := parser.FeedstockID("claude", "resume", "turn-2")
@@ -809,8 +809,8 @@ func TestDrawClassifiesOnlyFeedstocksFromSelectedSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if unchanged.AnnotatedAt != nil {
-		t.Fatal("draw classified an unannotated feedstock outside the selected sessions")
+	if unchanged.DraftedAt != nil {
+		t.Fatal("draw classified an undrafted feedstock outside the selected sessions")
 	}
 }
 
@@ -850,20 +850,20 @@ func TestB007ConcurrentDrawsWaitAndRemainIdempotent(t *testing.T) {
 		}(option)
 	}
 	close(start)
-	var acquired, annotated, extracted int
+	var acquired, drafted, extracted int
 	for range 2 {
 		if err := <-errors; err != nil {
 			t.Fatal(err)
 		}
 		summary := <-results
 		acquired += summary.FeedstocksAcquired
-		annotated += summary.FeedstocksDrawn
+		drafted += summary.FeedstocksDrawn
 		extracted += summary.FeedstocksExtracted
 	}
-	if acquired != 3 || annotated != 3 || extracted != 3 {
+	if acquired != 3 || drafted != 3 || extracted != 3 {
 		t.Fatalf(
-			"combined summaries acquired = %d, annotated = %d, extracted = %d",
-			acquired, annotated, extracted,
+			"combined summaries acquired = %d, drafted = %d, extracted = %d",
+			acquired, drafted, extracted,
 		)
 	}
 }
@@ -1686,8 +1686,8 @@ func TestDrawContinuesAfterAnnotationFailureAndRetriesFeedstock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failed.AnnotatedAt != nil {
-		t.Fatalf("failed feedstock was not left unannotated: %#v", failed)
+	if failed.DraftedAt != nil {
+		t.Fatalf("failed feedstock was not left undrafted: %#v", failed)
 	}
 
 	second, err := Run(context.Background(), cfg, []string{logPath}, runner, nil)
@@ -1783,7 +1783,7 @@ func (writer cancelOnAcquisitionWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func TestAcquisitionPersistsUnannotatedFeedstockAndResumeClassifiesIt(t *testing.T) {
+func TestAcquisitionPersistsUndraftedFeedstockAndResumeClassifiesIt(t *testing.T) {
 	root := t.TempDir()
 	dataStore, _ := store.New(root)
 	logPath := filepath.Join(t.TempDir(), "session.jsonl")
@@ -1807,12 +1807,12 @@ func TestAcquisitionPersistsUnannotatedFeedstockAndResumeClassifiesIt(t *testing
 		t.Fatalf("first summary = %#v", first)
 	}
 	id := parser.FeedstockID("claude", "phase-one", "turn-1")
-	unannotated, _, err := dataStore.FindFeedstock(id)
+	undrafted, _, err := dataStore.FindFeedstock(id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if unannotated.AnnotatedAt != nil || unannotated.Summary != "" || len(unannotated.Types) != 0 {
-		t.Fatalf("phase-one feedstock = %#v", unannotated)
+	if undrafted.DraftedAt != nil || undrafted.Summary != "" || len(undrafted.Types) != 0 {
+		t.Fatalf("phase-one feedstock = %#v", undrafted)
 	}
 	found, err := query.Search(context.Background(), dataStore, query.SearchOptions{
 		Target: query.TargetFeedstock, Keywords: []string{"rawphasekeyword"},
@@ -1822,7 +1822,7 @@ func TestAcquisitionPersistsUnannotatedFeedstockAndResumeClassifiesIt(t *testing
 		t.Fatal(err)
 	}
 	if found.Total != 0 {
-		t.Fatalf("unannotated raw text must not be indexed without a summary: %#v", found)
+		t.Fatalf("undrafted raw text must not be indexed without a summary: %#v", found)
 	}
 
 	second, err := Run(context.Background(), cfg, []string{logPath}, annotatingRunner{store: dataStore}, nil)
@@ -1836,7 +1836,7 @@ func TestAcquisitionPersistsUnannotatedFeedstockAndResumeClassifiesIt(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if classified.AnnotatedAt == nil {
+	if classified.DraftedAt == nil {
 		t.Fatal("resume did not annotate the pending feedstock")
 	}
 }
@@ -1943,8 +1943,8 @@ func TestDrawClassifiesAllFeedstocksWithConcurrentWorkers(t *testing.T) {
 		t.Fatalf("feedstocks = %#v, warnings = %#v", feedstocks, warnings)
 	}
 	for _, feedstock := range feedstocks {
-		if feedstock.AnnotatedAt == nil {
-			t.Fatalf("feedstock %s remained unannotated", feedstock.ID)
+		if feedstock.DraftedAt == nil {
+			t.Fatalf("feedstock %s remained undrafted", feedstock.ID)
 		}
 	}
 }

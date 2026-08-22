@@ -18,7 +18,7 @@ func TestFeedstockExtractionProgressIncludesEmptyTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !feedstock.PendingExtraction() {
-		t.Fatal("annotated feedstock is not pending extraction")
+		t.Fatal("drafted feedstock is not pending extraction")
 	}
 	if err := feedstock.ApplyExtractionProgress(now.Add(2 * time.Minute)); err != nil {
 		t.Fatal(err)
@@ -43,11 +43,11 @@ func TestFeedstockDraftNormalizesTypes(t *testing.T) {
 	}
 }
 
-func TestValidateFeedstockRequiresNormalizedTypesAndSummaryWhenAnnotated(t *testing.T) {
+func TestValidateFeedstockRequiresNormalizedTypesAndSummaryWhenDrafted(t *testing.T) {
 	now := time.Date(2026, 8, 3, 1, 2, 3, 0, time.UTC)
 	feedstock := validFeedstock("fs-invalid", now)
-	annotated := now.Add(time.Minute)
-	feedstock.AnnotatedAt = &annotated
+	drafted := now.Add(time.Minute)
+	feedstock.DraftedAt = &drafted
 	feedstock.Types = []KnowledgeType{"property", "decision"}
 	if err := ValidateFeedstock(feedstock); err == nil || !strings.Contains(err.Error(), "summary") {
 		t.Fatalf("error = %v", err)
@@ -61,7 +61,7 @@ func TestValidateFeedstockRequiresNormalizedTypesAndSummaryWhenAnnotated(t *test
 func TestExtractKnowledgeCreatesUnorganizedRecords(t *testing.T) {
 	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
 	records, err := ExtractKnowledge(
-		annotatedFeedstock("fs-source", now),
+		draftedFeedstock("fs-source", now),
 		[]KnowledgeDraft{
 			{Type: "property", Subject: "knowbrew", Statement: "A durable fact."},
 			{Type: "property", Statement: "A subjectless fact."},
@@ -84,7 +84,7 @@ func TestExtractKnowledgeCreatesUnorganizedRecords(t *testing.T) {
 func TestExtractKnowledgeRejectsWholeBatchOnDuplicateID(t *testing.T) {
 	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
 	_, err := ExtractKnowledge(
-		annotatedFeedstock("fs-source", now),
+		draftedFeedstock("fs-source", now),
 		[]KnowledgeDraft{
 			{Type: "property", Statement: "First durable fact."},
 			{Type: "property", Statement: "Second durable fact."},
@@ -336,17 +336,17 @@ func validFeedstock(id string, timestamp time.Time) Feedstock {
 	}
 }
 
-func annotatedFeedstock(id string, timestamp time.Time) Feedstock {
+func draftedFeedstock(id string, timestamp time.Time) Feedstock {
 	feedstock := validFeedstock(id, timestamp)
-	annotated := timestamp.Add(time.Minute)
+	drafted := timestamp.Add(time.Minute)
 	feedstock.Summary = "A durable property was established."
 	feedstock.Types = []KnowledgeType{"property"}
-	feedstock.AnnotatedAt = &annotated
+	feedstock.DraftedAt = &drafted
 	return feedstock
 }
 
 func unorganizedRecord(id, statement string, timestamp time.Time) KnowledgeRecord {
-	feedstock := annotatedFeedstock("fs-"+id, timestamp)
+	feedstock := draftedFeedstock("fs-"+id, timestamp)
 	return KnowledgeRecord{
 		Knowledge: Knowledge{
 			ID: id, Created: timestamp, Updated: timestamp, EstablishedBy: feedstock.ID,

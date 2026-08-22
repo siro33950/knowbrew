@@ -29,8 +29,8 @@ func ApplyDraft(
 	if err != nil {
 		return fmt.Errorf("read feedstock: %w", err)
 	}
-	if feedstock.AnnotatedAt != nil {
-		return fmt.Errorf("feedstock %s is already drawn", draft.FeedstockID)
+	if feedstock.DraftedAt != nil {
+		return fmt.Errorf("feedstock %s is already drafted", draft.FeedstockID)
 	}
 	now := time.Now().UTC()
 	return dataStore.WithLock(ctx, func() error {
@@ -38,8 +38,8 @@ func ApplyDraft(
 		if err != nil {
 			return err
 		}
-		if current.AnnotatedAt != nil {
-			return fmt.Errorf("feedstock %s is already drawn", draft.FeedstockID)
+		if current.DraftedAt != nil {
+			return fmt.Errorf("feedstock %s is already drafted", draft.FeedstockID)
 		}
 		typeEntries, _, err := dataStore.LoadMasters("types")
 		if err != nil {

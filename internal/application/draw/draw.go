@@ -246,7 +246,7 @@ func (service Service) RunWithOptions(
 			written = true
 			return nil
 		}); err != nil {
-			return summary, fmt.Errorf("write unannotated feedstock %s: %w", candidate.ID, err)
+			return summary, fmt.Errorf("write undrafted feedstock %s: %w", candidate.ID, err)
 		}
 		if written {
 			summary.FeedstocksAcquired++
@@ -291,7 +291,7 @@ func (service Service) RunWithOptions(
 		return feedstock.ExtractedAt == nil
 	})
 	needsRunner := slices.ContainsFunc(pending, func(feedstock domain.Feedstock) bool {
-		return feedstock.AnnotatedAt == nil || len(feedstock.Types) > 0
+		return feedstock.DraftedAt == nil || len(feedstock.Types) > 0
 	})
 	if needsRunner && service.Runner == nil {
 		return summary, errors.New("draw runner is required for unfinished feedstocks")
@@ -573,7 +573,7 @@ func processDrawFeedstock(
 	if current.ExtractedAt != nil {
 		return result
 	}
-	if current.AnnotatedAt == nil {
+	if current.DraftedAt == nil {
 		prompt, warnings, err := drawPrompt(
 			service.Settings, service.Sources, service.Repository, feedstockID,
 			feedstocks, sourceCandidates,

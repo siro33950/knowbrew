@@ -32,7 +32,7 @@ func TestDraftWritesSummaryAndNormalizedTypeCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if drawn.AnnotatedAt == nil || !reflect.DeepEqual(
+	if drawn.DraftedAt == nil || !reflect.DeepEqual(
 		drawn.Types,
 		[]domain.KnowledgeType{"constraint", "principle"},
 	) {
@@ -66,7 +66,7 @@ func TestDraftAllowsEmptyTypeCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if drawn.AnnotatedAt == nil || len(drawn.Types) != 0 || !drawn.PendingExtraction() {
+	if drawn.DraftedAt == nil || len(drawn.Types) != 0 || !drawn.PendingExtraction() {
 		t.Fatalf("feedstock = %#v", drawn)
 	}
 }
@@ -91,7 +91,7 @@ func TestDraftRequiresSummary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if unchanged.AnnotatedAt != nil || len(unchanged.Types) != 0 {
+	if unchanged.DraftedAt != nil || len(unchanged.Types) != 0 {
 		t.Fatalf("feedstock = %#v", unchanged)
 	}
 }
@@ -133,7 +133,7 @@ func TestDraftRejectsAlreadyDrawnFeedstock(t *testing.T) {
 	}
 	draft.Summary = "second summary"
 	err := draftForTest(context.Background(), dataStore, draft)
-	if err == nil || !strings.Contains(err.Error(), "already drawn") {
+	if err == nil || !strings.Contains(err.Error(), "already drafted") {
 		t.Fatalf("error = %v", err)
 	}
 	drawn, _, err := dataStore.FindFeedstock(feedstock.ID)

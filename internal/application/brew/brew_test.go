@@ -378,13 +378,13 @@ func seedKnowledge(
 	organized bool,
 ) domain.KnowledgeRecord {
 	t.Helper()
-	annotatedAt := timestamp
+	draftedAt := timestamp
 	extractedAt := timestamp
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "fs-" + id, TurnID: "turn-" + id,
 		Session: domain.SessionRef{ID: "session-" + id}, Timestamp: timestamp,
 		Agent: "codex", Types: []domain.KnowledgeType{"property"}, Summary: statement,
-		AnnotatedAt: &annotatedAt, ExtractedAt: &extractedAt,
+		DraftedAt: &draftedAt, ExtractedAt: &extractedAt,
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)

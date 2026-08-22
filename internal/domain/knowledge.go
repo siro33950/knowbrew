@@ -66,8 +66,8 @@ func ExtractKnowledge(
 	newKnowledgeID func() string,
 	now time.Time,
 ) ([]KnowledgeRecord, error) {
-	if source.AnnotatedAt == nil {
-		return nil, fmt.Errorf("feedstock %s is not drawn", source.ID)
+	if source.DraftedAt == nil {
+		return nil, fmt.Errorf("feedstock %s is not drafted", source.ID)
 	}
 	if source.ExtractedAt != nil {
 		return nil, fmt.Errorf("feedstock %s is already extracted", source.ID)

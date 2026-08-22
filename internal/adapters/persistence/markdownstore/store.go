@@ -81,7 +81,7 @@ type readableFeedstockFrontmatter struct {
 	Branch      string                 `yaml:"branch,omitempty"`
 	Types       []domain.KnowledgeType `yaml:"types"`
 	Summary     string                 `yaml:"summary"`
-	AnnotatedAt *time.Time             `yaml:"annotated_at,omitempty"`
+	DraftedAt   *time.Time             `yaml:"drafted_at,omitempty"`
 	ExtractedAt *time.Time             `yaml:"extracted_at,omitempty"`
 }
 
@@ -96,7 +96,7 @@ func (header readableFeedstockFrontmatter) domainFeedstock() domain.Feedstock {
 		Session:   domain.SessionRef{ID: header.Session.ID},
 		Timestamp: header.Timestamp, Agent: header.Agent, CWD: header.CWD,
 		Repo: header.Repo, Branch: header.Branch, Types: header.Types,
-		Summary: header.Summary, AnnotatedAt: header.AnnotatedAt, ExtractedAt: header.ExtractedAt,
+		Summary: header.Summary, DraftedAt: header.DraftedAt, ExtractedAt: header.ExtractedAt,
 	}
 }
 
@@ -307,8 +307,8 @@ func (s *Store) WriteExtractedFeedstock(feedstock domain.Feedstock, when time.Ti
 	if err != nil {
 		return err
 	}
-	if current.AnnotatedAt == nil {
-		return fmt.Errorf("feedstock %s is not annotated", feedstock.ID)
+	if current.DraftedAt == nil {
+		return fmt.Errorf("feedstock %s is not drafted", feedstock.ID)
 	}
 	if err := current.ApplyExtractionProgress(when); err != nil {
 		return err
@@ -330,8 +330,8 @@ func (s *Store) DraftFeedstock(
 	if err != nil {
 		return err
 	}
-	if feedstock.AnnotatedAt != nil {
-		return fmt.Errorf("feedstock %s is already drawn", id)
+	if feedstock.DraftedAt != nil {
+		return fmt.Errorf("feedstock %s is already drafted", id)
 	}
 	types, err = s.NormalizeKnowledgeTypes(types)
 	if err != nil {

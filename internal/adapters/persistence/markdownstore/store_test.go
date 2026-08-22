@@ -1126,7 +1126,7 @@ func TestFeedstockIgnoresSessionPathAndDoesNotWriteIt(t *testing.T) {
 	}
 	legacyPath := filepath.Join(t.TempDir(), "legacy.md")
 	legacy := `---
-schema: 7
+schema: 8
 id: fs-legacy-path
 turn_id: turn-legacy
 session:
@@ -1137,7 +1137,7 @@ agent: claude
 types:
   - property
 summary: A Feedstock session path is ignored.
-annotated_at: 2026-07-30T01:01:00Z
+drafted_at: 2026-07-30T01:01:00Z
 ---
 `
 	if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
@@ -1169,7 +1169,7 @@ annotated_at: 2026-07-30T01:01:00Z
 }
 
 func validFeedstock() domain.Feedstock {
-	annotatedAt := time.Date(2026, 7, 30, 1, 1, 0, 0, time.UTC)
+	draftedAt := time.Date(2026, 7, 30, 1, 1, 0, 0, time.UTC)
 	return domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "claude-session-t000001",
 		TurnID:    "turn-1",
@@ -1177,7 +1177,7 @@ func validFeedstock() domain.Feedstock {
 		Timestamp: time.Date(2026, 7, 30, 1, 0, 0, 0, time.UTC),
 		Agent:     "claude",
 		Types:     []domain.KnowledgeType{"property"},
-		Summary:   "The user requested testing.", AnnotatedAt: &annotatedAt,
+		Summary:   "The user requested testing.", DraftedAt: &draftedAt,
 	}
 }
 
@@ -1195,7 +1195,7 @@ func TestReadKnowledgeToleratesLegacyTriggerKey(t *testing.T) {
 		Session:   domain.SessionRef{ID: "session"},
 		Timestamp: now, Agent: "claude",
 		Types:   []domain.KnowledgeType{"property"},
-		Summary: "Legacy trigger fixture.", AnnotatedAt: &now,
+		Summary: "Legacy trigger fixture.", DraftedAt: &now,
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)

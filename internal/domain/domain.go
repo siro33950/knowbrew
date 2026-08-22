@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const SchemaVersion = 7
+const SchemaVersion = 8
 
 type Status string
 
@@ -43,7 +43,7 @@ type Feedstock struct {
 	Branch      string          `yaml:"branch,omitempty" json:"branch,omitempty"`
 	Types       []KnowledgeType `yaml:"types" json:"types"`
 	Summary     string          `yaml:"summary" json:"summary"`
-	AnnotatedAt *time.Time      `yaml:"annotated_at,omitempty" json:"annotated_at,omitempty"`
+	DraftedAt   *time.Time      `yaml:"drafted_at,omitempty" json:"drafted_at,omitempty"`
 	ExtractedAt *time.Time      `yaml:"extracted_at,omitempty" json:"extracted_at,omitempty"`
 }
 
@@ -185,9 +185,9 @@ func ValidateFeedstock(feedstock Feedstock) error {
 	if feedstock.Agent != "claude" && feedstock.Agent != "codex" {
 		return fmt.Errorf("unsupported agent %q", feedstock.Agent)
 	}
-	if feedstock.AnnotatedAt == nil {
+	if feedstock.DraftedAt == nil {
 		if feedstock.ExtractedAt != nil {
-			return errors.New("unannotated feedstock must not have extracted_at")
+			return errors.New("undrafted feedstock must not have extracted_at")
 		}
 		return nil
 	}
@@ -195,7 +195,7 @@ func ValidateFeedstock(feedstock Feedstock) error {
 		return errors.New("feedstock extracted_at must not be zero")
 	}
 	if strings.TrimSpace(feedstock.Summary) == "" {
-		return errors.New("annotated feedstock summary is required")
+		return errors.New("drafted feedstock summary is required")
 	}
 	types, err := NormalizeKnowledgeTypes(feedstock.Types)
 	if err != nil {

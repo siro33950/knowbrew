@@ -556,7 +556,7 @@ func TestIncrementalFeedstockSyncUpdatesClassificationFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	if before.Total != 0 {
-		t.Fatalf("unannotated search = %#v", before)
+		t.Fatalf("undrafted search = %#v", before)
 	}
 	if err := dataStore.DraftFeedstock(
 		feedstock.ID,
@@ -1069,14 +1069,14 @@ func BenchmarkIncrementalSearch3000Feedstocks(b *testing.B) {
 	base := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
 	for index := 1; index <= 3000; index++ {
 		feedstock := domain.Feedstock{
-			Schema:      domain.SchemaVersion,
-			ID:          fmt.Sprintf("claude-benchmark-t%06d", index),
-			TurnID:      fmt.Sprintf("turn-%06d", index),
-			Session:     domain.SessionRef{ID: "benchmark"},
-			Timestamp:   base.Add(time.Duration(index) * time.Second),
-			Agent:       "claude",
-			Summary:     "Measure incremental search latency.",
-			AnnotatedAt: benchmarkTime(base),
+			Schema:    domain.SchemaVersion,
+			ID:        fmt.Sprintf("claude-benchmark-t%06d", index),
+			TurnID:    fmt.Sprintf("turn-%06d", index),
+			Session:   domain.SessionRef{ID: "benchmark"},
+			Timestamp: base.Add(time.Duration(index) * time.Second),
+			Agent:     "claude",
+			Summary:   "Measure incremental search latency.",
+			DraftedAt: benchmarkTime(base),
 		}
 		path, err := dataStore.FeedstockPath(feedstock)
 		if err != nil {
@@ -1133,15 +1133,15 @@ func writeFeedstock(
 ) domain.Feedstock {
 	t.Helper()
 	feedstock := domain.Feedstock{
-		Schema:      domain.SchemaVersion,
-		ID:          id,
-		TurnID:      "turn-" + id,
-		Session:     domain.SessionRef{ID: "session"},
-		Timestamp:   timestamp,
-		Agent:       "claude",
-		Types:       []domain.KnowledgeType{domain.KnowledgeType("property")},
-		Summary:     text,
-		AnnotatedAt: benchmarkTime(timestamp),
+		Schema:    domain.SchemaVersion,
+		ID:        id,
+		TurnID:    "turn-" + id,
+		Session:   domain.SessionRef{ID: "session"},
+		Timestamp: timestamp,
+		Agent:     "claude",
+		Types:     []domain.KnowledgeType{domain.KnowledgeType("property")},
+		Summary:   text,
+		DraftedAt: benchmarkTime(timestamp),
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)

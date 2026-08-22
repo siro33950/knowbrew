@@ -596,20 +596,20 @@ func TestSearchFlagsAndHookOutputUsePlainMasterNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	annotatedAt := time.Now().UTC()
+	draftedAt := time.Now().UTC()
 	feedstock := domain.Feedstock{
 		Schema: domain.SchemaVersion, ID: "claude-session-t000001",
 		TurnID:    "turn-1",
 		Session:   domain.SessionRef{ID: "session"},
-		Timestamp: annotatedAt, Agent: "claude",
+		Timestamp: draftedAt, Agent: "claude",
 		Types:   []domain.KnowledgeType{domain.KnowledgeType("property")},
-		Summary: "The linked masters were used.", AnnotatedAt: &annotatedAt,
+		Summary: "The linked masters were used.", DraftedAt: &draftedAt,
 	}
 	if err := dataStore.WriteFeedstock(feedstock); err != nil {
 		t.Fatal(err)
 	}
 	if err := dataStore.WriteNewKnowledge("linked-rule", domain.Knowledge{
-		Created: annotatedAt, Updated: annotatedAt, Type: domain.KnowledgeType("property"),
+		Created: draftedAt, Updated: draftedAt, Type: domain.KnowledgeType("property"),
 		Subject: "subject", Feedstocks: []string{feedstock.ID},
 		Status: domain.StatusPending,
 	}, "# Linked rule"); err != nil {
@@ -722,7 +722,7 @@ func TestFeedstockDraftRejectsFeedstockOutsideTheInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.AnnotatedAt != nil {
+	if stored.DraftedAt != nil {
 		t.Fatalf("feedstock = %#v", stored)
 	}
 
@@ -739,7 +739,7 @@ func TestFeedstockDraftRejectsFeedstockOutsideTheInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if drawn.AnnotatedAt == nil {
+	if drawn.DraftedAt == nil {
 		t.Fatalf("feedstock = %#v", drawn)
 	}
 }
@@ -780,7 +780,7 @@ func TestFeedstockDraftTypeFlagsWriteSummaryAndMultipleCandidates(t *testing.T) 
 		t.Fatal(err)
 	}
 	if stored.Summary != "The user supplied an established property and relation." ||
-		stored.AnnotatedAt == nil {
+		stored.DraftedAt == nil {
 		t.Fatalf("feedstock = %#v", stored)
 	}
 	if len(stored.Types) != 2 {
@@ -869,7 +869,7 @@ func TestFeedstockDraftReplacesTheSeparateSummarizeAndAnnotateCommands(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Summary != "target summary" || stored.AnnotatedAt == nil ||
+	if stored.Summary != "target summary" || stored.DraftedAt == nil ||
 		len(stored.Types) != 1 || stored.Types[0] != domain.KnowledgeType("property") {
 		t.Fatalf("feedstock = %#v", stored)
 	}
@@ -877,7 +877,7 @@ func TestFeedstockDraftReplacesTheSeparateSummarizeAndAnnotateCommands(t *testin
 	repeated.SetArgs([]string{
 		"feedstock", "draft", feedstock.ID, "--summary", "replacement",
 	})
-	if err := repeated.Execute(); err == nil || !strings.Contains(err.Error(), "already drawn") {
+	if err := repeated.Execute(); err == nil || !strings.Contains(err.Error(), "already drafted") {
 		t.Fatalf("repeated draft error = %v", err)
 	}
 }
