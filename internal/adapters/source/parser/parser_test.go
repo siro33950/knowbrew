@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/siro33950/knowbrew/internal/domain"
 )
@@ -925,5 +926,48 @@ func TestClaudeIncrementalParserCompletesOpenTurnAfterAppend(t *testing.T) {
 	}
 	if resumed.Candidates[0].Dialogue[1].Content != "done" {
 		t.Fatalf("candidate = %#v", resumed.Candidates[0])
+	}
+}
+
+func TestCodexParsesCompletedUserMessageItems(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	content := `{"timestamp":"2026-08-11T01:00:00Z","type":"session_meta","payload":{"id":"session-id","cwd":"/repo"}}
+{"timestamp":"2026-08-11T01:00:01Z","type":"turn_context","payload":{"turn_id":"codex-turn-id","cwd":"/repo"}}
+{"timestamp":"2026-08-11T01:00:02Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"codex-turn-id","item":{"type":"UserMessage","id":"item-id","content":[{"type":"text","text":"actual human request"}]}}}
+{"timestamp":"2026-08-11T01:00:03Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"codex-turn-id","item":{"type":"CommandExecution","id":"command-id","command":"ls"}}}
+{"timestamp":"2026-08-11T01:00:04Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"codex-turn-id","item":{"type":"AgentMessage","id":"message-id","content":[{"type":"Text","text":"thinking aloud"}],"phase":"commentary"}}}
+{"timestamp":"2026-08-11T01:00:05Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"final reply"}]}}
+{"timestamp":"2026-08-11T01:00:06Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"codex-turn-id"}}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	feedstocks, warnings, err := (Codex{}).Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(feedstocks) != 1 {
+		t.Fatalf("feedstocks = %#v, warnings = %#v", feedstocks, warnings)
+	}
+	if feedstocks[0].TurnID != "codex-turn-id" {
+		t.Fatalf("turn_id = %q", feedstocks[0].TurnID)
+	}
+	if len(feedstocks[0].Dialogue) != 2 ||
+		feedstocks[0].Dialogue[0].Role != "user" ||
+		feedstocks[0].Dialogue[0].Content != "actual human request" ||
+		feedstocks[0].Dialogue[1].Role != "assistant" ||
+		feedstocks[0].Dialogue[1].Content != "final reply" {
+		t.Fatalf("dialogue = %#v", feedstocks[0].Dialogue)
+	}
+	if !feedstocks[0].Timestamp.Equal(time.Date(2026, 8, 11, 1, 0, 2, 0, time.UTC)) {
+		t.Fatalf("timestamp = %s", feedstocks[0].Timestamp)
+	}
+	messages, err := (Codex{}).ExtractTurn(path, feedstocks[0].TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) == 0 || messages[0].Role != "user" ||
+		messages[0].Content != "actual human request" {
+		t.Fatalf("extracted turn = %#v", messages)
 	}
 }
