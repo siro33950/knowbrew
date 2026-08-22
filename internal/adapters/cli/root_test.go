@@ -685,6 +685,65 @@ func TestShowRawFlagValidation(t *testing.T) {
 	}
 }
 
+func TestFeedstockDraftRejectsFeedstockOutsideTheInvocation(t *testing.T) {
+	rootDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.ConfigEnvironment, configPath)
+	dataStore, err := store.New(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"fs-assigned", "fs-other"} {
+		if err := dataStore.WriteFeedstock(domain.Feedstock{
+			Schema: domain.SchemaVersion, ID: id, TurnID: "turn-" + id,
+			Session:   domain.SessionRef{ID: "session"},
+			Timestamp: time.Now().UTC(), Agent: "claude",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv(config.InvocationIDEnvironment, "draft-invocation")
+	t.Setenv(config.InvocationFeedstockEnvironment, "fs-assigned")
+
+	foreign := newRootCommand()
+	foreign.SetOut(&bytes.Buffer{})
+	foreign.SetArgs([]string{
+		"feedstock", "draft", "fs-other", "--summary", "The user stated a property.",
+		"--type", "property",
+	})
+	if err := foreign.Execute(); err == nil {
+		t.Fatal("draft wrote a feedstock outside the invocation")
+	}
+	stored, _, err := dataStore.FindFeedstock("fs-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.AnnotatedAt != nil {
+		t.Fatalf("feedstock = %#v", stored)
+	}
+
+	assigned := newRootCommand()
+	assigned.SetOut(&bytes.Buffer{})
+	assigned.SetArgs([]string{
+		"feedstock", "draft", "fs-assigned", "--summary", "The user stated a property.",
+		"--type", "property",
+	})
+	if err := assigned.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	drawn, _, err := dataStore.FindFeedstock("fs-assigned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drawn.AnnotatedAt == nil {
+		t.Fatalf("feedstock = %#v", drawn)
+	}
+}
+
 func TestFeedstockDraftTypeFlagsWriteSummaryAndMultipleCandidates(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")

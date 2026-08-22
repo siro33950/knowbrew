@@ -668,6 +668,9 @@ func newFeedstockCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := invocation.ValidateFeedstock(args[0]); err != nil {
+				return err
+			}
 			dataStore, err := store.New(cfg.Root)
 			if err != nil {
 				return err
