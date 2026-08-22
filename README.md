@@ -236,10 +236,12 @@ root = ".."
 
 [llm]
 backend = "claude-cli"    # or codex-cli, api, ollama
-draw_model = ""           # per-turn classification: prefer a fast model
-brew_model = ""           # knowledge decisions: prefer a strong model
+draw_draft_model = ""     # per-turn classification: prefer a fast model
+draw_extract_model = ""   # Knowledge extraction: prefer a strong model
+brew_model = ""           # Subject organization: prefer a strong model
 distill_model = ""        # document synthesis: prefer a strong model
-draw_effort = "low"       # repeated classification: low is the init default
+draw_draft_effort = "low" # repeated classification: low is the init default
+draw_extract_effort = ""  # empty uses the backend or user default
 brew_effort = ""          # empty uses the backend or user default
 distill_effort = "high"   # document selection and synthesis
 timeout = "5m"
@@ -276,7 +278,7 @@ Feedstocks do not store these physical paths, so moving a session between the
 configured directories does not break `show --raw`, Draw resume, or Brew.
 
 Empty model values use the CLI backend's own default. `api` and `ollama` require
-all three models and read credentials from the environment:
+all four models and read credentials from the environment:
 
 ```sh
 export KNOWBREW_API_URL=https://api.example.com/v1/chat/completions

@@ -29,15 +29,16 @@ const (
 )
 
 type Choices struct {
-	Root           string
-	Backend        string
-	DrawModel      string
-	BrewModel      string
-	DistillModel   string
-	EmbeddingModel string
-	SourceNames    []string
-	InstallClaude  bool
-	InstallCodex   bool
+	Root             string
+	Backend          string
+	DrawDraftModel   string
+	DrawExtractModel string
+	BrewModel        string
+	DistillModel     string
+	EmbeddingModel   string
+	SourceNames      []string
+	InstallClaude    bool
+	InstallCodex     bool
 }
 
 func RunInteractive() error {
@@ -52,7 +53,7 @@ func RunInteractive() error {
 	configPath := config.DefaultConfigPath(root)
 	var existing *config.Config
 	if _, err := os.Stat(configPath); err == nil {
-		loaded, err := config.LoadPath(configPath)
+		loaded, err := config.LoadPathForSetup(configPath)
 		if err != nil {
 			return err
 		}
@@ -74,7 +75,8 @@ func RunInteractive() error {
 		defaults = append(defaults, name)
 	}
 	backend := "claude-cli"
-	drawModel := ""
+	drawDraftModel := ""
+	drawExtractModel := ""
 	brewModel := ""
 	distillModel := ""
 	embeddingModel := config.DefaultEmbeddingModel
@@ -84,7 +86,8 @@ func RunInteractive() error {
 	updateExisting := true
 	if existing != nil {
 		backend = existing.LLM.Backend
-		drawModel = existing.LLM.DrawModel
+		drawDraftModel = existing.LLM.DrawDraftModel
+		drawExtractModel = existing.LLM.DrawExtractModel
 		brewModel = existing.LLM.BrewModel
 		distillModel = existing.LLM.DistillModel
 		embeddingModel = existing.Embedding.Model
@@ -150,12 +153,22 @@ func RunInteractive() error {
 			).
 			Value(&backend),
 		huh.NewInput().
-			Title("Draw model").
+			Title("Draw draft model").
 			Description("Runs once per turn for lightweight classification; prefer a fast model. Leave empty for the CLI default.").
-			Value(&drawModel).
+			Value(&drawDraftModel).
 			Validate(func(value string) error {
 				if (backend == "api" || backend == "ollama") && strings.TrimSpace(value) == "" {
-					return errors.New("a draw model is required for API and Ollama")
+					return errors.New("a draw draft model is required for API and Ollama")
+				}
+				return nil
+			}),
+		huh.NewInput().
+			Title("Draw extract model").
+			Description("Reads the dialogue and writes unorganized Knowledge; prefer a high-quality model. Leave empty for the CLI default.").
+			Value(&drawExtractModel).
+			Validate(func(value string) error {
+				if (backend == "api" || backend == "ollama") && strings.TrimSpace(value) == "" {
+					return errors.New("a draw extract model is required for API and Ollama")
 				}
 				return nil
 			}),
@@ -203,7 +216,8 @@ func RunInteractive() error {
 		return errors.New("initialization cancelled")
 	}
 	return Apply(Choices{
-		Root: root, Backend: backend, DrawModel: drawModel, BrewModel: brewModel,
+		Root: root, Backend: backend, DrawDraftModel: drawDraftModel,
+		DrawExtractModel: drawExtractModel, BrewModel: brewModel,
 		DistillModel:   distillModel,
 		EmbeddingModel: embeddingModel, SourceNames: selected,
 		InstallClaude: installClaude, InstallCodex: installCodex,
@@ -232,8 +246,9 @@ func Apply(choices Choices) error {
 	cfg := config.Config{
 		Root: root,
 		LLM: config.LLM{
-			Backend: choices.Backend, DrawModel: choices.DrawModel, BrewModel: choices.BrewModel,
-			DistillModel: choices.DistillModel, DrawEffort: config.DefaultDrawEffort,
+			Backend: choices.Backend, DrawDraftModel: choices.DrawDraftModel,
+			DrawExtractModel: choices.DrawExtractModel, BrewModel: choices.BrewModel,
+			DistillModel: choices.DistillModel, DrawDraftEffort: config.DefaultDrawDraftEffort,
 			DistillEffort: config.DefaultDistillEffort,
 		},
 		Draw: config.Draw{
@@ -245,7 +260,7 @@ func Apply(choices Choices) error {
 		Sources:   selectedSources,
 	}
 	if _, statErr := os.Stat(configPath); statErr == nil {
-		existing, loadErr := config.LoadPath(configPath)
+		existing, loadErr := config.LoadPathForSetup(configPath)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -253,7 +268,8 @@ func Apply(choices Choices) error {
 		cfg = existing
 		cfg.Root = root
 		cfg.LLM.Backend = choices.Backend
-		cfg.LLM.DrawModel = choices.DrawModel
+		cfg.LLM.DrawDraftModel = choices.DrawDraftModel
+		cfg.LLM.DrawExtractModel = choices.DrawExtractModel
 		cfg.LLM.BrewModel = choices.BrewModel
 		cfg.LLM.DistillModel = choices.DistillModel
 		cfg.Embedding.Model = embeddingModel
@@ -267,9 +283,13 @@ func Apply(choices Choices) error {
 		return statErr
 	}
 	if choices.Backend == "api" || choices.Backend == "ollama" {
-		if strings.TrimSpace(choices.DrawModel) == "" || strings.TrimSpace(choices.BrewModel) == "" ||
+		if strings.TrimSpace(choices.DrawDraftModel) == "" ||
+			strings.TrimSpace(choices.DrawExtractModel) == "" ||
+			strings.TrimSpace(choices.BrewModel) == "" ||
 			strings.TrimSpace(choices.DistillModel) == "" {
-			return errors.New("API and Ollama backends require draw, brew, and distill models")
+			return errors.New(
+				"API and Ollama backends require draw draft, draw extract, brew, and distill models",
+			)
 		}
 	}
 	cfg.Path = configPath

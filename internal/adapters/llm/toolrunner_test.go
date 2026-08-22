@@ -178,21 +178,22 @@ func TestToolRunnerUsesTaskSpecificAPIModelAndEffort(t *testing.T) {
 		return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`), nil
 	})
 	runner := NewToolRunner(config.Config{LLM: config.LLM{
-		Backend: "api", DrawModel: "draw-fast", BrewModel: "brew-quality",
-		DistillModel: "distill-quality", DrawEffort: "low", BrewEffort: "high",
+		Backend: "api", DrawDraftModel: "draw-fast", DrawExtractModel: "extract-quality",
+		BrewModel: "brew-quality", DistillModel: "distill-quality",
+		DrawDraftEffort: "low", DrawExtractEffort: "medium", BrewEffort: "high",
 		DistillEffort: "max",
 	}}, "/bin/knowbrew", t.TempDir(), nil)
 	runner.Client = &http.Client{Transport: transport}
 	for _, task := range []Task{
-		TaskDraw, TaskBrew, TaskDistillSelect, TaskDistillGenerate,
+		TaskDraw, TaskExtract, TaskBrew, TaskDistillSelect, TaskDistillGenerate,
 	} {
 		if _, _, err := runner.complete(context.Background(), task, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if !reflect.DeepEqual(models, []string{
-		"draw-fast", "brew-quality", "distill-quality", "distill-quality",
-	}) || !reflect.DeepEqual(efforts, []string{"low", "high", "max", "max"}) {
+		"draw-fast", "extract-quality", "brew-quality", "distill-quality", "distill-quality",
+	}) || !reflect.DeepEqual(efforts, []string{"low", "medium", "high", "max", "max"}) {
 		t.Fatalf("models = %#v, efforts = %#v", models, efforts)
 	}
 }
@@ -215,7 +216,8 @@ func TestToolRunnerOmitsEffortWhenEmptyAndForOllama(t *testing.T) {
 			return jsonResponse(test.response), nil
 		})
 		runner := NewToolRunner(config.Config{LLM: config.LLM{
-			Backend: test.backend, DrawModel: "draw", BrewModel: "brew", DrawEffort: test.effort,
+			Backend: test.backend, DrawDraftModel: "draw", BrewModel: "brew",
+			DrawDraftEffort: test.effort,
 		}}, "/bin/knowbrew", t.TempDir(), nil)
 		runner.Client = &http.Client{Transport: transport}
 		if _, _, err := runner.complete(context.Background(), TaskDraw, nil, nil, nil); err != nil {
@@ -240,7 +242,7 @@ func TestToolRunnerStreamsCommandOutputOnlyWhenVerbose(t *testing.T) {
 		var progress bytes.Buffer
 		runner := NewToolRunner(config.Config{
 			Root: root, Path: filepath.Join(root, "config.toml"),
-			LLM: config.LLM{Backend: "api", DrawModel: "draw", Timeout: "5s"},
+			LLM: config.LLM{Backend: "api", DrawDraftModel: "draw", Timeout: "5s"},
 		}, binary, root, &progress, verbose)
 		runner.Client = &http.Client{Transport: transport}
 		_, err := runner.RunWithUsage(context.Background(), TaskDraw, "feedstock-1", "draw")
@@ -266,7 +268,7 @@ func TestToolRunnerReturnsDraftWithoutMutationCommand(t *testing.T) {
 	})
 	runner := NewToolRunner(config.Config{
 		Root: root, Path: filepath.Join(root, "config.toml"),
-		LLM: config.LLM{Backend: "api", DrawModel: "draw", Timeout: "5s"},
+		LLM: config.LLM{Backend: "api", DrawDraftModel: "draw", Timeout: "5s"},
 	}, binary, root, nil)
 	runner.Client = &http.Client{Transport: transport}
 	result, err := runner.Run(context.Background(), TaskDraw, "feedstock-1", "draw")
@@ -300,7 +302,7 @@ func TestToolRunnerCanLoadContextOnceBeforeDrawing(t *testing.T) {
 	})
 	runner := NewToolRunner(config.Config{
 		Root: root, Path: filepath.Join(root, "config.toml"),
-		LLM: config.LLM{Backend: "api", DrawModel: "draw", Timeout: "5s"},
+		LLM: config.LLM{Backend: "api", DrawDraftModel: "draw", Timeout: "5s"},
 	}, binary, root, nil)
 	runner.Client = &http.Client{Transport: transport}
 	if _, err := runner.RunWithUsage(context.Background(), TaskDraw, "feedstock-1", "classify"); err != nil {
@@ -327,7 +329,7 @@ func TestToolRunnerRejectsReadToolForDraw(t *testing.T) {
 	root := t.TempDir()
 	runner := NewToolRunner(config.Config{
 		Root: root, Path: filepath.Join(root, "config.toml"),
-		LLM: config.LLM{Backend: "api", DrawModel: "draw", Timeout: "5s"},
+		LLM: config.LLM{Backend: "api", DrawDraftModel: "draw", Timeout: "5s"},
 	}, "/bin/knowbrew", root, nil)
 	runner.Client = &http.Client{Transport: transport}
 	_, err := runner.Run(context.Background(), TaskDraw, "feedstock-1", "classify")

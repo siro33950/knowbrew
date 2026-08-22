@@ -25,7 +25,7 @@ const (
 	DefaultDrawConcurrency         = 5
 	DefaultDrawContextTurns        = 3
 	DefaultDrawMaxContextTurns     = 20
-	DefaultDrawEffort              = "low"
+	DefaultDrawDraftEffort         = "low"
 	DefaultDistillEffort           = "high"
 	DefaultEmbeddingModel          = EmbeddingRuri
 	EmbeddingDisabled              = "disabled"
@@ -36,14 +36,16 @@ const (
 )
 
 type LLM struct {
-	Backend       string `toml:"backend"`
-	DrawModel     string `toml:"draw_model"`
-	BrewModel     string `toml:"brew_model"`
-	DistillModel  string `toml:"distill_model"`
-	DrawEffort    string `toml:"draw_effort"`
-	BrewEffort    string `toml:"brew_effort"`
-	DistillEffort string `toml:"distill_effort"`
-	Timeout       string `toml:"timeout,omitempty"`
+	Backend           string `toml:"backend"`
+	DrawDraftModel    string `toml:"draw_draft_model"`
+	DrawExtractModel  string `toml:"draw_extract_model"`
+	BrewModel         string `toml:"brew_model"`
+	DistillModel      string `toml:"distill_model"`
+	DrawDraftEffort   string `toml:"draw_draft_effort"`
+	DrawExtractEffort string `toml:"draw_extract_effort"`
+	BrewEffort        string `toml:"brew_effort"`
+	DistillEffort     string `toml:"distill_effort"`
+	Timeout           string `toml:"timeout,omitempty"`
 }
 
 type Draw struct {
@@ -76,16 +78,17 @@ type Config struct {
 	Embedding Embedding `toml:"embedding"`
 	Sources   []Source  `toml:"sources"`
 
-	Path                string `toml:"-"`
-	contextMaxTokensSet bool   `toml:"-"`
-	drawConcurrencySet  bool   `toml:"-"`
-	drawContextTurnsSet bool   `toml:"-"`
-	drawMaxContextSet   bool   `toml:"-"`
-	drawEffortSet       bool   `toml:"-"`
-	brewEffortSet       bool   `toml:"-"`
-	distillModelSet     bool   `toml:"-"`
-	distillEffortSet    bool   `toml:"-"`
-	embeddingModelSet   bool   `toml:"-"`
+	Path                 string `toml:"-"`
+	contextMaxTokensSet  bool   `toml:"-"`
+	drawConcurrencySet   bool   `toml:"-"`
+	drawContextTurnsSet  bool   `toml:"-"`
+	drawMaxContextSet    bool   `toml:"-"`
+	drawDraftEffortSet   bool   `toml:"-"`
+	drawExtractEffortSet bool   `toml:"-"`
+	brewEffortSet        bool   `toml:"-"`
+	distillModelSet      bool   `toml:"-"`
+	distillEffortSet     bool   `toml:"-"`
+	embeddingModelSet    bool   `toml:"-"`
 }
 
 type Locator struct {
@@ -140,6 +143,22 @@ func Load() (Config, error) {
 // LoadPath reads one explicit configuration file without consulting the
 // process-wide locator. Setup uses it to preserve the root it is updating.
 func LoadPath(path string) (Config, error) {
+	return loadPath(path, false)
+}
+
+// LoadPathForSetup reads a configuration file that may still carry the retired
+// single-stage draw keys, so that "knowbrew init" can migrate it instead of
+// refusing to run. Retired values seed the equivalent two-stage keys.
+func LoadPathForSetup(path string) (Config, error) {
+	return loadPath(path, true)
+}
+
+type retiredDrawKeys struct {
+	Model  string `toml:"draw_model"`
+	Effort string `toml:"draw_effort"`
+}
+
+func loadPath(path string, migrate bool) (Config, error) {
 	var cfg Config
 	metadata, err := toml.DecodeFile(path, &cfg)
 	if err != nil {
@@ -147,7 +166,7 @@ func LoadPath(path string) (Config, error) {
 	}
 	if metadata.IsDefined("llm", "model") {
 		return Config{}, fmt.Errorf(
-			"invalid configuration %s: [llm] model is no longer supported; migrate it to draw_model, brew_model, and distill_model",
+			"invalid configuration %s: [llm] model is no longer supported; migrate it to draw_draft_model, draw_extract_model, brew_model, and distill_model",
 			path,
 		)
 	}
@@ -156,11 +175,15 @@ func LoadPath(path string) (Config, error) {
 	cfg.drawConcurrencySet = metadata.IsDefined("draw", "concurrency")
 	cfg.drawContextTurnsSet = metadata.IsDefined("draw", "context_turns")
 	cfg.drawMaxContextSet = metadata.IsDefined("draw", "max_context_turns")
-	cfg.drawEffortSet = metadata.IsDefined("llm", "draw_effort")
+	cfg.drawDraftEffortSet = metadata.IsDefined("llm", "draw_draft_effort")
+	cfg.drawExtractEffortSet = metadata.IsDefined("llm", "draw_extract_effort")
 	cfg.brewEffortSet = metadata.IsDefined("llm", "brew_effort")
 	cfg.distillModelSet = metadata.IsDefined("llm", "distill_model")
 	cfg.distillEffortSet = metadata.IsDefined("llm", "distill_effort")
 	cfg.embeddingModelSet = metadata.IsDefined("embedding", "model")
+	if err := resolveDrawStageKeys(path, &cfg, metadata, migrate); err != nil {
+		return Config{}, err
+	}
 	if !cfg.distillModelSet {
 		cfg.LLM.DistillModel = cfg.LLM.BrewModel
 	}
@@ -173,11 +196,76 @@ func LoadPath(path string) (Config, error) {
 	return cfg, nil
 }
 
+// resolveDrawStageKeys keeps the two Draw stages independently configured. A
+// missing stage key is an error rather than a silent fallback to the other
+// stage or to Brew, because a stage would then run on a model the operator
+// never chose.
+func resolveDrawStageKeys(
+	path string,
+	cfg *Config,
+	metadata toml.MetaData,
+	migrate bool,
+) error {
+	retired := metadata.IsDefined("llm", "draw_model") || metadata.IsDefined("llm", "draw_effort")
+	if retired {
+		if !migrate {
+			return fmt.Errorf(
+				"invalid configuration %s: [llm] draw_model and draw_effort are no longer supported; "+
+					"migrate them to draw_draft_model, draw_draft_effort, draw_extract_model, "+
+					"and draw_extract_effort",
+				path,
+			)
+		}
+		var previous struct {
+			LLM retiredDrawKeys `toml:"llm"`
+		}
+		if _, err := toml.DecodeFile(path, &previous); err != nil {
+			return fmt.Errorf("read configuration %s: %w", path, err)
+		}
+		if !metadata.IsDefined("llm", "draw_draft_model") {
+			cfg.LLM.DrawDraftModel = previous.LLM.Model
+		}
+		if !cfg.drawDraftEffortSet {
+			cfg.LLM.DrawDraftEffort = previous.LLM.Effort
+			cfg.drawDraftEffortSet = metadata.IsDefined("llm", "draw_effort")
+		}
+		if !metadata.IsDefined("llm", "draw_extract_model") {
+			cfg.LLM.DrawExtractModel = cfg.LLM.BrewModel
+		}
+		if !cfg.drawExtractEffortSet {
+			cfg.LLM.DrawExtractEffort = cfg.LLM.BrewEffort
+			cfg.drawExtractEffortSet = cfg.brewEffortSet
+		}
+		return nil
+	}
+	if migrate {
+		return nil
+	}
+	missing := make([]string, 0, 4)
+	for _, key := range []string{
+		"draw_draft_model", "draw_draft_effort", "draw_extract_model", "draw_extract_effort",
+	} {
+		if !metadata.IsDefined("llm", key) {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) != 0 {
+		return fmt.Errorf(
+			"invalid configuration %s: [llm] %s must be set; run \"knowbrew init\" to write the Draw stage keys",
+			path, strings.Join(missing, ", "),
+		)
+	}
+	return nil
+}
+
 // FillInitDefaults adds defaults only for keys absent from an existing file.
 // Explicit empty values remain user-owned and are preserved.
 func (cfg *Config) FillInitDefaults() {
-	if !cfg.drawEffortSet {
-		cfg.LLM.DrawEffort = DefaultDrawEffort
+	if !cfg.drawDraftEffortSet {
+		cfg.LLM.DrawDraftEffort = DefaultDrawDraftEffort
+	}
+	if !cfg.drawExtractEffortSet {
+		cfg.LLM.DrawExtractEffort = ""
 	}
 	if !cfg.brewEffortSet {
 		cfg.LLM.BrewEffort = ""
@@ -215,9 +303,13 @@ func (cfg *Config) Normalize() error {
 		return fmt.Errorf("unsupported LLM backend %q", cfg.LLM.Backend)
 	}
 	if (cfg.LLM.Backend == "api" || cfg.LLM.Backend == "ollama") &&
-		(strings.TrimSpace(cfg.LLM.DrawModel) == "" || strings.TrimSpace(cfg.LLM.BrewModel) == "" ||
+		(strings.TrimSpace(cfg.LLM.DrawDraftModel) == "" ||
+			strings.TrimSpace(cfg.LLM.DrawExtractModel) == "" ||
+			strings.TrimSpace(cfg.LLM.BrewModel) == "" ||
 			strings.TrimSpace(cfg.LLM.DistillModel) == "") {
-		return errors.New("API and Ollama backends require draw_model, brew_model, and distill_model")
+		return errors.New(
+			"API and Ollama backends require draw_draft_model, draw_extract_model, brew_model, and distill_model",
+		)
 	}
 	if cfg.Draw.Concurrency == 0 && !cfg.drawConcurrencySet {
 		cfg.Draw.Concurrency = DefaultDrawConcurrency

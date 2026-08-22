@@ -237,8 +237,20 @@ func drawSettings(cfg config.Config) draw.Settings {
 	return draw.Settings{
 		Concurrency: cfg.Draw.Concurrency, ContextTurns: cfg.Draw.ContextTurns,
 		MaxContextTurns: cfg.Draw.MaxContextTurns, Backend: cfg.LLM.Backend,
-		Model: cfg.LLM.DrawModel, ConfigPath: cfg.Path, Sources: sources,
+		Model:      drawUsageModel(cfg),
+		ConfigPath: cfg.Path, Sources: sources,
 	}
+}
+
+// drawUsageModel labels the usage report of one Draw run, which aggregates both
+// stages. The stages may use different models, so name both unless they agree.
+func drawUsageModel(cfg config.Config) string {
+	draft := strings.TrimSpace(cfg.LLM.DrawDraftModel)
+	extract := strings.TrimSpace(cfg.LLM.DrawExtractModel)
+	if draft == extract {
+		return draft
+	}
+	return draft + ", " + extract
 }
 
 func configuredSources(cfg config.Config) []draw.ConfiguredSource {

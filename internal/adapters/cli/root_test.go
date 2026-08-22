@@ -40,7 +40,7 @@ func TestCommandSurfaceExposesDistill(t *testing.T) {
 func TestSearchModeAndIndexCommands(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestDrawHookProcessesOnlyPayloadTranscriptAndWritesNoSummary(t *testing.T) 
 	}
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	configData := "root = " + quoteTOML(rootDir) + "\n\n" +
-		"[llm]\nbackend = \"claude-cli\"\n\n" +
+		llmConfigSection + "\n" +
 		"[embedding]\nmodel = \"disabled\"\n\n" +
 		"[[sources]]\nagent = \"codex\"\nparser = \"codex\"\npaths = [" + quoteTOML(sourceDir) + "]\n"
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
@@ -227,7 +227,7 @@ func TestDrawHookPassesHookOptionAndExcludesOnlyUnfinishedTurn(t *testing.T) {
 	}
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	configData := "root = " + quoteTOML(rootDir) + "\n\n" +
-		"[llm]\nbackend = \"claude-cli\"\n\n" +
+		llmConfigSection + "\n" +
 		"[embedding]\nmodel = \"disabled\"\n\n" +
 		"[[sources]]\nagent = \"claude\"\nparser = \"claude\"\npaths = [" + quoteTOML(sourceDir) + "]\n"
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
@@ -283,7 +283,7 @@ func TestDrawHookIgnoresRetiredGlobalLock(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	configData := "root = " + quoteTOML(rootDir) + "\n\n" +
-		"[llm]\nbackend = \"claude-cli\"\n\n" +
+		llmConfigSection + "\n" +
 		"[embedding]\nmodel = \"disabled\"\n\n" +
 		"[[sources]]\nagent = \"codex\"\nparser = \"codex\"\npaths = [" + quoteTOML(sourceDir) + "]\n"
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
@@ -380,7 +380,7 @@ func TestParseDrawBoundaryAcceptsRelativeAndAbsoluteValues(t *testing.T) {
 func TestKnowledgeSearchEscapesSubcommandNamesAfterDoubleDash(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +496,7 @@ Alpha decisions body.
 	}
 
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -537,7 +537,7 @@ func TestContextHookFallsBackToProcessCwdOnEmptyStdin(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -634,7 +634,7 @@ func TestSearchFlagsAndHookOutputUsePlainMasterNames(t *testing.T) {
 	}
 
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -688,7 +688,7 @@ func TestShowRawFlagValidation(t *testing.T) {
 func TestFeedstockDraftRejectsFeedstockOutsideTheInvocation(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -747,7 +747,7 @@ func TestFeedstockDraftRejectsFeedstockOutsideTheInvocation(t *testing.T) {
 func TestFeedstockDraftTypeFlagsWriteSummaryAndMultipleCandidates(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -828,7 +828,7 @@ func TestFeedstockDraftTypeFlagsWriteSummaryAndMultipleCandidates(t *testing.T) 
 func TestFeedstockDraftReplacesTheSeparateSummarizeAndAnnotateCommands(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(configPath, []byte("root = "+quoteTOML(rootDir)+"\n\n[llm]\nbackend = \"claude-cli\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("root = "+quoteTOML(rootDir)+"\n\n"+llmConfigSection), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(config.ConfigEnvironment, configPath)
@@ -886,7 +886,7 @@ func TestFeedstockContextReadsBoundedTurnsFromSource(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	sourceDir := t.TempDir()
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n\n[draw]\nconcurrency = 1\ncontext_turns = 0\nmax_context_turns = 1\n\n[[sources]]\nagent = \"claude\"\nparser = \"claude\"\npaths = [" + quoteTOML(sourceDir) + "]\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection + "\n[draw]\nconcurrency = 1\ncontext_turns = 0\nmax_context_turns = 1\n\n[[sources]]\nagent = \"claude\"\nparser = \"claude\"\npaths = [" + quoteTOML(sourceDir) + "]\n"
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -994,7 +994,7 @@ func TestKnowledgeCommandsUseFeedstockTerminologyOnly(t *testing.T) {
 func TestKnowledgeSearchBuildsIndex(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1012,6 +1012,12 @@ func TestKnowledgeSearchBuildsIndex(t *testing.T) {
 		t.Fatalf("knowledge search did not create the index at %s: %v", indexPath, err)
 	}
 }
+
+// llmConfigSection writes the [llm] table with both Draw stage keys, which
+// configuration loading requires.
+const llmConfigSection = "[llm]\nbackend = \"claude-cli\"\n" +
+	"draw_draft_model = \"\"\ndraw_draft_effort = \"\"\n" +
+	"draw_extract_model = \"\"\ndraw_extract_effort = \"\"\n"
 
 func quoteTOML(value string) string {
 	return `"` + value + `"`

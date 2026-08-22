@@ -184,8 +184,9 @@ func TestRealLLMEndToEndWhenConfigured(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), ".config"))
 	cfg := config.Config{
 		LLM: config.LLM{
-			Backend: backend, DrawModel: os.Getenv("KNOWBREW_E2E_MODEL"),
-			BrewModel: os.Getenv("KNOWBREW_E2E_MODEL"),
+			Backend: backend, DrawDraftModel: os.Getenv("KNOWBREW_E2E_MODEL"),
+			DrawExtractModel: os.Getenv("KNOWBREW_E2E_MODEL"),
+			BrewModel:        os.Getenv("KNOWBREW_E2E_MODEL"),
 		},
 		Draw: config.Draw{Concurrency: config.DefaultDrawConcurrency},
 		Sources: []config.Source{{
@@ -212,7 +213,7 @@ func TestRealLLMEndToEndWhenConfigured(t *testing.T) {
 		Settings: draw.Settings{
 			Concurrency: cfg.Draw.Concurrency, ContextTurns: cfg.Draw.ContextTurns,
 			MaxContextTurns: cfg.Draw.MaxContextTurns, Backend: cfg.LLM.Backend,
-			Model: cfg.LLM.DrawModel, ConfigPath: cfg.Path, Sources: configuredSources,
+			Model: cfg.LLM.DrawDraftModel, ConfigPath: cfg.Path, Sources: configuredSources,
 		},
 		Repository: &persistenceadapter.Markdown{Store: dataStore},
 		Sources:    sourceadapter.New(configuredSources), Runner: runner,

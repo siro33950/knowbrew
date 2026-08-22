@@ -224,10 +224,12 @@ root = ".."
 
 [llm]
 backend = "claude-cli"    # または codex-cli, api, ollama
-draw_model = ""           # ターンごとの分類: 速いモデルが向く
-brew_model = ""           # 知識の判断: 強いモデルが向く
+draw_draft_model = ""     # ターンごとの分類: 速いモデルが向く
+draw_extract_model = ""   # Knowledgeの抽出: 強いモデルが向く
+brew_model = ""           # Subject単位の意味整理: 強いモデルが向く
 distill_model = ""        # 文書の蒸留: 強いモデルが向く
-draw_effort = "low"       # 反復する分類処理: initの既定は low
+draw_draft_effort = "low" # 反復する分類処理: initの既定は low
+draw_extract_effort = ""  # 空ならバックエンド/ユーザーの既定に従う
 brew_effort = ""          # 空ならバックエンド/ユーザーの既定に従う
 distill_effort = "high"   # 文書の選別・生成
 timeout = "5m"
@@ -263,7 +265,7 @@ paths = [
 保存しないため、設定済みディレクトリ間でセッションが移動しても`show --raw`、
 Drawの再開、Brewは壊れません。
 
-モデル名が空ならCLIバックエンド自身の既定を使います。`api` と `ollama` は3つすべての
+モデル名が空ならCLIバックエンド自身の既定を使います。`api` と `ollama` は4つすべての
 モデル指定が必須で、認証情報は環境変数から読みます。
 
 ```sh

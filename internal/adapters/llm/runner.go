@@ -233,8 +233,10 @@ func (writer lockedWriter) Write(data []byte) (int, error) {
 func modelForTask(cfg config.Config, task Task) (string, error) {
 	switch task {
 	case TaskDraw:
-		return strings.TrimSpace(cfg.LLM.DrawModel), nil
-	case TaskExtract, TaskBrew:
+		return strings.TrimSpace(cfg.LLM.DrawDraftModel), nil
+	case TaskExtract:
+		return strings.TrimSpace(cfg.LLM.DrawExtractModel), nil
+	case TaskBrew:
 		return strings.TrimSpace(cfg.LLM.BrewModel), nil
 	case TaskDistillSelect, TaskDistillGenerate:
 		return strings.TrimSpace(cfg.LLM.DistillModel), nil
@@ -246,8 +248,10 @@ func modelForTask(cfg config.Config, task Task) (string, error) {
 func effortForTask(cfg config.Config, task Task) (string, error) {
 	switch task {
 	case TaskDraw:
-		return cfg.LLM.DrawEffort, nil
-	case TaskExtract, TaskBrew:
+		return cfg.LLM.DrawDraftEffort, nil
+	case TaskExtract:
+		return cfg.LLM.DrawExtractEffort, nil
+	case TaskBrew:
 		return cfg.LLM.BrewEffort, nil
 	case TaskDistillSelect, TaskDistillGenerate:
 		return cfg.LLM.DistillEffort, nil

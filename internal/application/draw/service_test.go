@@ -133,6 +133,6 @@ func settingsFromConfig(cfg config.Config) Settings {
 	return Settings{
 		Concurrency: cfg.Draw.Concurrency, ContextTurns: cfg.Draw.ContextTurns,
 		MaxContextTurns: cfg.Draw.MaxContextTurns, Backend: cfg.LLM.Backend,
-		Model: cfg.LLM.DrawModel, ConfigPath: cfg.Path, Sources: sources,
+		Model: cfg.LLM.DrawDraftModel, ConfigPath: cfg.Path, Sources: sources,
 	}
 }
