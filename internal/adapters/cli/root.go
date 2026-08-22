@@ -15,7 +15,6 @@ import (
 	"github.com/siro33950/knowbrew/internal/adapters/config"
 	dialogueadapter "github.com/siro33950/knowbrew/internal/adapters/dialogue"
 	embeddingadapter "github.com/siro33950/knowbrew/internal/adapters/embedding"
-	invocationadapter "github.com/siro33950/knowbrew/internal/adapters/invocation"
 	"github.com/siro33950/knowbrew/internal/adapters/invocation/state"
 	"github.com/siro33950/knowbrew/internal/adapters/llm"
 	persistenceadapter "github.com/siro33950/knowbrew/internal/adapters/persistence"
@@ -679,7 +678,7 @@ func newFeedstockCommand() *cobra.Command {
 			}
 			if err := draw.ApplyDraft(
 				command.Context(), repositoryFor(dataStore),
-				invocationadapter.Guard{Root: cfg.Root}, draw.Draft{
+				draw.Draft{
 					FeedstockID: args[0], Summary: summary, Types: types,
 				}); err != nil {
 				return err

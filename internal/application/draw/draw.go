@@ -606,7 +606,7 @@ func processDrawFeedstock(
 			result.err = errors.New("apply draw result: draw result types are required")
 			return result
 		}
-		if err := ApplyDraft(ctx, service.Repository, nil, Draft{
+		if err := ApplyDraft(ctx, service.Repository, Draft{
 			FeedstockID: feedstockID, Summary: output.Summary, Types: *output.Types,
 		}); err != nil {
 			result.phase = "draw"

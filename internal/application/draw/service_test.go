@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/siro33950/knowbrew/internal/adapters/config"
-	invocationadapter "github.com/siro33950/knowbrew/internal/adapters/invocation"
 	persistenceadapter "github.com/siro33950/knowbrew/internal/adapters/persistence"
 	"github.com/siro33950/knowbrew/internal/adapters/persistence/markdownstore"
 	progressui "github.com/siro33950/knowbrew/internal/adapters/progress"
@@ -62,7 +61,7 @@ func draftForTest(
 ) error {
 	return ApplyDraft(
 		ctx, &persistenceadapter.Markdown{Store: dataStore},
-		invocationadapter.Guard{Root: dataStore.Root}, draft,
+		draft,
 	)
 }
 

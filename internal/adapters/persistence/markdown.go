@@ -62,10 +62,6 @@ func (repository *Markdown) EnsureMaster(kind string, entry domain.MasterEntry) 
 	return repository.Store.EnsureMaster(kind, entry)
 }
 
-func (repository *Markdown) WriteExtractedFeedstock(feedstock domain.Feedstock, when time.Time) error {
-	return repository.Store.WriteExtractedFeedstock(feedstock, when)
-}
-
 func (repository *Markdown) LoadMasters(kind string) (
 	[]domain.MasterEntry,
 	[]diagnostic.Warning,

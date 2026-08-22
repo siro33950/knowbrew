@@ -25,11 +25,6 @@ type Repository interface {
 	Transaction(context.Context, func(storage.Transaction) error) error
 }
 
-type InvocationGuard interface {
-	ValidateFeedstock(string) error
-	Mutate(func() error) error
-}
-
 type ConfiguredSource = applicationsource.Configured
 type SourceFile = applicationsource.File
 type SourceGateway = applicationsource.Gateway
@@ -85,11 +80,6 @@ type Service struct {
 	Claimer     Claimer
 	SearchIndex SearchIndex
 }
-
-type unrestrictedInvocation struct{}
-
-func (unrestrictedInvocation) ValidateFeedstock(string) error   { return nil }
-func (unrestrictedInvocation) Mutate(change func() error) error { return change() }
 
 type silentProgress struct{}
 
