@@ -215,6 +215,51 @@ func TestDrawHookProcessesOnlyPayloadTranscriptAndWritesNoSummary(t *testing.T) 
 	}
 }
 
+func TestDrawHookPassesHookOptionAndExcludesOnlyUnfinishedTurn(t *testing.T) {
+	rootDir := t.TempDir()
+	sourceDir := t.TempDir()
+	transcriptPath := filepath.Join(sourceDir, "session.jsonl")
+	transcript := `{"type":"user","uuid":"turn-1","sessionId":"session","timestamp":"2026-07-30T01:00:00Z","message":{"role":"user","content":"only turn"}}
+{"type":"assistant","sessionId":"session","timestamp":"2026-07-30T01:00:01Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}
+`
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" +
+		"[llm]\nbackend = \"claude-cli\"\n\n" +
+		"[embedding]\nmodel = \"disabled\"\n\n" +
+		"[[sources]]\nagent = \"claude\"\nparser = \"claude\"\npaths = [" + quoteTOML(sourceDir) + "]\n"
+	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.ConfigEnvironment, configPath)
+	payload, err := json.Marshal(map[string]any{
+		"hook_event_name": "Stop", "transcript_path": transcriptPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	command := newRootCommand()
+	command.SetIn(bytes.NewReader(payload))
+	command.SetArgs([]string{"draw", "--hook"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	dataStore, err := store.New(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedstocks, warnings, err := dataStore.ListFeedstocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(feedstocks) != 0 {
+		t.Fatalf("feedstocks = %#v, warnings = %#v", feedstocks, warnings)
+	}
+}
+
 func TestDrawHookIgnoresRetiredGlobalLock(t *testing.T) {
 	rootDir := t.TempDir()
 	sourceDir := t.TempDir()
