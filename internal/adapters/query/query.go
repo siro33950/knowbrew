@@ -537,6 +537,9 @@ func syncKnowledge(
 	for _, file := range files {
 		current[file.Path] = struct{}{}
 		previous, exists := indexed[file.Path]
+		if exists && previous.ModTime == file.ModTime && previous.Size == file.Size {
+			continue
+		}
 		knowledge, body, err := dataStore.ReadKnowledge(file.Path)
 		if err != nil {
 			warnings = append(warnings, diagnostic.FromError(file.Path, err))
@@ -553,9 +556,6 @@ func syncKnowledge(
 					return warnings, err
 				}
 			}
-			continue
-		}
-		if exists && previous.ModTime == file.ModTime && previous.Size == file.Size {
 			continue
 		}
 		subjects, _ := json.Marshal(domain.UniqueSorted([]string{knowledge.Subject}))
