@@ -81,21 +81,6 @@ func TestExtractKnowledgeCreatesUnorganizedRecords(t *testing.T) {
 	}
 }
 
-func TestExtractKnowledgeRejectsMoreThanSixteenDrafts(t *testing.T) {
-	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
-	drafts := make([]KnowledgeDraft, MaxKnowledgePerFeedstock+1)
-	for index := range drafts {
-		drafts[index] = KnowledgeDraft{Type: "property", Statement: "A durable fact."}
-	}
-	_, err := ExtractKnowledge(
-		annotatedFeedstock("fs-source", now), drafts, testVocabulary(),
-		func() string { return "kn-unused" }, now.Add(time.Minute),
-	)
-	if err == nil || !strings.Contains(err.Error(), "at most 16") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
 func TestExtractKnowledgeRejectsWholeBatchOnDuplicateID(t *testing.T) {
 	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
 	_, err := ExtractKnowledge(

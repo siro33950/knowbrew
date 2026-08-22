@@ -8,8 +8,6 @@ import (
 	"time"
 )
 
-const MaxKnowledgePerFeedstock = 16
-
 type ResolutionKind string
 
 const (
@@ -68,12 +66,6 @@ func ExtractKnowledge(
 	newKnowledgeID func() string,
 	now time.Time,
 ) ([]KnowledgeRecord, error) {
-	if len(drafts) > MaxKnowledgePerFeedstock {
-		return nil, fmt.Errorf(
-			"at most %d Knowledge drafts are allowed per feedstock",
-			MaxKnowledgePerFeedstock,
-		)
-	}
 	if source.AnnotatedAt == nil {
 		return nil, fmt.Errorf("feedstock %s is not drawn", source.ID)
 	}

@@ -8,7 +8,6 @@ import (
 	"io"
 
 	"github.com/siro33950/knowbrew/internal/application/agent"
-	"github.com/siro33950/knowbrew/internal/domain"
 )
 
 func DecodeResult(data json.RawMessage, target any) error {
@@ -51,7 +50,7 @@ func resultSchema(task Task, typeNames []string) map[string]any {
 			[]string{"knowledge"},
 			map[string]any{
 				"knowledge": map[string]any{
-					"type": "array", "maxItems": domain.MaxKnowledgePerFeedstock,
+					"type":  "array",
 					"items": knowledgeDraftSchema(typeNames),
 				},
 			},

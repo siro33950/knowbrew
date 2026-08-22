@@ -222,7 +222,7 @@ func TestB004B005B006HookDefersOnlyTheLatestUnfinishedTurn(t *testing.T) {
 	}
 }
 
-func TestB008B009B010B011B016ExtractionPersistenceRules(t *testing.T) {
+func TestB008B009B011B016ExtractionPersistenceRules(t *testing.T) {
 	root := t.TempDir()
 	dataStore, err := store.New(root)
 	if err != nil {
@@ -259,22 +259,24 @@ func TestB008B009B010B011B016ExtractionPersistenceRules(t *testing.T) {
 	if err != nil || len(files) != 2 {
 		t.Fatalf("duplicate files = %#v, error = %v", files, err)
 	}
-	sixteen := writeSource("fs-sixteen", base.Add(2*time.Minute))
-	drafts := make([]domain.KnowledgeDraft, domain.MaxKnowledgePerFeedstock)
+	many := writeSource("fs-many", base.Add(2*time.Minute))
+	drafts := make([]domain.KnowledgeDraft, 20)
 	for index := range drafts {
 		drafts[index] = domain.KnowledgeDraft{
 			Type: "property", Statement: fmt.Sprintf("Subjectless fact %d.", index),
 		}
 	}
-	if created, err := ApplyExtraction(context.Background(), repository, sixteen.ID, drafts); err != nil || created != 16 {
-		t.Fatalf("sixteen: created = %d, error = %v", created, err)
+	created, err := ApplyExtraction(context.Background(), repository, many.ID, drafts)
+	if err != nil || created != len(drafts) {
+		t.Fatalf("many: created = %d, error = %v", created, err)
 	}
-	seventeen := writeSource("fs-seventeen", base.Add(3*time.Minute))
-	drafts = append(drafts, domain.KnowledgeDraft{Type: "property", Statement: "Extra fact."})
-	if _, err := ApplyExtraction(context.Background(), repository, seventeen.ID, drafts); err == nil {
-		t.Fatal("seventeen drafts were accepted")
+	rejected := writeSource("fs-rejected", base.Add(3*time.Minute))
+	if _, err := ApplyExtraction(context.Background(), repository, rejected.ID, []domain.KnowledgeDraft{{
+		Type: "unknown-type", Statement: "An unusable draft.",
+	}}); err == nil {
+		t.Fatal("a draft with an unknown type was accepted")
 	}
-	stored, _, err := dataStore.FindFeedstock(seventeen.ID)
+	stored, _, err := dataStore.FindFeedstock(rejected.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
