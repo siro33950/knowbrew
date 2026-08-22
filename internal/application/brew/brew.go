@@ -97,6 +97,7 @@ func (service Service) RunWithOptions(ctx context.Context, options Options) (Sum
 		"Brewing · 0/%d subjects · %d workers · %s",
 		len(selected), concurrency, agent.FormatUsage(agent.Usage{}),
 	))
+	cache := newFeedstockCache()
 	jobs := make(chan string)
 	results := make(chan subjectRunResult, len(selected))
 	var workers sync.WaitGroup
@@ -105,7 +106,7 @@ func (service Service) RunWithOptions(ctx context.Context, options Options) (Sum
 		go func() {
 			defer workers.Done()
 			for subject := range jobs {
-				results <- service.processSubject(ctx, subject)
+				results <- service.processSubject(ctx, cache, subject)
 			}
 		}()
 	}
@@ -169,7 +170,11 @@ func (service Service) RunWithOptions(ctx context.Context, options Options) (Sum
 	return summary, nil
 }
 
-func (service Service) processSubject(ctx context.Context, subject string) (result subjectRunResult) {
+func (service Service) processSubject(
+	ctx context.Context,
+	cache *feedstockCache,
+	subject string,
+) (result subjectRunResult) {
 	result.subject = subject
 	release := func() error { return nil }
 	if service.Claimer != nil {
@@ -185,7 +190,7 @@ func (service Service) processSubject(ctx context.Context, subject string) (resu
 			result.err = err
 		}
 	}()
-	snapshot, warnings, err := loadSubjectSnapshot(service.Repository, subject)
+	snapshot, warnings, err := loadSubjectSnapshot(service.Repository, cache, subject)
 	result.warnings = append(result.warnings, warnings...)
 	if err != nil {
 		result.err = err
@@ -217,9 +222,12 @@ func (service Service) processSubject(ctx context.Context, subject string) (resu
 		result.err = errors.New("brew result actions are required")
 		return result
 	}
-	result.changed, result.err = ApplyOrganization(
-		ctx, service.Repository, snapshot, *output.Actions,
+	changed, applyWarnings, err := ApplyOrganization(
+		ctx, service.Repository, cache, snapshot, *output.Actions,
 	)
+	result.warnings = append(result.warnings, applyWarnings...)
+	result.changed = changed
+	result.err = err
 	return result
 }
 

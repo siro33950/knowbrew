@@ -2043,11 +2043,11 @@ func TestSelectUnfinishedCandidatesUsesSourceSequenceWhenTimestampsMatch(t *test
 		{ID: "second", Session: domain.SessionRef{ID: "session"}, Timestamp: timestamp, SourceSequence: 2},
 		{ID: "third", Session: domain.SessionRef{ID: "session"}, Timestamp: timestamp, SourceSequence: 3},
 	}
-	selected := selectUnfinishedCandidates(candidates, nil, 2, OrderNewest)
+	selected := selectUnfinishedCandidates(candidates, nil, 2, OrderNewest, false)
 	if len(selected) != 2 || selected[0].ID != "third" || selected[1].ID != "second" {
 		t.Fatalf("selected = %#v", selected)
 	}
-	oldest := selectUnfinishedCandidates(candidates, nil, 2, OrderOldest)
+	oldest := selectUnfinishedCandidates(candidates, nil, 2, OrderOldest, false)
 	if len(oldest) != 2 || oldest[0].ID != "first" || oldest[1].ID != "second" {
 		t.Fatalf("oldest = %#v", oldest)
 	}

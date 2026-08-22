@@ -201,6 +201,12 @@ func TestB013B032RunUsesOnlyOrganizedApprovedCurrentKnowledge(t *testing.T) {
 			testKnowledge(rootID, "knowbrew", "Existing evidence.", true),
 			testKnowledge(candidateID, "knowbrew", "New evidence.", true),
 			testKnowledge(pendingID, "knowbrew", "Pending evidence.", false),
+			{
+				Knowledge: domain.Knowledge{
+					ID: "kn-unorganized", Subject: "knowbrew", Type: "property", Approved: true,
+				},
+				Statement: "Unorganized evidence.",
+			},
 			{Knowledge: domain.Knowledge{ID: "kn-subjectless", Type: "property"}, Statement: "Subjectless evidence."},
 		},
 		documents: map[string]domain.DistilledDocument{
@@ -234,6 +240,8 @@ func TestB013B032RunUsesOnlyOrganizedApprovedCurrentKnowledge(t *testing.T) {
 	selection := runner.calls[0].prompt
 	if !strings.Contains(selection, `"reference": "K001"`) || strings.Contains(selection, candidateID) ||
 		strings.Contains(selection, rootID) ||
+		strings.Contains(selection, "Unorganized evidence.") ||
+		strings.Contains(selection, "Subjectless evidence.") ||
 		strings.Contains(selection, "Old document body") || strings.Contains(selection, pendingID) {
 		t.Fatalf("selection prompt has wrong inputs:\n%s", selection)
 	}

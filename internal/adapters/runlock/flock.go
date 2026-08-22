@@ -33,7 +33,9 @@ func (claimer FileClaimer) Claim(ctx context.Context, key string) (func() error,
 	if claimer.Root == "" {
 		return nil, errors.New("claim root is required")
 	}
-	if claimer.Namespace == "" || filepath.Base(claimer.Namespace) != claimer.Namespace {
+	switch {
+	case claimer.Namespace == "", claimer.Namespace == ".", claimer.Namespace == "..",
+		filepath.Base(claimer.Namespace) != claimer.Namespace:
 		return nil, errors.New("claim namespace must be one path segment")
 	}
 	digest := sha256.Sum256([]byte(key))

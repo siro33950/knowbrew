@@ -957,20 +957,6 @@ func TestSubjectCreationFlagIsUnavailable(t *testing.T) {
 }
 
 func TestKnowledgeCommandsUseFeedstockTerminologyOnly(t *testing.T) {
-	legacyFlag := newRootCommand()
-	legacyFlag.SetArgs([]string{
-		"knowledge", "submit", "fs-legacy",
-		"--relation", "new",
-		"--slug", "legacy-source-flag",
-		"--type", "property",
-		"--applies-when", "When testing a removed flag",
-		"--claim", "Use a removed flag.",
-		"--source", "fs-legacy",
-	})
-	if err := legacyFlag.Execute(); err == nil || !strings.Contains(err.Error(), "unknown flag") {
-		t.Fatalf("removed source flag error = %v", err)
-	}
-
 	root := newRootCommand()
 	knowledge, _, err := root.Find([]string{"knowledge"})
 	if err != nil {

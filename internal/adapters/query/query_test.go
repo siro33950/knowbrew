@@ -191,6 +191,16 @@ func TestB014B017UnorganizedKnowledgeIsNeverSearchableAndRemovesAnIndexedRecord(
 	if hidden.Total != 0 {
 		t.Fatalf("unorganized search = %#v", hidden)
 	}
+	subjectless, err := Search(context.Background(), dataStore, SearchOptions{
+		Target: TargetKnowledge, Keywords: []string{"Subjectless unorganized claim"},
+		IncludePending: true, Limit: 10, MaxTokens: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subjectless.Total != 0 {
+		t.Fatalf("unorganized search without a subject filter = %#v", subjectless)
+	}
 }
 
 func TestKnowledgeSearchTimestampUsesEstablishedSourceEvent(t *testing.T) {

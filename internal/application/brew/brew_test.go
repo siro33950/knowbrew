@@ -138,7 +138,7 @@ func TestB020BrewPromptContainsEveryOrganizedHead(t *testing.T) {
 	root := t.TempDir()
 	dataStore, repository := newBrewStore(t, root, "knowbrew")
 	base := time.Now().UTC().Add(-time.Hour)
-	for index := 0; index < 36; index++ {
+	for index := range 36 {
 		seedKnowledge(
 			t, dataStore, repository, fmt.Sprintf("kn-head-%02d", index), "knowbrew",
 			fmt.Sprintf("Existing fact %02d.", index), base.Add(time.Duration(index)*time.Minute), true,
@@ -157,7 +157,7 @@ func TestB020BrewPromptContainsEveryOrganizedHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	prompt := runner.prompts["knowbrew"]
-	for index := 0; index < 36; index++ {
+	for index := range 36 {
 		id := fmt.Sprintf("kn-head-%02d", index)
 		if !strings.Contains(prompt, id) {
 			t.Fatalf("prompt is missing %s", id)
@@ -250,14 +250,15 @@ func TestB027InvalidOrganizationPlanCanRetryOnlyUnfinishedInputs(t *testing.T) {
 	dataStore, repository := newBrewStore(t, root, "knowbrew")
 	first := seedKnowledge(t, dataStore, repository, "kn-first", "knowbrew", "First fact.", time.Now().UTC(), false)
 	second := seedKnowledge(t, dataStore, repository, "kn-second", "knowbrew", "Second fact.", time.Now().UTC().Add(time.Minute), false)
-	snapshot, _, err := loadSubjectSnapshot(repository, "knowbrew")
+	snapshot, _, err := loadSubjectSnapshot(repository, newFeedstockCache(), "knowbrew")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = ApplyOrganization(context.Background(), repository, snapshot, []domain.OrganizationAction{{
-		KnowledgeID: first.Knowledge.ID,
-		Resolution:  domain.Resolution{Kind: domain.ResolutionDiscard},
-	}})
+	_, _, err = ApplyOrganization(
+		context.Background(), repository, newFeedstockCache(), snapshot, []domain.OrganizationAction{{
+			KnowledgeID: first.Knowledge.ID,
+			Resolution:  domain.Resolution{Kind: domain.ResolutionDiscard},
+		}})
 	if err == nil {
 		t.Fatal("invalid plan succeeded")
 	}
@@ -266,10 +267,11 @@ func TestB027InvalidOrganizationPlanCanRetryOnlyUnfinishedInputs(t *testing.T) {
 			t.Fatalf("%s was partially consumed: %v", id, err)
 		}
 	}
-	changed, err := ApplyOrganization(context.Background(), repository, snapshot, []domain.OrganizationAction{
-		{KnowledgeID: first.Knowledge.ID, Resolution: domain.Resolution{Kind: domain.ResolutionNew}},
-		{KnowledgeID: second.Knowledge.ID, Resolution: domain.Resolution{Kind: domain.ResolutionNew}},
-	})
+	changed, _, err := ApplyOrganization(
+		context.Background(), repository, newFeedstockCache(), snapshot, []domain.OrganizationAction{
+			{KnowledgeID: first.Knowledge.ID, Resolution: domain.Resolution{Kind: domain.ResolutionNew}},
+			{KnowledgeID: second.Knowledge.ID, Resolution: domain.Resolution{Kind: domain.ResolutionNew}},
+		})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +328,7 @@ func TestB023B027OrganizationLeavesInputsAddedAfterSnapshotForNextRun(t *testing
 		t, dataStore, repository, "kn-first", "knowbrew", "First fact.",
 		time.Now().UTC(), false,
 	)
-	snapshot, _, err := loadSubjectSnapshot(repository, "knowbrew")
+	snapshot, _, err := loadSubjectSnapshot(repository, newFeedstockCache(), "knowbrew")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,10 +336,11 @@ func TestB023B027OrganizationLeavesInputsAddedAfterSnapshotForNextRun(t *testing
 		t, dataStore, repository, "kn-second", "knowbrew", "Second fact.",
 		time.Now().UTC().Add(time.Minute), false,
 	)
-	if _, err := ApplyOrganization(context.Background(), repository, snapshot, []domain.OrganizationAction{{
-		KnowledgeID: first.Knowledge.ID,
-		Resolution:  domain.Resolution{Kind: domain.ResolutionNew},
-	}}); err != nil {
+	if _, _, err := ApplyOrganization(
+		context.Background(), repository, newFeedstockCache(), snapshot, []domain.OrganizationAction{{
+			KnowledgeID: first.Knowledge.ID,
+			Resolution:  domain.Resolution{Kind: domain.ResolutionNew},
+		}}); err != nil {
 		t.Fatal(err)
 	}
 	firstFile, err := dataStore.FindKnowledge(first.Knowledge.ID)

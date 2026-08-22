@@ -357,9 +357,8 @@ func selectUnfinishedCandidates(
 	existing map[string]domain.Feedstock,
 	limit int,
 	order applicationsource.Order,
-	hookMode ...bool,
+	hook bool,
 ) []domain.FeedstockCandidate {
-	hook := len(hookMode) > 0 && hookMode[0]
 	unfinished := make([]domain.FeedstockCandidate, 0)
 	for _, candidate := range candidates {
 		feedstock, exists := existing[candidate.ID]

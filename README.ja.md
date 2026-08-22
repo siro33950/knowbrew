@@ -50,7 +50,8 @@ knowbrew init
 
 **承認するのはあなた** — Brew後の整理済みknowledgeも `approved` が未チェックです。
 Obsidian でチェックするか、Markdown を `approved: true` に書き換えてください。
-そこで初めてエージェントから見えるようになります。
+未承認knowledgeは既定の検索には出ず、`--include-pending` を付けたときだけ現れます。
+Distill とSessionStart注入に入るのは承認済みknowledgeだけです。
 
 **`distill`** は、承認済みかつ現行のknowledgeからsubjectごとの読み物を再生成します。
 各文書はsubjectに割り当てたTemplateに従い、実際に利用したKnowledge IDを記録します。
@@ -71,6 +72,10 @@ knowbrew init
 現在の設定が初期値として読み込まれ、尋ねなかった項目はそのまま維持されます。
 
 そのうえで知識ベースを構築します。
+
+> **二段Draw より前のリリースからの更新時** — 先に `masters/subjects` と
+> `masters/types` を除くroot配下のデータをすべて削除してください。Feedstockと
+> Knowledgeの進捗表現が変わり、既存データの移行処理はありません。
 
 ```sh
 knowbrew draw    # セッションログ → feedstock + 未整理knowledge
@@ -96,7 +101,8 @@ knowbrew distill --max 2
 
 drawのサマリには、今回の対象数を`turns_selected`、対象範囲に残る未完了数を
 `turns_pending`として出力します。
-Brewの`--max`は未整理Knowledgeを持つSubjectを数えます。
+Brewの`--max`は未整理Knowledgeを持つSubjectを数えます。実際にKnowledgeが変わった
+Subjectは`changed_subjects`に出るので、承認の着手点として使えます。
 DistillではSubject文書を数えます。
 上限付きDistillは次回、次のSubjectとTemplateから続行するため、各文書が再生成可能な
 ままでも、繰り返し実行すれば割り当て済み文書を順番に処理できます。

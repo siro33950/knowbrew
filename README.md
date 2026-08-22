@@ -53,7 +53,9 @@ that Subject, then keeps, merges, replaces, or discards it.
 
 **You approve.** Organized Knowledge remains unchecked after Brew. Check its
 `approved` property in Obsidian, or change it to `approved: true` in Markdown.
-Only then can your agent see it.
+Unapproved Knowledge stays out of the default search; `--include-pending` shows
+it. Only approved Knowledge reaches your agent through Distill and
+session-start injection.
 
 **`distill`** regenerates readable Subject documents from approved, current
 knowledge. Each document follows a Template assigned by its Subject and records
@@ -76,6 +78,10 @@ turn. Running `init` again seeds the form from your current configuration and
 keeps settings it does not ask about.
 
 Then build your knowledge base:
+
+> **Upgrading from a release before the two-stage Draw?** Delete everything
+> under the root except `masters/subjects` and `masters/types` first. Feedstock
+> and Knowledge progress changed shape, and no migration runs on existing data.
 
 ```sh
 knowbrew draw    # session logs → feedstock + unorganized knowledge
@@ -103,8 +109,9 @@ knowbrew distill --max 2
 
 The draw summary reports `turns_selected` for the current run and
 `turns_pending` for the unfinished turns remaining in its source scope.
-For Brew, `--max` counts Subjects with unorganized Knowledge. For Distill, it
-counts Subject documents. Bounded Distill runs continue from the next Subject and Template on
+For Brew, `--max` counts Subjects with unorganized Knowledge, and
+`changed_subjects` names the Subjects whose Knowledge actually changed, so you
+know where to start approving. For Distill, `--max` counts Subject documents. Bounded Distill runs continue from the next Subject and Template on
 the following run, so repeated invocations rotate through all assigned
 documents even though each document remains regenerable.
 

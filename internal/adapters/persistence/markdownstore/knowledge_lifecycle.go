@@ -42,6 +42,7 @@ func (s *Store) ReplacePendingKnowledgeEvidence(
 	}
 	replacement.Created = current.Created
 	replacement.ID = current.ID
+	replacement.OrganizedAt = current.OrganizedAt
 	replacement.Updated = when
 	replacement.Approved = false
 	replacement.InvalidatedAt = nil
