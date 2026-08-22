@@ -19,6 +19,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/siro33950/knowbrew/internal/adapters/config"
 	"github.com/siro33950/knowbrew/internal/adapters/llm"
+	persistenceadapter "github.com/siro33950/knowbrew/internal/adapters/persistence"
 	"github.com/siro33950/knowbrew/internal/adapters/persistence/markdownstore"
 	"github.com/siro33950/knowbrew/internal/adapters/query"
 	"github.com/siro33950/knowbrew/internal/adapters/source/parser"
@@ -28,6 +29,276 @@ import (
 type annotatingRunner struct {
 	store *store.Store
 	usage llm.Usage
+}
+
+type twoStageRunner struct {
+	mu              sync.Mutex
+	drawCalls       int
+	extractionCalls int
+	prompts         []string
+}
+
+func (runner *twoStageRunner) Run(
+	_ context.Context,
+	task llm.Task,
+	_, prompt string,
+) (llm.RunResult, error) {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	switch task {
+	case llm.TaskDraw:
+		runner.drawCalls++
+		return llm.RunResult{Output: json.RawMessage(
+			`{"summary":"A durable property was established.","types":["property"]}`,
+		)}, nil
+	case llm.TaskExtract:
+		runner.extractionCalls++
+		runner.prompts = append(runner.prompts, prompt)
+		return llm.RunResult{Output: json.RawMessage(
+			`{"knowledge":[{"type":"property","subject":"knowbrew","statement":"The durable property applies.","rationale":""}]}`,
+		)}, nil
+	default:
+		return llm.RunResult{}, fmt.Errorf("unexpected task %s", task)
+	}
+}
+
+func TestB001B003DrawCompletesBothStagesWithoutKnowledgeCatalog(t *testing.T) {
+	root := t.TempDir()
+	dataStore, err := store.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{Name: "knowbrew"}); err != nil {
+		t.Fatal(err)
+	}
+	sourceDir := t.TempDir()
+	logPath := filepath.Join(sourceDir, "session.jsonl")
+	log := `{"type":"user","uuid":"turn-1","sessionId":"session-id","timestamp":"2026-07-30T01:02:03Z","cwd":"/repo","message":{"role":"user","content":"remember this property"}}
+{"type":"assistant","sessionId":"session-id","timestamp":"2026-07-30T01:02:04Z","message":{"role":"assistant","content":"Understood."}}
+{"type":"user","sessionId":"session-id","timestamp":"2026-07-30T01:02:05Z","message":{"role":"user","content":"[Request interrupted by user]"}}
+`
+	if err := os.WriteFile(logPath, []byte(log), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{
+		Root: root, Path: filepath.Join(root, ".knowbrew", "config.toml"),
+		LLM:     config.LLM{Backend: "claude-cli"},
+		Sources: []config.Source{{Agent: "claude", Parser: "claude", Paths: []string{sourceDir}}},
+	}
+	runner := &twoStageRunner{}
+	summary, err := Run(context.Background(), cfg, []string{logPath}, runner, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.FeedstocksAcquired != 1 || summary.FeedstocksDrawn != 1 ||
+		summary.FeedstocksExtracted != 1 || summary.KnowledgeCreated != 1 {
+		t.Fatalf("summary = %#v", summary)
+	}
+	files, warnings, err := dataStore.ListAllKnowledge()
+	if err != nil || len(warnings) != 0 {
+		t.Fatalf("knowledge error = %v, warnings = %#v", err, warnings)
+	}
+	if len(files) != 1 || files[0].Knowledge.OrganizedAt != nil ||
+		len(files[0].Knowledge.Supersedes) != 0 {
+		t.Fatalf("knowledge = %#v", files)
+	}
+	if len(runner.prompts) != 1 || strings.Contains(runner.prompts[0], "organized_heads") ||
+		strings.Contains(runner.prompts[0], "knowledge catalog") {
+		t.Fatalf("extraction prompt = %q", runner.prompts)
+	}
+}
+
+type concurrentExtractionRunner struct {
+	active  atomic.Int32
+	maximum atomic.Int32
+	barrier chan struct{}
+}
+
+func (runner *concurrentExtractionRunner) Run(
+	_ context.Context,
+	task llm.Task,
+	_, _ string,
+) (llm.RunResult, error) {
+	if task != llm.TaskExtract {
+		return llm.RunResult{}, fmt.Errorf("unexpected task %s", task)
+	}
+	current := runner.active.Add(1)
+	defer runner.active.Add(-1)
+	for {
+		maximum := runner.maximum.Load()
+		if current <= maximum || runner.maximum.CompareAndSwap(maximum, current) {
+			break
+		}
+	}
+	<-runner.barrier
+	return llm.RunResult{Output: json.RawMessage(`{"knowledge":[]}`)}, nil
+}
+
+func TestB002DrawExtractionUsesConfiguredConcurrency(t *testing.T) {
+	root := t.TempDir()
+	dataStore, err := store.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &persistenceadapter.Markdown{Store: dataStore}
+	base := time.Now().UTC()
+	var feedstocks []domain.Feedstock
+	snapshots := make(map[string][]domain.FeedstockCandidate)
+	for index := range 2 {
+		id := fmt.Sprintf("fs-concurrent-%d", index)
+		annotatedAt := base
+		feedstock := domain.Feedstock{
+			Schema: domain.SchemaVersion, ID: id, TurnID: "turn-" + id,
+			Session: domain.SessionRef{ID: "session-" + id}, Timestamp: base.Add(time.Duration(index) * time.Minute),
+			Agent: "codex", Types: []domain.KnowledgeType{"property"}, Summary: "Durable fact.",
+			AnnotatedAt: &annotatedAt,
+		}
+		if err := dataStore.WriteFeedstock(feedstock); err != nil {
+			t.Fatal(err)
+		}
+		feedstocks = append(feedstocks, feedstock)
+		snapshots[id] = []domain.FeedstockCandidate{{
+			ID: id, TurnID: feedstock.TurnID, Session: feedstock.Session,
+			Timestamp: feedstock.Timestamp, Agent: feedstock.Agent,
+			Dialogue: []domain.DialogueMessage{{Role: "user", Content: "Remember this."}},
+		}}
+	}
+	runner := &concurrentExtractionRunner{barrier: make(chan struct{})}
+	done := make(chan drawPipelineResult, 1)
+	go func() {
+		done <- runDrawPipeline(context.Background(), Service{
+			Settings: Settings{Concurrency: 2}, Repository: repository, Runner: runner,
+		}, feedstocks, snapshots, feedstocks, 2)
+	}()
+	deadline := time.After(5 * time.Second)
+	for runner.maximum.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatal("extraction did not run concurrently")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	close(runner.barrier)
+	result := <-done
+	if result.extracted != 2 || result.failed != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestB004B005B006HookDefersOnlyTheLatestUnfinishedTurn(t *testing.T) {
+	base := time.Now().UTC()
+	candidates := []domain.FeedstockCandidate{
+		{ID: "fs-first", Agent: "codex", Session: domain.SessionRef{ID: "session"}, SourceSequence: 1, Timestamp: base},
+		{ID: "fs-second", Agent: "codex", Session: domain.SessionRef{ID: "session"}, SourceSequence: 2, Timestamp: base.Add(time.Minute)},
+		{ID: "fs-third", Agent: "codex", Session: domain.SessionRef{ID: "session"}, SourceSequence: 3, Timestamp: base.Add(2 * time.Minute)},
+	}
+	existing := map[string]domain.Feedstock{
+		"fs-first":  {ID: "fs-first"},
+		"fs-second": {ID: "fs-second"},
+	}
+	selected := selectUnfinishedCandidates(candidates, existing, 0, OrderOldest, true)
+	if got := candidateIDs(selected); !slices.Equal(got, []string{"fs-first", "fs-second"}) {
+		t.Fatalf("first hook = %#v", got)
+	}
+	done := base
+	first := existing["fs-first"]
+	first.ExtractedAt = &done
+	existing["fs-first"] = first
+	second := existing["fs-second"]
+	second.ExtractedAt = &done
+	existing["fs-second"] = second
+	candidates = append(candidates, domain.FeedstockCandidate{
+		ID: "fs-fourth", Agent: "codex", Session: domain.SessionRef{ID: "session"},
+		SourceSequence: 4, Timestamp: base.Add(3 * time.Minute),
+	})
+	selected = selectUnfinishedCandidates(candidates, existing, 0, OrderOldest, true)
+	if got := candidateIDs(selected); !slices.Equal(got, []string{"fs-third"}) {
+		t.Fatalf("second hook = %#v", got)
+	}
+	selected = selectUnfinishedCandidates(candidates, existing, 0, OrderOldest, false)
+	if got := candidateIDs(selected); !slices.Equal(got, []string{"fs-third", "fs-fourth"}) {
+		t.Fatalf("batch = %#v", got)
+	}
+}
+
+func TestB008B009B010B011B016ExtractionPersistenceRules(t *testing.T) {
+	root := t.TempDir()
+	dataStore, err := store.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{Name: "knowbrew"}); err != nil {
+		t.Fatal(err)
+	}
+	repository := &persistenceadapter.Markdown{Store: dataStore}
+	base := time.Now().UTC()
+	writeSource := func(id string, at time.Time) domain.Feedstock {
+		annotatedAt := at
+		feedstock := domain.Feedstock{
+			Schema: domain.SchemaVersion, ID: id, TurnID: "turn-" + id,
+			Session: domain.SessionRef{ID: "session-" + id}, Timestamp: at, Agent: "codex",
+			Types: []domain.KnowledgeType{"property"}, Summary: "Durable fact.", AnnotatedAt: &annotatedAt,
+		}
+		if err := dataStore.WriteFeedstock(feedstock); err != nil {
+			t.Fatal(err)
+		}
+		return feedstock
+	}
+	first := writeSource("fs-first", base)
+	second := writeSource("fs-second", base.Add(time.Minute))
+	for _, source := range []domain.Feedstock{first, second} {
+		created, err := ApplyExtraction(context.Background(), repository, source.ID, []domain.KnowledgeDraft{{
+			Type: "property", Subject: "knowbrew", Statement: "The same fact applies.",
+		}})
+		if err != nil || created != 1 {
+			t.Fatalf("extract %s: created = %d, error = %v", source.ID, created, err)
+		}
+	}
+	files, _, err := dataStore.ListAllKnowledge()
+	if err != nil || len(files) != 2 {
+		t.Fatalf("duplicate files = %#v, error = %v", files, err)
+	}
+	sixteen := writeSource("fs-sixteen", base.Add(2*time.Minute))
+	drafts := make([]domain.KnowledgeDraft, domain.MaxKnowledgePerFeedstock)
+	for index := range drafts {
+		drafts[index] = domain.KnowledgeDraft{
+			Type: "property", Statement: fmt.Sprintf("Subjectless fact %d.", index),
+		}
+	}
+	if created, err := ApplyExtraction(context.Background(), repository, sixteen.ID, drafts); err != nil || created != 16 {
+		t.Fatalf("sixteen: created = %d, error = %v", created, err)
+	}
+	seventeen := writeSource("fs-seventeen", base.Add(3*time.Minute))
+	drafts = append(drafts, domain.KnowledgeDraft{Type: "property", Statement: "Extra fact."})
+	if _, err := ApplyExtraction(context.Background(), repository, seventeen.ID, drafts); err == nil {
+		t.Fatal("seventeen drafts were accepted")
+	}
+	stored, _, err := dataStore.FindFeedstock(seventeen.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ExtractedAt != nil {
+		t.Fatal("failed extraction advanced the feedstock")
+	}
+	additional := writeSource("fs-additional-subjectless", base.Add(4*time.Minute))
+	if created, err := ApplyExtraction(context.Background(), repository, additional.ID, []domain.KnowledgeDraft{{
+		Type: "property", Statement: "An additional subjectless fact.",
+	}}); err != nil || created != 1 {
+		t.Fatalf("additional subjectless: created = %d, error = %v", created, err)
+	}
+	masters, warnings, err := dataStore.LoadMasters("subjects")
+	if err != nil || len(warnings) != 0 || len(masters) != 1 || masters[0].Name != "knowbrew" {
+		t.Fatalf("subjects = %#v, warnings = %#v, error = %v", masters, warnings, err)
+	}
+}
+
+func candidateIDs(candidates []domain.FeedstockCandidate) []string {
+	result := make([]string, len(candidates))
+	for index, candidate := range candidates {
+		result[index] = candidate.ID
+	}
+	return result
 }
 
 type drawResultRunner struct {
@@ -40,7 +311,7 @@ func (runner drawResultRunner) Run(
 	_, _ string,
 ) (llm.RunResult, error) {
 	if task != llm.TaskDraw {
-		return llm.RunResult{}, nil
+		return llm.RunResult{Output: json.RawMessage(`{"knowledge":[]}`)}, nil
 	}
 	return llm.RunResult{Output: runner.output}, nil
 }
@@ -55,7 +326,7 @@ func (runner annotatingRunner) Run(_ context.Context, task llm.Task, _ string, _
 	}, nil
 }
 
-func TestDrawIsIdempotentWithoutPersistentSessionState(t *testing.T) {
+func TestB027DrawIsIdempotentWithoutPersistentSessionState(t *testing.T) {
 	root := t.TempDir()
 	dataStore, _ := store.New(root)
 	sourceDir := t.TempDir()
@@ -135,7 +406,7 @@ func TestDrawValidatesAndPersistsDraftResults(t *testing.T) {
 		{
 			name:          "valid type",
 			output:        `{"summary":"A durable property was established.","types":["property"]}`,
-			wantAnnotated: true, wantTypes: []domain.KnowledgeType{"property"}, wantPending: true,
+			wantAnnotated: true, wantTypes: []domain.KnowledgeType{"property"},
 		},
 	}
 	for _, test := range tests {
@@ -196,8 +467,8 @@ func TestDrawValidatesAndPersistsDraftResults(t *testing.T) {
 			if !slices.Equal(feedstock.Types, test.wantTypes) {
 				t.Fatalf("types = %#v, want %#v", feedstock.Types, test.wantTypes)
 			}
-			if feedstock.PendingBrew() != test.wantPending {
-				t.Fatalf("PendingBrew() = %t, want %t", feedstock.PendingBrew(), test.wantPending)
+			if feedstock.PendingExtraction() != test.wantPending {
+				t.Fatalf("PendingExtraction() = %t, want %t", feedstock.PendingExtraction(), test.wantPending)
 			}
 		})
 	}
@@ -541,13 +812,19 @@ func TestDrawClassifiesOnlyFeedstocksFromSelectedSessions(t *testing.T) {
 	}
 }
 
-func TestConcurrentDrawsWaitAndRemainIdempotent(t *testing.T) {
+func TestB007ConcurrentDrawsWaitAndRemainIdempotent(t *testing.T) {
 	root := t.TempDir()
 	dataStore, _ := store.New(root)
 	sourceDir := t.TempDir()
 	logPath := filepath.Join(sourceDir, "session.jsonl")
 	if err := os.WriteFile(logPath, []byte(
-		`{"type":"user","uuid":"turn","sessionId":"session","timestamp":"2026-07-30T01:02:03Z","message":{"role":"user","content":"concurrent"}}`+"\n"+`{"type":"user","sessionId":"session","timestamp":"2026-07-30T01:02:04Z","message":{"role":"user","content":"[Request interrupted by user]"}}`+"\n",
+		`{"type":"user","uuid":"turn-1","sessionId":"session","timestamp":"2026-07-30T01:02:03Z","message":{"role":"user","content":"first concurrent turn"}}`+"\n"+
+			`{"type":"assistant","sessionId":"session","timestamp":"2026-07-30T01:02:04Z","message":{"role":"assistant","content":"first response"}}`+"\n"+
+			`{"type":"user","uuid":"turn-2","sessionId":"session","timestamp":"2026-07-30T01:02:05Z","message":{"role":"user","content":"second concurrent turn"}}`+"\n"+
+			`{"type":"assistant","sessionId":"session","timestamp":"2026-07-30T01:02:06Z","message":{"role":"assistant","content":"second response"}}`+"\n"+
+			`{"type":"user","uuid":"turn-3","sessionId":"session","timestamp":"2026-07-30T01:02:07Z","message":{"role":"user","content":"third concurrent turn"}}`+"\n"+
+			`{"type":"assistant","sessionId":"session","timestamp":"2026-07-30T01:02:08Z","message":{"role":"assistant","content":"third response"}}`+"\n"+
+			`{"type":"user","sessionId":"session","timestamp":"2026-07-30T01:02:09Z","message":{"role":"user","content":"[Request interrupted by user]"}}`+"\n",
 	), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -559,18 +836,19 @@ func TestConcurrentDrawsWaitAndRemainIdempotent(t *testing.T) {
 	start := make(chan struct{})
 	results := make(chan Summary, 2)
 	errors := make(chan error, 2)
-	for range 2 {
-		go func() {
+	options := []Options{{Paths: []string{logPath}, Hook: true}, {Paths: []string{logPath}}}
+	for _, option := range options {
+		go func(option Options) {
 			<-start
-			summary, err := Run(
-				context.Background(), cfg, nil, annotatingRunner{store: dataStore}, nil,
+			summary, err := RunWithOptions(
+				context.Background(), cfg, option, annotatingRunner{store: dataStore}, nil,
 			)
 			results <- summary
 			errors <- err
-		}()
+		}(option)
 	}
 	close(start)
-	var acquired, annotated int
+	var acquired, annotated, extracted int
 	for range 2 {
 		if err := <-errors; err != nil {
 			t.Fatal(err)
@@ -578,9 +856,13 @@ func TestConcurrentDrawsWaitAndRemainIdempotent(t *testing.T) {
 		summary := <-results
 		acquired += summary.FeedstocksAcquired
 		annotated += summary.FeedstocksDrawn
+		extracted += summary.FeedstocksExtracted
 	}
-	if acquired != 1 || annotated != 1 {
-		t.Fatalf("combined summaries acquired = %d, annotated = %d", acquired, annotated)
+	if acquired != 3 || annotated != 3 || extracted != 3 {
+		t.Fatalf(
+			"combined summaries acquired = %d, annotated = %d, extracted = %d",
+			acquired, annotated, extracted,
+		)
 	}
 }
 
@@ -841,7 +1123,7 @@ func TestDrawPromptIncludesFilteredDialogueWithoutReadInstructions(t *testing.T)
 		"treat knowledge_type_master as the sole authority",
 		"First state to yourself, in one sentence, the durable meaning this turn establishes",
 		"the turn has no durable meaning and types must be an empty array",
-		"Brew re-checks the excludes entries later",
+		"The later extraction stage re-checks the excludes entries",
 		"Do not decide statement wording, meaning boundaries, subject ownership, or final type assignment",
 		`"includes": [`, `"verified runtime behavior"`,
 		`"excludes": [`, `"temporary task progress"`,
@@ -1455,7 +1737,7 @@ func TestDrawReportsActualVerificationError(t *testing.T) {
 	}
 }
 
-func TestDrawLockWaitsUntilHeldLockIsReleased(t *testing.T) {
+func TestDrawDoesNotUseTheRetiredGlobalLock(t *testing.T) {
 	root := t.TempDir()
 	dataStore, _ := store.New(root)
 	if err := dataStore.EnsureLayout(); err != nil {
@@ -1477,19 +1759,14 @@ func TestDrawLockWaitsUntilHeldLockIsReleased(t *testing.T) {
 	}()
 	select {
 	case err := <-done:
-		t.Fatalf("draw returned before lock release: %v", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	if err := lock.Unlock(); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("draw did not continue after lock release")
+		t.Fatal("draw waited for the retired global lock")
+	}
+	if err := lock.Unlock(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1766,11 +2043,11 @@ func TestSelectUnfinishedCandidatesUsesSourceSequenceWhenTimestampsMatch(t *test
 		{ID: "second", Session: domain.SessionRef{ID: "session"}, Timestamp: timestamp, SourceSequence: 2},
 		{ID: "third", Session: domain.SessionRef{ID: "session"}, Timestamp: timestamp, SourceSequence: 3},
 	}
-	selected := selectUnfinishedCandidates(candidates, nil, 2, OrderNewest)
+	selected := selectUnfinishedCandidates(candidates, nil, 2, OrderNewest, false)
 	if len(selected) != 2 || selected[0].ID != "third" || selected[1].ID != "second" {
 		t.Fatalf("selected = %#v", selected)
 	}
-	oldest := selectUnfinishedCandidates(candidates, nil, 2, OrderOldest)
+	oldest := selectUnfinishedCandidates(candidates, nil, 2, OrderOldest, false)
 	if len(oldest) != 2 || oldest[0].ID != "first" || oldest[1].ID != "second" {
 		t.Fatalf("oldest = %#v", oldest)
 	}

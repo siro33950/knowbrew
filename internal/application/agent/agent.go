@@ -6,29 +6,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-
-	"github.com/siro33950/knowbrew/internal/domain"
 )
 
 type Task string
 
 const (
 	TaskDraw            Task = "draw"
+	TaskExtract         Task = "extract"
 	TaskBrew            Task = "brew"
 	TaskDistillSelect   Task = "distill_select"
 	TaskDistillGenerate Task = "distill_generate"
 )
 
 type ReadState struct {
-	Subjects          map[string]SubjectReadState
-	Inspected         []string
-	Submitted         []domain.KnowledgeCandidate
 	AnnotationContext bool
-}
-
-type SubjectReadState struct {
-	Catalog []string
-	Digest  string
 }
 
 type Runner interface {

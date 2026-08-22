@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const SchemaVersion = 6
+const SchemaVersion = 7
 
 type Status string
 
@@ -44,7 +44,7 @@ type Feedstock struct {
 	Types       []KnowledgeType `yaml:"types" json:"types"`
 	Summary     string          `yaml:"summary" json:"summary"`
 	AnnotatedAt *time.Time      `yaml:"annotated_at,omitempty" json:"annotated_at,omitempty"`
-	BrewedAt    *time.Time      `yaml:"brewed_at,omitempty" json:"brewed_at,omitempty"`
+	ExtractedAt *time.Time      `yaml:"extracted_at,omitempty" json:"extracted_at,omitempty"`
 }
 
 type Knowledge struct {
@@ -60,6 +60,7 @@ type Knowledge struct {
 	SupersededBy  string        `yaml:"superseded_by,omitempty" json:"superseded_by,omitempty"`
 	SupersededAt  *time.Time    `yaml:"superseded_at,omitempty" json:"superseded_at,omitempty"`
 	InvalidatedAt *time.Time    `yaml:"invalidated_at,omitempty" json:"invalidated_at,omitempty"`
+	OrganizedAt   *time.Time    `yaml:"organized_at,omitempty" json:"organized_at,omitempty"`
 	Status        Status        `yaml:"-" json:"status"`
 }
 
@@ -185,10 +186,13 @@ func ValidateFeedstock(feedstock Feedstock) error {
 		return fmt.Errorf("unsupported agent %q", feedstock.Agent)
 	}
 	if feedstock.AnnotatedAt == nil {
-		if feedstock.BrewedAt != nil {
-			return errors.New("unannotated feedstock must not have brewed_at")
+		if feedstock.ExtractedAt != nil {
+			return errors.New("unannotated feedstock must not have extracted_at")
 		}
 		return nil
+	}
+	if feedstock.ExtractedAt != nil && feedstock.ExtractedAt.IsZero() {
+		return errors.New("feedstock extracted_at must not be zero")
 	}
 	if strings.TrimSpace(feedstock.Summary) == "" {
 		return errors.New("annotated feedstock summary is required")
@@ -223,6 +227,28 @@ func ValidateKnowledge(knowledge Knowledge) error {
 		}
 		if !slices.Contains(NormalizeMasterNames(knowledge.Feedstocks), establishedBy) {
 			return errors.New("knowledge established_by must also appear in feedstocks")
+		}
+	}
+	subject := MasterName(knowledge.Subject)
+	if subject != "" {
+		if err := ValidateIdentifier(subject, "knowledge subject"); err != nil {
+			return err
+		}
+	}
+	if knowledge.OrganizedAt == nil {
+		if knowledge.Approved {
+			return errors.New("unorganized knowledge must not be approved")
+		}
+		if len(knowledge.Supersedes) != 0 || strings.TrimSpace(knowledge.SupersededBy) != "" ||
+			knowledge.SupersededAt != nil || knowledge.InvalidatedAt != nil {
+			return errors.New("unorganized knowledge must not participate in the lifecycle")
+		}
+	} else {
+		if knowledge.OrganizedAt.IsZero() {
+			return errors.New("knowledge organized_at must not be zero")
+		}
+		if subject == "" {
+			return errors.New("organized knowledge subject is required")
 		}
 	}
 	if knowledge.InvalidatedAt != nil && strings.TrimSpace(knowledge.SupersededBy) != "" {

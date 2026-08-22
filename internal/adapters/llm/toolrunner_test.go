@@ -41,51 +41,15 @@ func TestDecodeToolArgumentsAcceptsOpenAIStringAndOllamaObject(t *testing.T) {
 }
 
 func TestCommandForToolMapsFeedstockWorkflow(t *testing.T) {
-	tests := []struct {
-		name      string
-		arguments map[string]any
-		want      []string
-	}{
-		{
-			name:      "feedstock_context",
-			arguments: map[string]any{"feedstock_id": "fs-1"},
-			want:      []string{"/bin/knowbrew", "feedstock", "context", "fs-1"},
-		},
-		{
-			name: "knowledge_catalog", arguments: map[string]any{"subject": "knowbrew", "query": "verified statement"},
-			want: []string{
-				"/bin/knowbrew", "knowledge", "catalog", "--subject", "knowbrew",
-				"--query", "verified statement",
-			},
-		},
-		{
-			name: "knowledge_show", arguments: map[string]any{"knowledge_ids": []any{"kn-1", "kn-2"}},
-			want: []string{"/bin/knowbrew", "knowledge", "show", "kn-1", "kn-2"},
-		},
-		{
-			name: "knowledge_submit",
-			arguments: map[string]any{
-				"feedstock_id": "fs-1",
-				"knowledge": map[string]any{
-					"type": "property", "subject": "knowbrew", "statement": "A statement.",
-				},
-			},
-			want: []string{
-				"/bin/knowbrew", "knowledge", "submit", "fs-1", "--knowledge",
-				`{"statement":"A statement.","subject":"knowbrew","type":"property"}`,
-			},
-		},
+	command, err := commandForTool(
+		"/bin/knowbrew", "feedstock_context", map[string]any{"feedstock_id": "fs-1"},
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			command, err := commandForTool("/bin/knowbrew", test.name, test.arguments)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(command, test.want) {
-				t.Fatalf("command = %#v, want %#v", command, test.want)
-			}
-		})
+	want := []string{"/bin/knowbrew", "feedstock", "context", "fs-1"}
+	if !reflect.DeepEqual(command, want) {
+		t.Fatalf("command = %#v, want %#v", command, want)
 	}
 }
 
@@ -94,11 +58,10 @@ func TestToolSchemasExposeTaskSpecificOperations(t *testing.T) {
 	if !reflect.DeepEqual(drawSchemas, []string{"feedstock_context"}) {
 		t.Fatalf("draw schemas = %#v", drawSchemas)
 	}
-	brew := schemaNames(toolSchemas(TaskBrew, testKnowledgeTypes))
-	if !reflect.DeepEqual(brew, []string{
-		"knowledge_catalog", "knowledge_show", "knowledge_submit", "feedstock_context",
-	}) {
-		t.Fatalf("brew schemas = %#v", brew)
+	for _, task := range []Task{TaskExtract, TaskBrew} {
+		if schemas := schemaNames(toolSchemas(task, testKnowledgeTypes)); len(schemas) != 0 {
+			t.Fatalf("%s schemas = %#v, want no tools", task, schemas)
+		}
 	}
 	for _, task := range []Task{TaskDistillSelect, TaskDistillGenerate} {
 		if schemas := schemaNames(toolSchemas(task, testKnowledgeTypes)); len(schemas) != 0 {
@@ -113,10 +76,12 @@ func TestToolSchemasExposeTaskSpecificOperations(t *testing.T) {
 			t.Fatalf("%s result schema exposes the wrong reference field: %s", task, encoded)
 		}
 	}
-	for _, forbidden := range []string{"knowledge_propose", "knowledge_search", "feedstock_search", "show"} {
-		if containsString(brew, forbidden) {
-			t.Fatalf("brew schemas expose %q: %#v", forbidden, brew)
-		}
+	encoded, err := json.Marshal(resultSchema(TaskBrew, testKnowledgeTypes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"actions"`) || !strings.Contains(string(encoded), `"discard"`) {
+		t.Fatalf("brew result schema = %s", encoded)
 	}
 
 	drawResult := resultSchema(TaskDraw, []string{"observation", "guideline"})
@@ -140,32 +105,29 @@ func TestToolSchemasExposeTaskSpecificOperations(t *testing.T) {
 	brewResult := resultSchema(TaskBrew, nil)
 	brewRequired := brewResult["required"].([]string)
 	brewProperties := brewResult["properties"].(map[string]any)
-	registered := brewProperties["registered"].(map[string]any)
-	if !reflect.DeepEqual(brewRequired, []string{"registered"}) ||
-		registered["type"] != "integer" || registered["minimum"] != 0 {
+	if !reflect.DeepEqual(brewRequired, []string{"actions"}) || brewProperties["actions"] == nil {
 		t.Fatalf("brew result schema = %#v", brewResult)
 	}
 	brewPrompt := toolSystemPrompt(TaskBrew)
-	for _, required := range []string{"registered", "stale decision", "catalog that subject again"} {
+	for _, required := range []string{"Organize every supplied", "exactly one action", "Never call tools"} {
 		if !strings.Contains(brewPrompt, required) {
 			t.Fatalf("brew system prompt does not contain %q: %s", required, brewPrompt)
 		}
 	}
 
-	submit := toolSchemas(TaskBrew, testKnowledgeTypes)
-	encodedSubmit, err := json.Marshal(submit)
+	encodedActions, err := json.Marshal(brewResult)
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(encodedSubmit)
-	for _, field := range []string{"knowledge_submit", "resolution", "knowledge_ids", "feedstock_id"} {
+	text := string(encodedActions)
+	for _, field := range []string{"actions", "knowledge_id", "resolution", "knowledge_ids"} {
 		if !strings.Contains(text, `"`+field+`"`) {
-			t.Fatalf("submit schema missing %q: %s", field, text)
+			t.Fatalf("action schema missing %q: %s", field, text)
 		}
 	}
-	for _, kind := range []string{"new", "equivalent", "complements", "conflicts"} {
+	for _, kind := range []string{"discard", "new", "equivalent", "complements", "conflicts"} {
 		if !strings.Contains(text, `"`+kind+`"`) {
-			t.Fatalf("submit schema missing resolution %q: %s", kind, text)
+			t.Fatalf("action schema missing resolution %q: %s", kind, text)
 		}
 	}
 	for _, forbidden := range []string{"verification", "corrected_assertion", "assertion_id"} {
@@ -216,21 +178,22 @@ func TestToolRunnerUsesTaskSpecificAPIModelAndEffort(t *testing.T) {
 		return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`), nil
 	})
 	runner := NewToolRunner(config.Config{LLM: config.LLM{
-		Backend: "api", DrawModel: "draw-fast", BrewModel: "brew-quality",
-		DistillModel: "distill-quality", DrawEffort: "low", BrewEffort: "high",
+		Backend: "api", DrawDraftModel: "draw-fast", DrawExtractModel: "extract-quality",
+		BrewModel: "brew-quality", DistillModel: "distill-quality",
+		DrawDraftEffort: "low", DrawExtractEffort: "medium", BrewEffort: "high",
 		DistillEffort: "max",
 	}}, "/bin/knowbrew", t.TempDir(), nil)
 	runner.Client = &http.Client{Transport: transport}
 	for _, task := range []Task{
-		TaskDraw, TaskBrew, TaskDistillSelect, TaskDistillGenerate,
+		TaskDraw, TaskExtract, TaskBrew, TaskDistillSelect, TaskDistillGenerate,
 	} {
 		if _, _, err := runner.complete(context.Background(), task, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if !reflect.DeepEqual(models, []string{
-		"draw-fast", "brew-quality", "distill-quality", "distill-quality",
-	}) || !reflect.DeepEqual(efforts, []string{"low", "high", "max", "max"}) {
+		"draw-fast", "extract-quality", "brew-quality", "distill-quality", "distill-quality",
+	}) || !reflect.DeepEqual(efforts, []string{"low", "medium", "high", "max", "max"}) {
 		t.Fatalf("models = %#v, efforts = %#v", models, efforts)
 	}
 }
@@ -253,7 +216,8 @@ func TestToolRunnerOmitsEffortWhenEmptyAndForOllama(t *testing.T) {
 			return jsonResponse(test.response), nil
 		})
 		runner := NewToolRunner(config.Config{LLM: config.LLM{
-			Backend: test.backend, DrawModel: "draw", BrewModel: "brew", DrawEffort: test.effort,
+			Backend: test.backend, DrawDraftModel: "draw", BrewModel: "brew",
+			DrawDraftEffort: test.effort,
 		}}, "/bin/knowbrew", t.TempDir(), nil)
 		runner.Client = &http.Client{Transport: transport}
 		if _, _, err := runner.complete(context.Background(), TaskDraw, nil, nil, nil); err != nil {
@@ -270,18 +234,18 @@ func TestToolRunnerStreamsCommandOutputOnlyWhenVerbose(t *testing.T) {
 		transport := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 			rounds++
 			if rounds == 1 {
-				return jsonResponse(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"read-1","type":"function","function":{"name":"knowledge_catalog","arguments":{"subject":"knowbrew","query":"verified statement"}}}]}}]}`), nil
+				return jsonResponse(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"read-1","type":"function","function":{"name":"feedstock_context","arguments":{"feedstock_id":"feedstock-1"}}}]}}]}`), nil
 			}
-			return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"{}"}}]}`), nil
+			return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"{\"summary\":\"summary\",\"types\":[]}"}}]}`), nil
 		})
 		root := t.TempDir()
 		var progress bytes.Buffer
 		runner := NewToolRunner(config.Config{
 			Root: root, Path: filepath.Join(root, "config.toml"),
-			LLM: config.LLM{Backend: "api", BrewModel: "brew", Timeout: "5s"},
+			LLM: config.LLM{Backend: "api", DrawDraftModel: "draw", Timeout: "5s"},
 		}, binary, root, &progress, verbose)
 		runner.Client = &http.Client{Transport: transport}
-		_, err := runner.RunWithUsage(context.Background(), TaskBrew, "feedstock-1", "brew")
+		_, err := runner.RunWithUsage(context.Background(), TaskDraw, "feedstock-1", "draw")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -304,7 +268,7 @@ func TestToolRunnerReturnsDraftWithoutMutationCommand(t *testing.T) {
 	})
 	runner := NewToolRunner(config.Config{
 		Root: root, Path: filepath.Join(root, "config.toml"),
-		LLM: config.LLM{Backend: "api", DrawModel: "draw", Timeout: "5s"},
+		LLM: config.LLM{Backend: "api", DrawDraftModel: "draw", Timeout: "5s"},
 	}, binary, root, nil)
 	runner.Client = &http.Client{Transport: transport}
 	result, err := runner.Run(context.Background(), TaskDraw, "feedstock-1", "draw")
@@ -338,7 +302,7 @@ func TestToolRunnerCanLoadContextOnceBeforeDrawing(t *testing.T) {
 	})
 	runner := NewToolRunner(config.Config{
 		Root: root, Path: filepath.Join(root, "config.toml"),
-		LLM: config.LLM{Backend: "api", DrawModel: "draw", Timeout: "5s"},
+		LLM: config.LLM{Backend: "api", DrawDraftModel: "draw", Timeout: "5s"},
 	}, binary, root, nil)
 	runner.Client = &http.Client{Transport: transport}
 	if _, err := runner.RunWithUsage(context.Background(), TaskDraw, "feedstock-1", "classify"); err != nil {
@@ -365,7 +329,7 @@ func TestToolRunnerRejectsReadToolForDraw(t *testing.T) {
 	root := t.TempDir()
 	runner := NewToolRunner(config.Config{
 		Root: root, Path: filepath.Join(root, "config.toml"),
-		LLM: config.LLM{Backend: "api", DrawModel: "draw", Timeout: "5s"},
+		LLM: config.LLM{Backend: "api", DrawDraftModel: "draw", Timeout: "5s"},
 	}, "/bin/knowbrew", root, nil)
 	runner.Client = &http.Client{Transport: transport}
 	_, err := runner.Run(context.Background(), TaskDraw, "feedstock-1", "classify")

@@ -1,16 +1,38 @@
 package domain
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestFeedstockTransitionsUseTypeCandidatesAndTurnBrewProgress(t *testing.T) {
+func TestFeedstockExtractionProgressIncludesEmptyTypes(t *testing.T) {
 	now := time.Date(2026, 8, 3, 1, 2, 3, 0, time.UTC)
 	feedstock := validFeedstock("fs-transition", now)
 	if err := feedstock.ApplyDraft(
-		"  The user established durable behavior.  ",
+		"  No durable Knowledge was found.  ",
+		nil,
+		now.Add(time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !feedstock.PendingExtraction() {
+		t.Fatal("annotated feedstock is not pending extraction")
+	}
+	if err := feedstock.ApplyExtractionProgress(now.Add(2 * time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if feedstock.ExtractedAt == nil || feedstock.PendingExtraction() {
+		t.Fatalf("feedstock = %#v", feedstock)
+	}
+}
+
+func TestFeedstockDraftNormalizesTypes(t *testing.T) {
+	now := time.Date(2026, 8, 3, 1, 2, 3, 0, time.UTC)
+	feedstock := validFeedstock("fs-types", now)
+	if err := feedstock.ApplyDraft(
+		"A durable behavior was established.",
 		[]KnowledgeType{"property", "decision", "property"},
 		now.Add(time.Minute),
 	); err != nil {
@@ -18,30 +40,6 @@ func TestFeedstockTransitionsUseTypeCandidatesAndTurnBrewProgress(t *testing.T) 
 	}
 	if got := strings.Join(knowledgeTypeStringsForTest(feedstock.Types), ","); got != "decision,property" {
 		t.Fatalf("types = %q", got)
-	}
-	if !feedstock.PendingBrew() {
-		t.Fatal("annotated feedstock with type candidates is not pending")
-	}
-	if err := feedstock.ApplyBrewProgress(now.Add(2 * time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if feedstock.BrewedAt == nil || feedstock.PendingBrew() {
-		t.Fatalf("feedstock = %#v", feedstock)
-	}
-}
-
-func TestFeedstockWithoutTypeCandidatesIsNotPendingBrew(t *testing.T) {
-	now := time.Date(2026, 8, 3, 1, 2, 3, 0, time.UTC)
-	feedstock := validFeedstock("fs-empty", now)
-	if err := feedstock.ApplyDraft(
-		"No durable Knowledge was found.",
-		nil,
-		now.Add(time.Minute),
-	); err != nil {
-		t.Fatal(err)
-	}
-	if feedstock.PendingBrew() {
-		t.Fatal("feedstock without type candidates is pending Brew")
 	}
 }
 
@@ -60,252 +58,289 @@ func TestValidateFeedstockRequiresNormalizedTypesAndSummaryWhenAnnotated(t *test
 	}
 }
 
-func TestResolveKnowledgeAppliesMultipleCandidatesToOneWorkingSet(t *testing.T) {
-	vocabulary := testVocabulary()
+func TestExtractKnowledgeCreatesUnorganizedRecords(t *testing.T) {
 	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
-	source := annotatedFeedstock("fs-source", now)
-	ids := []string{"kn-first", "kn-second"}
-	index := 0
-	resolved, err := ResolveKnowledge(
-		source,
-		[]KnowledgeCandidate{
-			candidate("First independently maintainable statement.", Resolution{Kind: ResolutionNew}),
-			candidate("Second independently maintainable statement.", Resolution{Kind: ResolutionNew}),
-		},
-		nil,
-		vocabulary,
-		func() string {
-			id := ids[index]
-			index++
-			return id
-		},
-		now.Add(time.Minute),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(resolved.Results) != 2 || len(resolved.Changed) != 2 {
-		t.Fatalf("resolved = %#v", resolved)
-	}
-	for _, id := range ids {
-		if resolved.Changed[id].Knowledge.EstablishedBy != source.ID {
-			t.Fatalf("record %s = %#v", id, resolved.Changed[id])
-		}
-	}
-}
-
-func TestResolveKnowledgeRejectsDuplicateGeneratedID(t *testing.T) {
-	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
-	_, err := ResolveKnowledge(
+	records, err := ExtractKnowledge(
 		annotatedFeedstock("fs-source", now),
-		[]KnowledgeCandidate{
-			candidate("First independently maintainable statement.", Resolution{Kind: ResolutionNew}),
-			candidate("Second independently maintainable statement.", Resolution{Kind: ResolutionNew}),
+		[]KnowledgeDraft{
+			{Type: "property", Subject: "knowbrew", Statement: "A durable fact."},
+			{Type: "property", Statement: "A subjectless fact."},
 		},
-		nil,
 		testVocabulary(),
-		func() string { return "kn-duplicate" },
+		sequenceIDs("kn-first", "kn-second"),
 		now.Add(time.Minute),
 	)
-	if err == nil || !strings.Contains(err.Error(), "knowledge candidate 2: knowledge ID kn-duplicate already exists") {
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || records[0].Knowledge.OrganizedAt != nil || records[1].Knowledge.Subject != "" {
+		t.Fatalf("records = %#v", records)
+	}
+	if records[0].Knowledge.ID != "kn-first" || records[0].Knowledge.EstablishedBy != "fs-source" {
+		t.Fatalf("first record = %#v", records[0])
+	}
+}
+
+func TestExtractKnowledgeRejectsMoreThanSixteenDrafts(t *testing.T) {
+	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	drafts := make([]KnowledgeDraft, MaxKnowledgePerFeedstock+1)
+	for index := range drafts {
+		drafts[index] = KnowledgeDraft{Type: "property", Statement: "A durable fact."}
+	}
+	_, err := ExtractKnowledge(
+		annotatedFeedstock("fs-source", now), drafts, testVocabulary(),
+		func() string { return "kn-unused" }, now.Add(time.Minute),
+	)
+	if err == nil || !strings.Contains(err.Error(), "at most 16") {
 		t.Fatalf("error = %v", err)
 	}
 }
 
-func TestResolveKnowledgeRejectsWholeBatchWhenOneCandidateFails(t *testing.T) {
+func TestExtractKnowledgeRejectsWholeBatchOnDuplicateID(t *testing.T) {
 	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
-	_, err := ResolveKnowledge(
+	_, err := ExtractKnowledge(
 		annotatedFeedstock("fs-source", now),
-		[]KnowledgeCandidate{
-			candidate("Valid statement.", Resolution{Kind: ResolutionNew}),
-			{Type: "unknown", Subject: "knowbrew", Statement: "Invalid statement.", Resolution: Resolution{Kind: ResolutionNew}},
+		[]KnowledgeDraft{
+			{Type: "property", Statement: "First durable fact."},
+			{Type: "property", Statement: "Second durable fact."},
 		},
-		nil,
-		testVocabulary(),
-		func() string { return "kn-generated" },
-		now.Add(time.Minute),
+		testVocabulary(), func() string { return "kn-duplicate" }, now.Add(time.Minute),
 	)
-	if err == nil || !strings.Contains(err.Error(), "knowledge candidate 2") {
+	if err == nil || !strings.Contains(err.Error(), "draft 2") {
 		t.Fatalf("error = %v", err)
 	}
 }
 
-func TestResolveKnowledgeRejectsConflictFromSameFeedstock(t *testing.T) {
-	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
-	source := annotatedFeedstock("fs-source", now)
-	records := map[string]KnowledgeRecord{
-		"kn-existing": {
-			Knowledge: Knowledge{
-				ID: "kn-existing", Created: now, Updated: now, EstablishedBy: source.ID,
-				Type: "property", Subject: "knowbrew", Feedstocks: []string{source.ID}, Status: StatusPending,
-			},
-			Statement: "Existing statement.", Established: source,
-		},
+func TestOrganizeRequiresExactlyOneActionPerInput(t *testing.T) {
+	base := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	inputs := []KnowledgeRecord{
+		unorganizedRecord("kn-first", "First fact.", base),
+		unorganizedRecord("kn-second", "Second fact.", base.Add(time.Minute)),
 	}
-	_, err := ResolveKnowledge(
-		source,
-		[]KnowledgeCandidate{candidate("Conflicting statement.", Resolution{
-			Kind: ResolutionConflicts, KnowledgeIDs: []string{"kn-existing"},
-		})},
-		records,
-		testVocabulary(),
-		func() string { return "kn-generated" },
-		now.Add(time.Minute),
-	)
-	if err == nil || !strings.Contains(err.Error(), "shares source feedstock") {
+	_, err := OrganizeKnowledge(inputs, recordsByID(inputs...), []OrganizationAction{{
+		KnowledgeID: "kn-first", Resolution: Resolution{Kind: ResolutionNew},
+	}}, testVocabulary(), base.Add(time.Hour))
+	if err == nil || !strings.Contains(err.Error(), "omits input kn-second") {
+		t.Fatalf("error = %v", err)
+	}
+	_, err = OrganizeKnowledge(inputs, recordsByID(inputs...), []OrganizationAction{
+		{KnowledgeID: "kn-first", Resolution: Resolution{Kind: ResolutionNew}},
+		{KnowledgeID: "kn-first", Resolution: Resolution{Kind: ResolutionDiscard}},
+	}, testVocabulary(), base.Add(time.Hour))
+	if err == nil || !strings.Contains(err.Error(), "repeats input kn-first") {
 		t.Fatalf("error = %v", err)
 	}
 }
 
-func TestResolveKnowledgeUsesSourceTimeForConflicts(t *testing.T) {
-	vocabulary := testVocabulary()
+func TestOrganizeNewEquivalentComplementAndDiscard(t *testing.T) {
 	base := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
-	originalSource := annotatedFeedstock("fs-original", base)
-	original, err := ResolveKnowledge(
-		originalSource,
-		[]KnowledgeCandidate{candidate("Original behavior applies.", Resolution{Kind: ResolutionNew})},
-		nil,
-		vocabulary,
-		func() string { return "kn-original" },
-		base,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	records := map[string]KnowledgeRecord{"kn-original": original.Changed["kn-original"]}
-	older, err := ResolveKnowledge(
-		annotatedFeedstock("fs-older", base.Add(-time.Hour)),
-		[]KnowledgeCandidate{candidate("Older behavior applies.", Resolution{
-			Kind: ResolutionConflicts, KnowledgeIDs: []string{"kn-original"},
-		})},
+	organizedAt := base.Add(-time.Hour)
+	head := organizedRecord("kn-head", "Existing fact.", base.Add(-time.Hour), organizedAt)
+	newInput := unorganizedRecord("kn-new", "Independent fact.", base)
+	equivalent := unorganizedRecord("kn-equivalent", "Same fact.", base.Add(time.Minute))
+	complement := unorganizedRecord("kn-complement", "Additional fact.", base.Add(2*time.Minute))
+	discard := unorganizedRecord("kn-discard", "Noise.", base.Add(3*time.Minute))
+	records := recordsByID(head, newInput, equivalent, complement, discard)
+	mergedStatement := "Existing and additional facts."
+	resolved, err := OrganizeKnowledge(
+		[]KnowledgeRecord{discard, complement, newInput, equivalent},
 		records,
-		vocabulary,
-		func() string { return "kn-older" },
-		base.Add(time.Minute),
+		[]OrganizationAction{
+			{KnowledgeID: "kn-discard", Resolution: Resolution{Kind: ResolutionDiscard}},
+			{KnowledgeID: "kn-complement", Resolution: Resolution{
+				Kind: ResolutionComplements, KnowledgeIDs: []string{"kn-head"},
+				Draft: &KnowledgeDraft{Type: "property", Subject: "knowbrew", Statement: mergedStatement},
+			}},
+			{KnowledgeID: "kn-new", Resolution: Resolution{Kind: ResolutionNew}},
+			{KnowledgeID: "kn-equivalent", Resolution: Resolution{
+				Kind: ResolutionEquivalent, KnowledgeIDs: []string{"kn-head"},
+			}},
+		},
+		testVocabulary(), base.Add(time.Hour),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if older.Results[0].Outcome != "historical_conflict_ignored" || len(older.Changed) != 0 {
-		t.Fatalf("older = %#v", older)
+	if resolved.Changed["kn-new"].Knowledge.OrganizedAt == nil {
+		t.Fatal("new input was not organized under its own ID")
 	}
-	newer, err := ResolveKnowledge(
-		annotatedFeedstock("fs-newer", base.Add(time.Hour)),
-		[]KnowledgeCandidate{candidate("Newer behavior applies.", Resolution{
-			Kind: ResolutionConflicts, KnowledgeIDs: []string{"kn-original"},
-		})},
-		records,
-		vocabulary,
-		func() string { return "kn-newer" },
-		base.Add(2*time.Hour),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if newer.Results[0].Outcome != "replaced" || newer.Changed["kn-original"].Knowledge.SupersededBy != "kn-newer" {
-		t.Fatalf("newer = %#v", newer)
-	}
-}
-
-func TestResolveKnowledgeAcceptsStructuredComplement(t *testing.T) {
-	vocabulary := testVocabulary()
-	base := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
-	originalSource := annotatedFeedstock("fs-original", base)
-	created, err := ResolveKnowledge(
-		originalSource,
-		[]KnowledgeCandidate{candidate("The API accepts effort.", Resolution{Kind: ResolutionNew})},
-		nil,
-		vocabulary,
-		func() string { return "kn-original" },
-		base,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	statement := "Effort handling depends on the backend.\n\n- `api`: accepts effort\n- `ollama`: ignores effort"
-	merged, err := ResolveKnowledge(
-		annotatedFeedstock("fs-additional", base.Add(time.Hour)),
-		[]KnowledgeCandidate{{
-			Type: "property", Subject: "knowbrew", Statement: "Ollama ignores effort.",
-			Resolution: Resolution{
-				Kind: ResolutionComplements, KnowledgeIDs: []string{"kn-original"},
-				Draft: &KnowledgeDraft{
-					Type: "property", Subject: "knowbrew", Statement: statement,
-				},
-			},
-		}},
-		map[string]KnowledgeRecord{"kn-original": created.Changed["kn-original"]},
-		vocabulary,
-		func() string { return "kn-merged" },
-		base.Add(2*time.Hour),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if merged.Results[0].Outcome != "merged" || merged.Changed["kn-merged"].Statement != statement {
+	merged := resolved.Changed["kn-complement"]
+	if merged.Statement != mergedStatement || !slices.Equal(
+		merged.Knowledge.Feedstocks,
+		[]string{"fs-kn-complement", "fs-kn-equivalent", "fs-kn-head"},
+	) {
 		t.Fatalf("merged = %#v", merged)
 	}
+	if resolved.Changed["kn-head"].Knowledge.SupersededBy != "kn-complement" {
+		t.Fatalf("retired head = %#v", resolved.Changed["kn-head"])
+	}
+	if !slices.Equal(resolved.Consumed, []string{
+		"kn-new", "kn-equivalent", "kn-complement", "kn-discard",
+	}) {
+		t.Fatalf("consumed = %#v", resolved.Consumed)
+	}
 }
 
-func TestResolveKnowledgeRejectsStructuredComplementChangingSubject(t *testing.T) {
-	vocabulary := NewVocabulary(
-		[]MasterEntry{{Name: "property"}},
-		[]MasterEntry{{Name: "knowbrew"}, {Name: "other"}},
-	)
+func TestOrganizeConflictsUseFeedstockChronology(t *testing.T) {
 	base := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
-	original, err := ResolveKnowledge(
-		annotatedFeedstock("fs-original", base),
-		[]KnowledgeCandidate{candidate("The API accepts effort.", Resolution{Kind: ResolutionNew})},
-		nil,
-		vocabulary,
-		func() string { return "kn-original" },
-		base,
+	organizedAt := base
+	head := organizedRecord("kn-head", "Current fact.", base, organizedAt)
+	older := unorganizedRecord("kn-older", "Historical fact.", base.Add(-time.Hour))
+	resolved, err := OrganizeKnowledge(
+		[]KnowledgeRecord{older}, recordsByID(head, older),
+		[]OrganizationAction{{KnowledgeID: "kn-older", Resolution: Resolution{
+			Kind: ResolutionConflicts, KnowledgeIDs: []string{"kn-head"},
+		}}}, testVocabulary(), base.Add(time.Hour),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = ResolveKnowledge(
-		annotatedFeedstock("fs-additional", base.Add(time.Hour)),
-		[]KnowledgeCandidate{{
-			Type: "property", Subject: "knowbrew", Statement: "Ollama ignores effort.",
-			Resolution: Resolution{
-				Kind: ResolutionComplements, KnowledgeIDs: []string{"kn-original"},
-				Draft: &KnowledgeDraft{
-					Type: "property", Subject: "other", Statement: "A merged statement.",
-				},
-			},
-		}},
-		map[string]KnowledgeRecord{"kn-original": original.Changed["kn-original"]},
-		vocabulary,
-		func() string { return "kn-merged" },
-		base.Add(2*time.Hour),
+	if resolved.Results[0].Outcome != "historical_conflict_ignored" || len(resolved.Changed) != 0 {
+		t.Fatalf("older result = %#v", resolved)
+	}
+	newer := unorganizedRecord("kn-newer", "Replacement fact.", base.Add(2*time.Hour))
+	resolved, err = OrganizeKnowledge(
+		[]KnowledgeRecord{newer}, recordsByID(head, newer),
+		[]OrganizationAction{{KnowledgeID: "kn-newer", Resolution: Resolution{
+			Kind: ResolutionConflicts, KnowledgeIDs: []string{"kn-head"},
+		}}}, testVocabulary(), base.Add(3*time.Hour),
 	)
-	if err == nil || !strings.Contains(err.Error(), "preserve the Knowledge subject") {
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Changed["kn-head"].Knowledge.SupersededBy != "kn-newer" ||
+		resolved.Changed["kn-newer"].Knowledge.OrganizedAt == nil {
+		t.Fatalf("newer result = %#v", resolved)
+	}
+}
+
+func TestOrganizeUsesChronologicalInputsRegardlessOfActionOrder(t *testing.T) {
+	base := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	first := unorganizedRecord("kn-first", "First fact.", base)
+	second := unorganizedRecord("kn-second", "Second fact.", base.Add(time.Minute))
+	actions := []OrganizationAction{
+		{KnowledgeID: "kn-second", Resolution: Resolution{
+			Kind: ResolutionEquivalent, KnowledgeIDs: []string{"kn-first"},
+		}},
+		{KnowledgeID: "kn-first", Resolution: Resolution{Kind: ResolutionNew}},
+	}
+	resolved, err := OrganizeKnowledge(
+		[]KnowledgeRecord{second, first}, recordsByID(first, second), actions,
+		testVocabulary(), base.Add(time.Hour),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resolved.Changed["kn-first"].Knowledge.Feedstocks; !slices.Equal(
+		got, []string{"fs-kn-first", "fs-kn-second"},
+	) {
+		t.Fatalf("feedstocks = %#v", got)
+	}
+}
+
+func TestOrganizeResolvesInitialHeadsAndEarlierInputsAfterPriorActions(t *testing.T) {
+	base := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	organizedAt := base.Add(-time.Hour)
+	head := organizedRecord("kn-head", "Existing fact.", base.Add(-time.Hour), organizedAt)
+	first := unorganizedRecord("kn-first", "Equivalent fact.", base)
+	second := unorganizedRecord("kn-second", "Additional fact.", base.Add(time.Minute))
+	third := unorganizedRecord("kn-third", "Same merged fact.", base.Add(2*time.Minute))
+	resolved, err := OrganizeKnowledge(
+		[]KnowledgeRecord{first, second, third}, recordsByID(head, first, second, third),
+		[]OrganizationAction{
+			{KnowledgeID: first.Knowledge.ID, Resolution: Resolution{
+				Kind: ResolutionEquivalent, KnowledgeIDs: []string{head.Knowledge.ID},
+			}},
+			{KnowledgeID: second.Knowledge.ID, Resolution: Resolution{
+				Kind: ResolutionComplements, KnowledgeIDs: []string{first.Knowledge.ID},
+				Draft: &KnowledgeDraft{
+					Type: "property", Subject: "knowbrew", Statement: "Existing and additional facts.",
+				},
+			}},
+			{KnowledgeID: third.Knowledge.ID, Resolution: Resolution{
+				Kind: ResolutionEquivalent, KnowledgeIDs: []string{head.Knowledge.ID},
+			}},
+		},
+		testVocabulary(), base.Add(time.Hour),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Changed[head.Knowledge.ID].Knowledge.SupersededBy != second.Knowledge.ID {
+		t.Fatalf("head = %#v", resolved.Changed[head.Knowledge.ID])
+	}
+	if got := resolved.Changed[second.Knowledge.ID].Knowledge.Feedstocks; !slices.Equal(
+		got,
+		[]string{"fs-kn-first", "fs-kn-head", "fs-kn-second", "fs-kn-third"},
+	) {
+		t.Fatalf("merged feedstocks = %#v", got)
+	}
+}
+
+func TestKnowledgeHeadQueriesExcludeUnorganizedAndRequireExactSubject(t *testing.T) {
+	base := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	organizedAt := base
+	first := organizedRecord("kn-first", "First fact.", base, organizedAt)
+	other := organizedRecord("kn-other", "Other fact.", base, organizedAt)
+	other.Knowledge.Subject = "other"
+	unorganized := unorganizedRecord("kn-unorganized", "Draft fact.", base)
+	records := recordsByID(first, other, unorganized)
+	if got := KnowledgeHeadsBySubject(records, ""); got != nil {
+		t.Fatalf("empty subject heads = %#v", got)
+	}
+	if got := KnowledgeHeadsBySubject(records, "knowbrew"); len(got) != 1 || got[0].Knowledge.ID != "kn-first" {
+		t.Fatalf("subject heads = %#v", got)
+	}
+	if got := KnowledgeHeads(records); len(got) != 2 {
+		t.Fatalf("all heads = %#v", got)
+	}
+}
+
+func TestUnorganizedDuplicateClaimsDoNotParticipateInGraphValidation(t *testing.T) {
+	base := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	first := unorganizedRecord("kn-first", "Same fact.", base)
+	second := unorganizedRecord("kn-second", "Same fact.", base.Add(time.Minute))
+	if err := ValidateKnowledgeGraph(recordsByID(first, second)); err != nil {
+		t.Fatal(err)
+	}
+	organizedAt := base
+	first.Knowledge.OrganizedAt = &organizedAt
+	second.Knowledge.OrganizedAt = &organizedAt
+	if err := ValidateKnowledgeGraph(recordsByID(first, second)); err == nil ||
+		!strings.Contains(err.Error(), "duplicate current") {
 		t.Fatalf("error = %v", err)
 	}
 }
 
-func TestReconcileKnowledgeLifecycleFollowsHumanStatusChanges(t *testing.T) {
+func TestLifecycleIgnoresUnorganizedKnowledge(t *testing.T) {
 	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	organizedAt := now
 	predecessor := Knowledge{
-		ID: "kn-predecessor", Created: now, Updated: now,
+		ID: "kn-predecessor", Created: now, Updated: now, OrganizedAt: &organizedAt,
 		Type: "property", Subject: "knowbrew", Feedstocks: []string{"fs-source"}, Status: StatusPending,
 	}
 	successor := Knowledge{
-		ID: "kn-successor", Created: now, Updated: now,
+		ID: "kn-successor", Created: now, Updated: now, OrganizedAt: &organizedAt,
 		Type: "property", Subject: "knowbrew", Feedstocks: []string{"fs-source"},
 		Supersedes: []string{predecessor.ID}, Status: StatusPending,
+	}
+	unorganized := Knowledge{
+		ID: "kn-unorganized", Created: now, Updated: now,
+		Type: "property", Subject: "knowbrew", Feedstocks: []string{"fs-source"}, Status: StatusPending,
 	}
 	changes, issues := ReconcileKnowledgeLifecycle(map[string]Knowledge{
 		predecessor.ID: predecessor,
 		successor.ID:   successor,
+		unorganized.ID: unorganized,
 	}, now.Add(time.Minute))
 	if len(issues) != 0 {
 		t.Fatalf("issues = %#v", issues)
 	}
-	if changes[predecessor.ID].SupersededBy != successor.ID ||
-		changes[predecessor.ID].Status != StatusSuperseded {
+	if changes[predecessor.ID].SupersededBy != successor.ID {
 		t.Fatalf("changes = %#v", changes)
+	}
+	if _, exists := changes[unorganized.ID]; exists {
+		t.Fatalf("unorganized change = %#v", changes[unorganized.ID])
 	}
 }
 
@@ -325,13 +360,45 @@ func annotatedFeedstock(id string, timestamp time.Time) Feedstock {
 	return feedstock
 }
 
-func testVocabulary() Vocabulary {
-	return NewVocabulary([]MasterEntry{{Name: "property"}}, []MasterEntry{{Name: "knowbrew"}})
+func unorganizedRecord(id, statement string, timestamp time.Time) KnowledgeRecord {
+	feedstock := annotatedFeedstock("fs-"+id, timestamp)
+	return KnowledgeRecord{
+		Knowledge: Knowledge{
+			ID: id, Created: timestamp, Updated: timestamp, EstablishedBy: feedstock.ID,
+			Type: "property", Subject: "knowbrew", Feedstocks: []string{feedstock.ID},
+			Status: StatusPending,
+		},
+		Statement: statement, Established: feedstock,
+	}
 }
 
-func candidate(statement string, resolution Resolution) KnowledgeCandidate {
-	return KnowledgeCandidate{
-		Type: "property", Subject: "knowbrew", Statement: statement, Resolution: resolution,
+func organizedRecord(id, statement string, timestamp, organizedAt time.Time) KnowledgeRecord {
+	record := unorganizedRecord(id, statement, timestamp)
+	record.Knowledge.OrganizedAt = &organizedAt
+	return record
+}
+
+func recordsByID(records ...KnowledgeRecord) map[string]KnowledgeRecord {
+	result := make(map[string]KnowledgeRecord, len(records))
+	for _, record := range records {
+		result[record.Knowledge.ID] = record
+	}
+	return result
+}
+
+func testVocabulary() Vocabulary {
+	return NewVocabulary(
+		[]MasterEntry{{Name: "property"}},
+		[]MasterEntry{{Name: "knowbrew"}, {Name: "other"}},
+	)
+}
+
+func sequenceIDs(ids ...string) func() string {
+	index := 0
+	return func() string {
+		id := ids[index]
+		index++
+		return id
 	}
 }
 

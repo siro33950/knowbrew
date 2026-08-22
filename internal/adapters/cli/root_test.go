@@ -11,7 +11,6 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/siro33950/knowbrew/internal/adapters/config"
-	invocationstate "github.com/siro33950/knowbrew/internal/adapters/invocation/state"
 	"github.com/siro33950/knowbrew/internal/adapters/persistence/markdownstore"
 	"github.com/siro33950/knowbrew/internal/adapters/source/parser"
 	"github.com/siro33950/knowbrew/internal/application/draw"
@@ -41,7 +40,7 @@ func TestCommandSurfaceExposesDistill(t *testing.T) {
 func TestSearchModeAndIndexCommands(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +188,7 @@ func TestDrawHookProcessesOnlyPayloadTranscriptAndWritesNoSummary(t *testing.T) 
 	}
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	configData := "root = " + quoteTOML(rootDir) + "\n\n" +
-		"[llm]\nbackend = \"claude-cli\"\n\n" +
+		llmConfigSection + "\n" +
 		"[embedding]\nmodel = \"disabled\"\n\n" +
 		"[[sources]]\nagent = \"codex\"\nparser = \"codex\"\npaths = [" + quoteTOML(sourceDir) + "]\n"
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
@@ -216,7 +215,52 @@ func TestDrawHookProcessesOnlyPayloadTranscriptAndWritesNoSummary(t *testing.T) 
 	}
 }
 
-func TestDrawHookExitsQuietlyWhileAnotherRunHoldsTheLock(t *testing.T) {
+func TestDrawHookPassesHookOptionAndExcludesOnlyUnfinishedTurn(t *testing.T) {
+	rootDir := t.TempDir()
+	sourceDir := t.TempDir()
+	transcriptPath := filepath.Join(sourceDir, "session.jsonl")
+	transcript := `{"type":"user","uuid":"turn-1","sessionId":"session","timestamp":"2026-07-30T01:00:00Z","message":{"role":"user","content":"only turn"}}
+{"type":"assistant","sessionId":"session","timestamp":"2026-07-30T01:00:01Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}
+`
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" +
+		llmConfigSection + "\n" +
+		"[embedding]\nmodel = \"disabled\"\n\n" +
+		"[[sources]]\nagent = \"claude\"\nparser = \"claude\"\npaths = [" + quoteTOML(sourceDir) + "]\n"
+	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.ConfigEnvironment, configPath)
+	payload, err := json.Marshal(map[string]any{
+		"hook_event_name": "Stop", "transcript_path": transcriptPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	command := newRootCommand()
+	command.SetIn(bytes.NewReader(payload))
+	command.SetArgs([]string{"draw", "--hook"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	dataStore, err := store.New(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedstocks, warnings, err := dataStore.ListFeedstocks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(feedstocks) != 0 {
+		t.Fatalf("feedstocks = %#v, warnings = %#v", feedstocks, warnings)
+	}
+}
+
+func TestDrawHookIgnoresRetiredGlobalLock(t *testing.T) {
 	rootDir := t.TempDir()
 	sourceDir := t.TempDir()
 	transcriptPath := filepath.Join(sourceDir, "session.jsonl")
@@ -239,7 +283,7 @@ func TestDrawHookExitsQuietlyWhileAnotherRunHoldsTheLock(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	configData := "root = " + quoteTOML(rootDir) + "\n\n" +
-		"[llm]\nbackend = \"claude-cli\"\n\n" +
+		llmConfigSection + "\n" +
 		"[embedding]\nmodel = \"disabled\"\n\n" +
 		"[[sources]]\nagent = \"codex\"\nparser = \"codex\"\npaths = [" + quoteTOML(sourceDir) + "]\n"
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
@@ -336,7 +380,7 @@ func TestParseDrawBoundaryAcceptsRelativeAndAbsoluteValues(t *testing.T) {
 func TestKnowledgeSearchEscapesSubcommandNamesAfterDoubleDash(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +496,7 @@ Alpha decisions body.
 	}
 
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +537,7 @@ func TestContextHookFallsBackToProcessCwdOnEmptyStdin(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +634,7 @@ func TestSearchFlagsAndHookOutputUsePlainMasterNames(t *testing.T) {
 	}
 
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -641,10 +685,69 @@ func TestShowRawFlagValidation(t *testing.T) {
 	}
 }
 
+func TestFeedstockDraftRejectsFeedstockOutsideTheInvocation(t *testing.T) {
+	rootDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
+	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.ConfigEnvironment, configPath)
+	dataStore, err := store.New(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"fs-assigned", "fs-other"} {
+		if err := dataStore.WriteFeedstock(domain.Feedstock{
+			Schema: domain.SchemaVersion, ID: id, TurnID: "turn-" + id,
+			Session:   domain.SessionRef{ID: "session"},
+			Timestamp: time.Now().UTC(), Agent: "claude",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv(config.InvocationIDEnvironment, "draft-invocation")
+	t.Setenv(config.InvocationFeedstockEnvironment, "fs-assigned")
+
+	foreign := newRootCommand()
+	foreign.SetOut(&bytes.Buffer{})
+	foreign.SetArgs([]string{
+		"feedstock", "draft", "fs-other", "--summary", "The user stated a property.",
+		"--type", "property",
+	})
+	if err := foreign.Execute(); err == nil {
+		t.Fatal("draft wrote a feedstock outside the invocation")
+	}
+	stored, _, err := dataStore.FindFeedstock("fs-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.AnnotatedAt != nil {
+		t.Fatalf("feedstock = %#v", stored)
+	}
+
+	assigned := newRootCommand()
+	assigned.SetOut(&bytes.Buffer{})
+	assigned.SetArgs([]string{
+		"feedstock", "draft", "fs-assigned", "--summary", "The user stated a property.",
+		"--type", "property",
+	})
+	if err := assigned.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	drawn, _, err := dataStore.FindFeedstock("fs-assigned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drawn.AnnotatedAt == nil {
+		t.Fatalf("feedstock = %#v", drawn)
+	}
+}
+
 func TestFeedstockDraftTypeFlagsWriteSummaryAndMultipleCandidates(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -725,7 +828,7 @@ func TestFeedstockDraftTypeFlagsWriteSummaryAndMultipleCandidates(t *testing.T) 
 func TestFeedstockDraftReplacesTheSeparateSummarizeAndAnnotateCommands(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(configPath, []byte("root = "+quoteTOML(rootDir)+"\n\n[llm]\nbackend = \"claude-cli\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("root = "+quoteTOML(rootDir)+"\n\n"+llmConfigSection), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(config.ConfigEnvironment, configPath)
@@ -783,7 +886,7 @@ func TestFeedstockContextReadsBoundedTurnsFromSource(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	sourceDir := t.TempDir()
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n\n[draw]\nconcurrency = 1\ncontext_turns = 0\nmax_context_turns = 1\n\n[[sources]]\nagent = \"claude\"\nparser = \"claude\"\npaths = [" + quoteTOML(sourceDir) + "]\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection + "\n[draw]\nconcurrency = 1\ncontext_turns = 0\nmax_context_turns = 1\n\n[[sources]]\nagent = \"claude\"\nparser = \"claude\"\npaths = [" + quoteTOML(sourceDir) + "]\n"
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -841,173 +944,20 @@ func TestFeedstockContextReadsBoundedTurnsFromSource(t *testing.T) {
 }
 
 func TestSubjectCreationFlagIsUnavailable(t *testing.T) {
-	for _, args := range [][]string{
-		{
-			"feedstock", "annotate", "fs-source",
-			"--new-subject", "invented=Invented subject.",
-		},
-		{
-			"knowledge", "submit", "fs-source",
-			"--knowledge", `{}`,
-			"--new-subject", "invented=Invented subject.",
-		},
-	} {
-		command := newRootCommand()
-		command.SetArgs(args)
-		err := command.Execute()
-		if err == nil ||
-			!strings.Contains(err.Error(), "unknown flag: --new-subject") {
-			t.Fatalf("%v error = %v", args, err)
-		}
+	args := []string{
+		"feedstock", "draft", "fs-source",
+		"--summary", "The user stated a property.",
+		"--new-subject", "invented=Invented subject.",
 	}
-}
-
-func TestKnowledgeSubmitRequiresInvocationAndValidatesType(t *testing.T) {
-	rootDir := t.TempDir()
-	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
-	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("KNOWBREW_CONFIG", configPath)
-	dataStore, err := store.New(rootDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	feedstock := domain.Feedstock{
-		Schema: domain.SchemaVersion, ID: "fs-source", TurnID: "turn-source",
-		Session:   domain.SessionRef{ID: "session"},
-		Timestamp: time.Now().UTC(), Agent: "claude",
-		Types: []domain.KnowledgeType{"property"}, Summary: "The user supplied a reusable property.",
-		AnnotatedAt: func() *time.Time { value := time.Now().UTC(); return &value }(),
-	}
-	if err := dataStore.WriteFeedstock(feedstock); err != nil {
-		t.Fatal(err)
-	}
-	outside := newRootCommand()
-	outside.SetArgs([]string{
-		"knowledge", "submit", feedstock.ID,
-		"--knowledge", `{"type":"property","subject":"knowbrew","statement":"Use the tested behavior.","rationale":"","resolution":{"kind":"new","knowledge_ids":[],"draft":null}}`,
-	})
-	if err := outside.Execute(); err == nil ||
-		!strings.Contains(err.Error(), "only inside a Brew invocation") {
-		t.Fatalf("outside invocation error = %v", err)
-	}
-	t.Setenv(config.InvocationFeedstockEnvironment, feedstock.ID)
-	t.Setenv(config.InvocationIDEnvironment, "submit-invalid-type")
-	t.Setenv(config.InvocationTaskEnvironment, "brew")
-	invalid := newRootCommand()
-	invalid.SetArgs([]string{
-		"knowledge", "submit", feedstock.ID,
-		"--knowledge", `{"type":"other","subject":"knowbrew","statement":"Use the tested behavior.","rationale":"","resolution":{"kind":"new","knowledge_ids":[],"draft":null}}`,
-	})
-	if err := invalid.Execute(); err == nil ||
-		!strings.Contains(err.Error(), "not defined in masters/types") {
-		t.Fatalf("invalid type error = %v", err)
-	}
-}
-
-func TestKnowledgeSubmitRegistersCandidateWithoutWritingKnowledge(t *testing.T) {
-	rootDir := t.TempDir()
-	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
-	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(config.ConfigEnvironment, configPath)
-	dataStore, err := store.New(rootDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dataStore.EnsureMaster("subjects", domain.MasterEntry{
-		Name: "knowbrew", Definition: "The existing knowbrew subject.",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	annotatedAt := time.Now().UTC()
-	feedstock := domain.Feedstock{
-		Schema: domain.SchemaVersion, ID: "fs-subject-flag", TurnID: "turn-subject-flag",
-		Session:   domain.SessionRef{ID: "session"},
-		Timestamp: annotatedAt, Agent: "claude",
-		Types:       []domain.KnowledgeType{domain.KnowledgeType("property")},
-		Summary:     "The user supplied a reusable fact.",
-		AnnotatedAt: &annotatedAt,
-	}
-	if err := dataStore.WriteFeedstock(feedstock); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(config.InvocationFeedstockEnvironment, feedstock.ID)
-	t.Setenv(config.InvocationIDEnvironment, "submit-subject")
-	t.Setenv(config.InvocationTaskEnvironment, "brew")
-	catalog := newRootCommand()
-	catalog.SetArgs([]string{
-		"knowledge", "catalog", "--subject", "knowbrew",
-		"--query", "The subject flag preserves attribution.",
-	})
-	if err := catalog.Execute(); err != nil {
-		t.Fatal(err)
-	}
-	var submitOutput bytes.Buffer
 	command := newRootCommand()
-	command.SetOut(&submitOutput)
-	command.SetArgs([]string{
-		"knowledge", "submit", feedstock.ID,
-		"--knowledge", `{"type":"property","subject":"knowbrew","statement":"The subject flag preserves attribution.","rationale":"","resolution":{"kind":"new","knowledge_ids":[],"draft":null}}`,
-	})
-	if err := command.Execute(); err != nil {
-		t.Fatal(err)
-	}
-	var submitted struct {
-		Submitted int `json:"submitted"`
-	}
-	if err := json.Unmarshal(submitOutput.Bytes(), &submitted); err != nil {
-		t.Fatal(err)
-	}
-	if submitted.Submitted != 1 {
-		t.Fatalf("submit output = %s", submitOutput.String())
-	}
-	state, err := invocationstate.ReadStateForInvocation(rootDir, "submit-subject")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(state.Submitted) != 1 || state.Submitted[0].Subject != "knowbrew" {
-		t.Fatalf("invocation state = %#v", state)
-	}
-	files, _, err := dataStore.ListAllKnowledge()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(files) != 0 {
-		t.Fatalf("submit wrote Knowledge: %#v", files)
-	}
-
-	legacy := newRootCommand()
-	legacy.SetArgs([]string{
-		"knowledge", "submit", feedstock.ID,
-		"--knowledge", `{}`,
-		"--slug", "legacy-subject-flag",
-		"--pro" + "ject", "knowbrew",
-	})
-	if err := legacy.Execute(); err == nil || !strings.Contains(err.Error(), "unknown flag") {
-		t.Fatalf("removed flag error = %v", err)
+	command.SetArgs(args)
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "unknown flag: --new-subject") {
+		t.Fatalf("%v error = %v", args, err)
 	}
 }
 
 func TestKnowledgeCommandsUseFeedstockTerminologyOnly(t *testing.T) {
-	legacyFlag := newRootCommand()
-	legacyFlag.SetArgs([]string{
-		"knowledge", "submit", "fs-legacy",
-		"--relation", "new",
-		"--slug", "legacy-source-flag",
-		"--type", "property",
-		"--applies-when", "When testing a removed flag",
-		"--claim", "Use a removed flag.",
-		"--source", "fs-legacy",
-	})
-	if err := legacyFlag.Execute(); err == nil || !strings.Contains(err.Error(), "unknown flag") {
-		t.Fatalf("removed source flag error = %v", err)
-	}
-
 	root := newRootCommand()
 	knowledge, _, err := root.Find([]string{"knowledge"})
 	if err != nil {
@@ -1023,7 +973,7 @@ func TestKnowledgeCommandsUseFeedstockTerminologyOnly(t *testing.T) {
 	for _, command := range knowledge.Commands() {
 		names[command.Name()] = true
 	}
-	if len(names) != 3 || !names["show"] || !names["catalog"] || !names["submit"] {
+	if len(names) != 1 || !names["show"] {
 		t.Fatalf("knowledge subcommands = %#v", names)
 	}
 }
@@ -1031,7 +981,7 @@ func TestKnowledgeCommandsUseFeedstockTerminologyOnly(t *testing.T) {
 func TestKnowledgeSearchBuildsIndex(t *testing.T) {
 	rootDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-	configData := "root = " + quoteTOML(rootDir) + "\n\n[llm]\nbackend = \"claude-cli\"\n"
+	configData := "root = " + quoteTOML(rootDir) + "\n\n" + llmConfigSection
 	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1049,6 +999,12 @@ func TestKnowledgeSearchBuildsIndex(t *testing.T) {
 		t.Fatalf("knowledge search did not create the index at %s: %v", indexPath, err)
 	}
 }
+
+// llmConfigSection writes the [llm] table with both Draw stage keys, which
+// configuration loading requires.
+const llmConfigSection = "[llm]\nbackend = \"claude-cli\"\n" +
+	"draw_draft_model = \"\"\ndraw_draft_effort = \"\"\n" +
+	"draw_extract_model = \"\"\ndraw_extract_effort = \"\"\n"
 
 func quoteTOML(value string) string {
 	return `"` + value + `"`

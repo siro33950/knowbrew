@@ -24,7 +24,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const indexSchemaVersion = 17
+const indexSchemaVersion = 18
 const rawPageSizeBytes = 12_000
 
 type Target string
@@ -543,6 +543,14 @@ func syncKnowledge(
 		knowledge, body, err := dataStore.ReadKnowledge(file.Path)
 		if err != nil {
 			warnings = append(warnings, diagnostic.FromError(file.Path, err))
+			if exists {
+				if err := deleteDocument(ctx, transaction, previous.RecordKey); err != nil {
+					return warnings, err
+				}
+			}
+			continue
+		}
+		if knowledge.OrganizedAt == nil {
 			if exists {
 				if err := deleteDocument(ctx, transaction, previous.RecordKey); err != nil {
 					return warnings, err

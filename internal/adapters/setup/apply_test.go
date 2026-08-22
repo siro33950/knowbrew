@@ -18,7 +18,8 @@ func TestApplyCreatesRootLocalConfigAndUserLocator(t *testing.T) {
 	t.Setenv(config.ConfigEnvironment, "")
 	root := filepath.Join(t.TempDir(), "vault")
 	if err := Apply(Choices{
-		Root: root, Backend: "claude-cli", DrawModel: "fast-model", BrewModel: "quality-model",
+		Root: root, Backend: "claude-cli", DrawDraftModel: "fast-model",
+		DrawExtractModel: "extract-model", BrewModel: "quality-model",
 		DistillModel:   "document-model",
 		EmbeddingModel: config.EmbeddingDisabled,
 		InstallClaude:  false, InstallCodex: false,
@@ -39,11 +40,14 @@ func TestApplyCreatesRootLocalConfigAndUserLocator(t *testing.T) {
 	if loaded.Root != absoluteRoot {
 		t.Fatalf("root = %q, want %q", loaded.Root, absoluteRoot)
 	}
-	if loaded.LLM.DrawModel != "fast-model" || loaded.LLM.BrewModel != "quality-model" ||
+	if loaded.LLM.DrawDraftModel != "fast-model" ||
+		loaded.LLM.DrawExtractModel != "extract-model" ||
+		loaded.LLM.BrewModel != "quality-model" ||
 		loaded.LLM.DistillModel != "document-model" {
 		t.Fatalf("LLM models = %#v", loaded.LLM)
 	}
-	if loaded.LLM.DrawEffort != config.DefaultDrawEffort || loaded.LLM.BrewEffort != "" ||
+	if loaded.LLM.DrawDraftEffort != config.DefaultDrawDraftEffort ||
+		loaded.LLM.DrawExtractEffort != "" || loaded.LLM.BrewEffort != "" ||
 		loaded.LLM.DistillEffort != config.DefaultDistillEffort {
 		t.Fatalf("LLM efforts = %#v", loaded.LLM)
 	}
@@ -64,7 +68,8 @@ func TestApplyCreatesRootLocalConfigAndUserLocator(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		`draw_effort = "low"`,
+		`draw_draft_effort = "low"`,
+		`draw_extract_effort = ""`,
 		`brew_effort = ""`,
 		`distill_effort = "high"`,
 		`context_turns = 3`,
@@ -155,6 +160,54 @@ func TestApplyCreatesRootLocalConfigAndUserLocator(t *testing.T) {
 	}
 }
 
+func TestApplyReinitMigratesRetiredDrawKeys(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv(config.ConfigEnvironment, "")
+	root := filepath.Join(t.TempDir(), "vault")
+	configPath := config.DefaultConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	retired := "root = \"..\"\n\n[llm]\nbackend = \"codex-cli\"\n" +
+		"draw_model = \"old-draw\"\ndraw_effort = \"low\"\n" +
+		"brew_model = \"old-brew\"\nbrew_effort = \"high\"\n\n" +
+		"[embedding]\nmodel = \"disabled\"\n"
+	if err := os.WriteFile(configPath, []byte(retired), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.LoadPath(configPath); err == nil {
+		t.Fatal("retired keys loaded outside init")
+	}
+
+	if err := Apply(Choices{
+		Root: root, Backend: "codex-cli", DrawDraftModel: "new-draft",
+		DrawExtractModel: "new-extract", BrewModel: "new-brew",
+		DistillModel:   "new-distill",
+		EmbeddingModel: config.EmbeddingDisabled,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.LoadPath(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LLM.DrawDraftModel != "new-draft" || loaded.LLM.DrawExtractModel != "new-extract" {
+		t.Fatalf("migrated models = %#v", loaded.LLM)
+	}
+	if loaded.LLM.DrawDraftEffort != "low" || loaded.LLM.DrawExtractEffort != "high" {
+		t.Fatalf("migrated efforts = %#v", loaded.LLM)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "draw_model") || strings.Contains(string(data), "draw_effort =") {
+		t.Fatalf("retired keys survived init:\n%s", data)
+	}
+}
+
 func TestApplyReinitPreservesUnaskedSettingsCustomSourcesAndData(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -170,7 +223,8 @@ func TestApplyReinitPreservesUnaskedSettingsCustomSourcesAndData(t *testing.T) {
 	}
 	root := filepath.Join(t.TempDir(), "vault")
 	if err := Apply(Choices{
-		Root: root, Backend: "codex-cli", DrawModel: "old-draw", BrewModel: "old-brew",
+		Root: root, Backend: "codex-cli", DrawDraftModel: "old-draft",
+		DrawExtractModel: "old-extract", BrewModel: "old-brew",
 		DistillModel:   "old-distill",
 		EmbeddingModel: config.EmbeddingDisabled,
 		SourceNames:    []string{"claude", "codex"}, InstallClaude: false, InstallCodex: false,
@@ -181,7 +235,7 @@ func TestApplyReinitPreservesUnaskedSettingsCustomSourcesAndData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.LLM.DrawEffort = "medium"
+	cfg.LLM.DrawDraftEffort = "medium"
 	cfg.LLM.BrewEffort = "high"
 	cfg.LLM.Timeout = "9m"
 	cfg.Draw.Concurrency = 1
@@ -211,7 +265,8 @@ func TestApplyReinitPreservesUnaskedSettingsCustomSourcesAndData(t *testing.T) {
 	}
 
 	if err := Apply(Choices{
-		Root: root, Backend: "codex-cli", DrawModel: "new-draw", BrewModel: "new-brew",
+		Root: root, Backend: "codex-cli", DrawDraftModel: "new-draft",
+		DrawExtractModel: "new-extract", BrewModel: "new-brew",
 		DistillModel:   "new-distill",
 		EmbeddingModel: config.EmbeddingDisabled,
 		SourceNames:    []string{"codex"}, InstallClaude: false, InstallCodex: false,
@@ -222,9 +277,11 @@ func TestApplyReinitPreservesUnaskedSettingsCustomSourcesAndData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.LLM.DrawModel != "new-draw" || updated.LLM.BrewModel != "new-brew" ||
+	if updated.LLM.DrawDraftModel != "new-draft" ||
+		updated.LLM.DrawExtractModel != "new-extract" ||
+		updated.LLM.BrewModel != "new-brew" ||
 		updated.LLM.DistillModel != "new-distill" ||
-		updated.LLM.DrawEffort != "medium" || updated.LLM.BrewEffort != "high" ||
+		updated.LLM.DrawDraftEffort != "medium" || updated.LLM.BrewEffort != "high" ||
 		updated.LLM.Timeout != "9m" {
 		t.Fatalf("reinitialized LLM settings = %#v", updated.LLM)
 	}
@@ -279,7 +336,8 @@ path = "` + customPath + `"
 		t.Fatal(err)
 	}
 	if err := Apply(Choices{
-		Root: root, Backend: "codex-cli", DrawModel: "draw-existing", BrewModel: "brew-existing",
+		Root: root, Backend: "codex-cli", DrawDraftModel: "draft-existing",
+		DrawExtractModel: "extract-existing", BrewModel: "brew-existing",
 		EmbeddingModel: config.EmbeddingDisabled,
 		InstallClaude:  false, InstallCodex: false,
 	}); err != nil {
@@ -289,7 +347,8 @@ path = "` + customPath + `"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.LLM.DrawEffort != config.DefaultDrawEffort || updated.LLM.BrewEffort != "" ||
+	if updated.LLM.DrawDraftEffort != config.DefaultDrawDraftEffort ||
+		updated.LLM.BrewEffort != "" ||
 		updated.Draw.Concurrency != config.DefaultDrawConcurrency ||
 		updated.Draw.ContextTurns != config.DefaultDrawContextTurns ||
 		updated.Draw.MaxContextTurns != config.DefaultDrawMaxContextTurns {
@@ -308,7 +367,8 @@ func TestApplyReinitPreservesCustomEmbeddingPath(t *testing.T) {
 	t.Setenv(config.ConfigEnvironment, "")
 	root := filepath.Join(t.TempDir(), "vault")
 	if err := Apply(Choices{
-		Root: root, Backend: "codex-cli", DrawModel: "draw", BrewModel: "brew",
+		Root: root, Backend: "codex-cli", DrawDraftModel: "draft",
+		DrawExtractModel: "extract", BrewModel: "brew",
 		EmbeddingModel: config.EmbeddingDisabled,
 		InstallClaude:  false, InstallCodex: false,
 	}); err != nil {
@@ -325,7 +385,8 @@ func TestApplyReinitPreservesCustomEmbeddingPath(t *testing.T) {
 	}
 
 	if err := Apply(Choices{
-		Root: root, Backend: "codex-cli", DrawModel: "draw", BrewModel: "brew",
+		Root: root, Backend: "codex-cli", DrawDraftModel: "draft",
+		DrawExtractModel: "extract", BrewModel: "brew",
 		EmbeddingModel: config.EmbeddingCustom,
 		InstallClaude:  false, InstallCodex: false,
 	}); err != nil {

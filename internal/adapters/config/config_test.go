@@ -17,9 +17,10 @@ func TestSaveAndLoadUsesRootLocalConfigAndGlobalLocator(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
 	cfg := Config{
 		LLM: LLM{
-			Backend: "claude-cli", DrawModel: "fast-model", BrewModel: "quality-model",
-			DistillModel: "document-model", DrawEffort: "low", BrewEffort: "max",
-			DistillEffort: "high",
+			Backend: "claude-cli", DrawDraftModel: "fast-model",
+			DrawExtractModel: "extract-model", BrewModel: "quality-model",
+			DistillModel: "document-model", DrawDraftEffort: "low",
+			DrawExtractEffort: "high", BrewEffort: "max", DistillEffort: "high",
 		},
 		Draw:    Draw{ContextTurns: DefaultDrawContextTurns},
 		Sources: []Source{{Agent: "claude", Parser: "claude", Paths: []string{"~/logs"}}},
@@ -43,12 +44,14 @@ func TestSaveAndLoadUsesRootLocalConfigAndGlobalLocator(t *testing.T) {
 	if len(loaded.Sources[0].Paths) != 1 || loaded.Sources[0].Paths[0] != filepath.Join(home, "logs") {
 		t.Fatalf("expanded source paths = %#v", loaded.Sources[0].Paths)
 	}
-	if loaded.LLM.DrawModel != "fast-model" || loaded.LLM.BrewModel != "quality-model" ||
+	if loaded.LLM.DrawDraftModel != "fast-model" ||
+		loaded.LLM.DrawExtractModel != "extract-model" ||
+		loaded.LLM.BrewModel != "quality-model" ||
 		loaded.LLM.DistillModel != "document-model" {
 		t.Fatalf("LLM models = %#v", loaded.LLM)
 	}
-	if loaded.LLM.DrawEffort != "low" || loaded.LLM.BrewEffort != "max" ||
-		loaded.LLM.DistillEffort != "high" {
+	if loaded.LLM.DrawDraftEffort != "low" || loaded.LLM.DrawExtractEffort != "high" ||
+		loaded.LLM.BrewEffort != "max" || loaded.LLM.DistillEffort != "high" {
 		t.Fatalf("LLM efforts = %#v", loaded.LLM)
 	}
 	if loaded.Draw.Concurrency != DefaultDrawConcurrency {
@@ -96,6 +99,10 @@ func TestLoadMigratesLegacySourcePathToPaths(t *testing.T) {
 
 [llm]
 backend = "codex-cli"
+draw_draft_model = ""
+draw_draft_effort = ""
+draw_extract_model = ""
+draw_extract_effort = ""
 
 [[sources]]
 agent = "codex"
@@ -172,8 +179,8 @@ func TestNormalizeDoesNotValidateEffortVocabulary(t *testing.T) {
 	cfg := Config{
 		Path: filepath.Join(t.TempDir(), ".knowbrew", "config.toml"),
 		LLM: LLM{
-			Backend: "claude-cli", DrawEffort: "accepted-by-a-future-cli",
-			BrewEffort: "backend-specific",
+			Backend: "claude-cli", DrawDraftEffort: "accepted-by-a-future-cli",
+			DrawExtractEffort: "also-backend-specific", BrewEffort: "backend-specific",
 		},
 	}
 	if err := cfg.Normalize(); err != nil {
@@ -193,19 +200,92 @@ func TestLoadRejectsLegacyModelWithMigrationGuidance(t *testing.T) {
 	}
 	t.Setenv(ConfigEnvironment, path)
 	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "migrate it to draw_model, brew_model, and distill_model") {
+	if err == nil || !strings.Contains(
+		err.Error(),
+		"migrate it to draw_draft_model, draw_extract_model, brew_model, and distill_model",
+	) {
 		t.Fatalf("error = %v", err)
 	}
 }
 
-func TestLoadAllowsExistingConfigWithoutEffortKeys(t *testing.T) {
+// drawStageConfig writes the minimum configuration Load accepts. Both Draw
+// stages must name their own model and effort; extra tables follow them.
+func drawStageConfig(extra string) string {
+	return "root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\n" +
+		"draw_draft_model = \"\"\ndraw_draft_effort = \"\"\n" +
+		"draw_extract_model = \"\"\ndraw_extract_effort = \"\"\n" + extra
+}
+
+func TestLoadRejectsRetiredDrawKeys(t *testing.T) {
 	root := t.TempDir()
 	path := DefaultConfigPath(root)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	data := []byte("root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\ndraw_model = \"\"\nbrew_model = \"\"\n")
+	data := []byte("root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\n" +
+		"draw_model = \"fast\"\ndraw_effort = \"low\"\n")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(ConfigEnvironment, path)
+	_, err := Load()
+	if err == nil ||
+		!strings.Contains(err.Error(), "draw_model and draw_effort are no longer supported") ||
+		!strings.Contains(err.Error(), "draw_draft_model") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadRequiresBothDrawStagesToNameTheirOwnKeys(t *testing.T) {
+	root := t.TempDir()
+	path := DefaultConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\n" +
+		"draw_draft_model = \"fast\"\ndraw_draft_effort = \"low\"\nbrew_model = \"quality\"\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(ConfigEnvironment, path)
+	_, err := Load()
+	if err == nil ||
+		!strings.Contains(err.Error(), "draw_extract_model, draw_extract_effort must be set") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadPathForSetupMigratesRetiredDrawKeys(t *testing.T) {
+	root := t.TempDir()
+	path := DefaultConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\n" +
+		"draw_model = \"fast\"\ndraw_effort = \"low\"\n" +
+		"brew_model = \"quality\"\nbrew_effort = \"max\"\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadPathForSetup(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LLM.DrawDraftModel != "fast" || loaded.LLM.DrawDraftEffort != "low" {
+		t.Fatalf("retired draw keys did not seed the draft stage: %#v", loaded.LLM)
+	}
+	if loaded.LLM.DrawExtractModel != "quality" || loaded.LLM.DrawExtractEffort != "max" {
+		t.Fatalf("extract stage did not keep the previous behaviour: %#v", loaded.LLM)
+	}
+}
+
+func TestLoadAllowsExistingConfigWithoutBrewAndDistillKeys(t *testing.T) {
+	root := t.TempDir()
+	path := DefaultConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(drawStageConfig("")), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(ConfigEnvironment, path)
@@ -213,8 +293,9 @@ func TestLoadAllowsExistingConfigWithoutEffortKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.LLM.DrawEffort != "" || loaded.LLM.BrewEffort != "" {
-		t.Fatalf("missing effort keys should remain empty: %#v", loaded.LLM)
+	if loaded.LLM.DrawDraftEffort != "" || loaded.LLM.DrawExtractEffort != "" ||
+		loaded.LLM.BrewEffort != "" {
+		t.Fatalf("empty effort keys should remain empty: %#v", loaded.LLM)
 	}
 	if loaded.LLM.DistillModel != "" || loaded.LLM.DistillEffort != DefaultDistillEffort {
 		t.Fatalf("missing distill keys should use migration defaults: %#v", loaded.LLM)
@@ -256,9 +337,12 @@ func TestNormalizeEmbeddingConfiguration(t *testing.T) {
 func TestAPILLMRequiresBothTaskModels(t *testing.T) {
 	cfg := Config{
 		Path: filepath.Join(t.TempDir(), ".knowbrew", "config.toml"),
-		LLM:  LLM{Backend: "api", DrawModel: "fast"},
+		LLM:  LLM{Backend: "api", DrawDraftModel: "fast"},
 	}
-	if err := cfg.Normalize(); err == nil || !strings.Contains(err.Error(), "draw_model, brew_model, and distill_model") {
+	if err := cfg.Normalize(); err == nil || !strings.Contains(
+		err.Error(),
+		"draw_draft_model, draw_extract_model, brew_model, and distill_model",
+	) {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -269,7 +353,7 @@ func TestLoadRejectsExplicitNonPositiveDrawConcurrency(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	data := []byte("root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\n\n[draw]\nconcurrency = 0\n")
+	data := []byte(drawStageConfig("\n[draw]\nconcurrency = 0\n"))
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +382,7 @@ func TestLoadContextMaxTokensDefaultsAndValidation(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			data := []byte("root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\n" + test.section)
+			data := []byte(drawStageConfig(test.section))
 			if err := os.WriteFile(path, data, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -337,7 +421,7 @@ func TestLoadAcceptsZeroAndRejectsNegativeDrawContextTurns(t *testing.T) {
 			}
 			data := fmt.Appendf(
 				nil,
-				"root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\n\n[draw]\nconcurrency = 1\ncontext_turns = %d\n",
+				drawStageConfig("\n[draw]\nconcurrency = 1\ncontext_turns = %d\n"),
 				test.value,
 			)
 			if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -367,7 +451,7 @@ func TestLoadRejectsMaxContextBelowInitialContext(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	data := []byte("root = \"..\"\n\n[llm]\nbackend = \"claude-cli\"\n\n[draw]\nconcurrency = 1\ncontext_turns = 3\nmax_context_turns = 2\n")
+	data := []byte(drawStageConfig("\n[draw]\nconcurrency = 1\ncontext_turns = 3\nmax_context_turns = 2\n"))
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -19,15 +19,8 @@ type Draft struct {
 func ApplyDraft(
 	ctx context.Context,
 	dataStore Repository,
-	guard InvocationGuard,
 	draft Draft,
 ) error {
-	if guard == nil {
-		guard = unrestrictedInvocation{}
-	}
-	if err := guard.ValidateFeedstock(draft.FeedstockID); err != nil {
-		return err
-	}
 	summary := strings.TrimSpace(draft.Summary)
 	if summary == "" {
 		return errors.New("summary is required")
@@ -48,22 +41,20 @@ func ApplyDraft(
 		if current.AnnotatedAt != nil {
 			return fmt.Errorf("feedstock %s is already drawn", draft.FeedstockID)
 		}
-		return guard.Mutate(func() error {
-			typeEntries, _, err := dataStore.LoadMasters("types")
-			if err != nil {
+		typeEntries, _, err := dataStore.LoadMasters("types")
+		if err != nil {
+			return err
+		}
+		types, err := domain.NormalizeKnowledgeTypes(draft.Types)
+		if err != nil {
+			return err
+		}
+		vocabulary := domain.NewVocabulary(typeEntries, nil)
+		for _, value := range types {
+			if err := vocabulary.ValidateType(value); err != nil {
 				return err
 			}
-			types, err := domain.NormalizeKnowledgeTypes(draft.Types)
-			if err != nil {
-				return err
-			}
-			vocabulary := domain.NewVocabulary(typeEntries, nil)
-			for _, value := range types {
-				if err := vocabulary.ValidateType(value); err != nil {
-					return err
-				}
-			}
-			return dataStore.DraftFeedstock(draft.FeedstockID, summary, types, now)
-		})
+		}
+		return dataStore.DraftFeedstock(draft.FeedstockID, summary, types, now)
 	})
 }

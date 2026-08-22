@@ -37,23 +37,25 @@ knowbrew init
 The flow follows a brewing metaphor:
 
 ```text
-session logs ──draw──▶ feedstock ──brew──▶ knowledge ──approve──▶ distill ──▶ documents
-(untouched)             (what happened)       (durable claims)               (derived views)
+session logs ──draw──▶ feedstock + unorganized knowledge ──brew──▶ organized knowledge ──approve/distill──▶ documents
+(untouched)             (what happened)                           (durable claims)                          (derived views)
 ```
 
 **`draw`** reads your session logs and records one *feedstock* per turn: a short
-summary plus broad Knowledge type candidates. The raw dialogue stays in the
-source log. A feedstock stores the agent and session ID, while knowbrew resolves
-the log's current location from the configured source paths when raw dialogue
-is needed.
+summary plus broad Knowledge type candidates. In the same run, it reads the
+dialogue and surrounding context to extract unorganized Knowledge. The raw
+dialogue stays in the source log and is no longer needed by later pipeline
+stages after extraction.
 
-**`brew`** reads that evidence and writes *knowledge*: claims that stay useful
-beyond the turn they came from. Each record has one type and one subject, and
-can later be corrected, replaced, or merged as your project evolves.
+**`brew`** organizes stored Knowledge one Subject at a time without reading the
+session logs. It compares every new claim with all current Knowledge heads for
+that Subject, then keeps, merges, replaces, or discards it.
 
-**You approve.** New knowledge starts with an unchecked `approved` property.
-Check it in Obsidian, or change it to `approved: true` in Markdown. Only then
-can your agent see it.
+**You approve.** Organized Knowledge remains unchecked after Brew. Check its
+`approved` property in Obsidian, or change it to `approved: true` in Markdown.
+Unapproved Knowledge stays out of the default search; `--include-pending` shows
+it. Only approved Knowledge reaches your agent through Distill and
+session-start injection.
 
 **`distill`** regenerates readable Subject documents from approved, current
 knowledge. Each document follows a Template assigned by its Subject and records
@@ -77,9 +79,14 @@ keeps settings it does not ask about.
 
 Then build your knowledge base:
 
+> **Upgrading from a release before the two-stage Draw?** Delete the generated
+> records first: the `feedstocks/`, `knowledge/`, and `documents/` directories.
+> Keep `masters/`, `.knowbrew/config.toml`, and `.knowbrew/state/`. Feedstock
+> and Knowledge progress changed shape, and no migration runs on existing data.
+
 ```sh
-knowbrew draw    # session logs → feedstock
-knowbrew brew    # feedstock → pending knowledge
+knowbrew draw    # session logs → feedstock + unorganized knowledge
+knowbrew brew    # unorganized knowledge → organized pending knowledge
 # review and approve Knowledge, then:
 knowbrew distill # approved Knowledge → Subject documents
 ```
@@ -103,8 +110,9 @@ knowbrew distill --max 2
 
 The draw summary reports `turns_selected` for the current run and
 `turns_pending` for the unfinished turns remaining in its source scope.
-For Brew, `--max` counts pending feedstocks. For Distill, it counts Subject
-documents. Bounded Distill runs continue from the next Subject and Template on
+For Brew, `--max` counts Subjects with unorganized Knowledge, and
+`changed_subjects` names the Subjects whose Knowledge actually changed, so you
+know where to start approving. For Distill, `--max` counts Subject documents. Bounded Distill runs continue from the next Subject and Template on
 the following run, so repeated invocations rotate through all assigned
 documents even though each document remains regenerable.
 
@@ -205,7 +213,9 @@ fallback when they are absent, and an exclusion overrides a name match.
 Only you can create subjects — knowbrew never invents one. An unknown
 `--subject` is an error, and there is no `--new-subject` flag. Create, rename,
 merge, or delete subject notes directly in your vault. Claims that match no
-subject are kept aside, so editing a subject later can make them eligible.
+subject are stored unorganized without a Subject and stay outside Brew, search,
+Distill, and session-start injection until their Knowledge file is assigned an
+existing Subject.
 
 ## Distilled documents
 
@@ -234,10 +244,12 @@ root = ".."
 
 [llm]
 backend = "claude-cli"    # or codex-cli, api, ollama
-draw_model = ""           # per-turn classification: prefer a fast model
-brew_model = ""           # knowledge decisions: prefer a strong model
+draw_draft_model = ""     # per-turn classification: prefer a fast model
+draw_extract_model = ""   # Knowledge extraction: prefer a strong model
+brew_model = ""           # Subject organization: prefer a strong model
 distill_model = ""        # document synthesis: prefer a strong model
-draw_effort = "low"       # repeated classification: low is the init default
+draw_draft_effort = "low" # repeated classification: low is the init default
+draw_extract_effort = ""  # empty uses the backend or user default
 brew_effort = ""          # empty uses the backend or user default
 distill_effort = "high"   # document selection and synthesis
 timeout = "5m"
@@ -268,13 +280,18 @@ paths = [
 ]
 ```
 
+Draw runs two stages, and each names its own model and effort. The retired
+`draw_model` and `draw_effort` keys are rejected with migration guidance; run
+`knowbrew init` to rewrite them, which carries the retired values into
+`draw_draft_*` and the Brew values into `draw_extract_*`.
+
 Each source is one logical collection and can span multiple directories.
 `init` configures both the active and archived Codex session directories.
 Feedstocks do not store these physical paths, so moving a session between the
 configured directories does not break `show --raw`, Draw resume, or Brew.
 
 Empty model values use the CLI backend's own default. `api` and `ollama` require
-all three models and read credentials from the environment:
+all four models and read credentials from the environment:
 
 ```sh
 export KNOWBREW_API_URL=https://api.example.com/v1/chat/completions
@@ -322,8 +339,8 @@ Prebuilt binaries are on
 
 ```text
 knowbrew init                      interactive setup
-knowbrew draw [flags] [path...]    session logs → feedstock
-knowbrew brew [flags]              feedstock → pending knowledge
+knowbrew draw [flags] [path...]    session logs → feedstock + unorganized knowledge
+knowbrew brew [flags]              unorganized → organized pending knowledge
 knowbrew distill [flags]           approved knowledge → Subject documents
 knowbrew knowledge [keywords...]   search knowledge (alias: kn)
 knowbrew knowledge show <id...>    inspect knowledge in any lifecycle state

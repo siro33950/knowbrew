@@ -25,6 +25,7 @@ type transactionMutation struct {
 	AfterDigest  string `json:"after_digest"`
 	Mode         uint32 `json:"mode"`
 	Data         []byte `json:"data"`
+	Delete       bool   `json:"delete,omitempty"`
 }
 
 type transactionJournal struct {
@@ -76,12 +77,12 @@ func (tx *Transaction) StageKnowledge(knowledge domain.Knowledge, body string) e
 	return tx.stage(path, data, 0o644)
 }
 
-func (tx *Transaction) StageBrewedFeedstock(feedstock domain.Feedstock, when time.Time) error {
+func (tx *Transaction) StageExtractedFeedstock(feedstock domain.Feedstock, when time.Time) error {
 	current, path, err := tx.store.FindFeedstock(feedstock.ID)
 	if err != nil {
 		return err
 	}
-	if err := current.ApplyBrewProgress(when); err != nil {
+	if err := current.ApplyExtractionProgress(when); err != nil {
 		return err
 	}
 	data, err := encodeWithWikilinks(current, "", "types")
@@ -89,6 +90,14 @@ func (tx *Transaction) StageBrewedFeedstock(feedstock domain.Feedstock, when tim
 		return err
 	}
 	return tx.stage(path, data, 0o644)
+}
+
+func (tx *Transaction) DeleteKnowledge(id string) error {
+	path, err := tx.store.KnowledgePath(id)
+	if err != nil {
+		return err
+	}
+	return tx.stageDelete(path)
 }
 
 func (tx *Transaction) stage(path string, data []byte, mode os.FileMode) error {
@@ -103,6 +112,24 @@ func (tx *Transaction) stage(path string, data []byte, mode os.FileMode) error {
 	tx.mutations[relative] = transactionMutation{
 		Path: relative, BeforeDigest: before, AfterDigest: digestBytes(data),
 		Mode: uint32(mode.Perm()), Data: append([]byte(nil), data...),
+	}
+	return nil
+}
+
+func (tx *Transaction) stageDelete(path string) error {
+	relative, err := filepath.Rel(tx.store.Root, path)
+	if err != nil || relative == ".." || filepath.IsAbs(relative) {
+		return errors.New("transaction path escapes the configured root")
+	}
+	before, err := fileDigest(path)
+	if err != nil {
+		return err
+	}
+	if before == missingFileDigest {
+		return fmt.Errorf("transaction delete target %s does not exist", relative)
+	}
+	tx.mutations[relative] = transactionMutation{
+		Path: relative, BeforeDigest: before, AfterDigest: missingFileDigest, Delete: true,
 	}
 	return nil
 }
@@ -189,6 +216,12 @@ func applyJournal(root string, journal transactionJournal) error {
 		}
 		if current != mutation.BeforeDigest {
 			return fmt.Errorf("%s changed outside the transaction", mutation.Path)
+		}
+		if mutation.Delete {
+			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+			continue
 		}
 		if digestBytes(mutation.Data) != mutation.AfterDigest {
 			return fmt.Errorf("transaction data digest mismatch for %s", mutation.Path)

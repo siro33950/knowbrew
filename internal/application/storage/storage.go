@@ -22,5 +22,6 @@ type KnowledgeMetadata struct {
 type Transaction interface {
 	StageKnowledge(domain.KnowledgeRecord) error
 	StageKnowledgeMetadata(domain.Knowledge) error
-	StageBrewedFeedstock(domain.Feedstock, time.Time) error
+	StageExtractedFeedstock(domain.Feedstock, time.Time) error
+	DeleteKnowledge(string) error
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/siro33950/knowbrew/internal/application/agent"
 	"github.com/siro33950/knowbrew/internal/application/diagnostic"
 	applicationsource "github.com/siro33950/knowbrew/internal/application/source"
+	"github.com/siro33950/knowbrew/internal/application/storage"
 	"github.com/siro33950/knowbrew/internal/domain"
 )
 
@@ -20,17 +21,22 @@ type Repository interface {
 	LoadMasters(string) ([]domain.MasterEntry, []diagnostic.Warning, error)
 	EnsureMaster(string, domain.MasterEntry) (bool, error)
 	KnowledgeTypes() ([]domain.MasterEntry, error)
-}
-
-type InvocationGuard interface {
-	ValidateFeedstock(string) error
-	Mutate(func() error) error
+	ReadWritingGuide(string) (string, bool, error)
+	Transaction(context.Context, func(storage.Transaction) error) error
 }
 
 type ConfiguredSource = applicationsource.Configured
 type SourceFile = applicationsource.File
 type SourceGateway = applicationsource.Gateway
-type Options = applicationsource.Selection
+type Options struct {
+	Paths         []string
+	MaxTurns      int
+	Sources       []string
+	ModifiedSince *time.Time
+	ModifiedUntil *time.Time
+	Order         Order
+	Hook          bool
+}
 type Order = applicationsource.Order
 
 const (
@@ -48,8 +54,8 @@ type Settings struct {
 	Sources         []ConfiguredSource
 }
 
-type RunLock interface {
-	Lock(context.Context) (func() error, error)
+type Claimer interface {
+	Claim(context.Context, string) (func() error, error)
 }
 
 type SearchIndex interface {
@@ -71,14 +77,9 @@ type Service struct {
 	Sources     SourceGateway
 	Runner      agent.Runner
 	Progress    Progress
-	RunLock     RunLock
+	Claimer     Claimer
 	SearchIndex SearchIndex
 }
-
-type unrestrictedInvocation struct{}
-
-func (unrestrictedInvocation) ValidateFeedstock(string) error   { return nil }
-func (unrestrictedInvocation) Mutate(change func() error) error { return change() }
 
 type silentProgress struct{}
 

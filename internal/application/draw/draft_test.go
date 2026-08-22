@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/siro33950/knowbrew/internal/adapters/config"
 	"github.com/siro33950/knowbrew/internal/adapters/persistence/markdownstore"
 	"github.com/siro33950/knowbrew/internal/domain"
 )
@@ -67,7 +66,7 @@ func TestDraftAllowsEmptyTypeCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if drawn.AnnotatedAt == nil || len(drawn.Types) != 0 || drawn.PendingBrew() {
+	if drawn.AnnotatedAt == nil || len(drawn.Types) != 0 || !drawn.PendingExtraction() {
 		t.Fatalf("feedstock = %#v", drawn)
 	}
 }
@@ -112,17 +111,6 @@ func TestDraftRejectsUnknownKnowledgeType(t *testing.T) {
 		Types:       []domain.KnowledgeType{"other"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "not defined in masters/types") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestDraftRejectsDifferentInvocationFeedstock(t *testing.T) {
-	dataStore, _ := store.New(t.TempDir())
-	t.Setenv(config.InvocationFeedstockEnvironment, "fs-one")
-	err := draftForTest(context.Background(), dataStore, Draft{
-		FeedstockID: "fs-two", Summary: "summary",
-	})
-	if err == nil || !strings.Contains(err.Error(), "feedstock fs-two does not match invocation feedstock fs-one") {
 		t.Fatalf("error = %v", err)
 	}
 }

@@ -3,11 +3,9 @@ package draw
 import (
 	"context"
 	"io"
-	"path/filepath"
 	"time"
 
 	"github.com/siro33950/knowbrew/internal/adapters/config"
-	invocationadapter "github.com/siro33950/knowbrew/internal/adapters/invocation"
 	persistenceadapter "github.com/siro33950/knowbrew/internal/adapters/persistence"
 	"github.com/siro33950/knowbrew/internal/adapters/persistence/markdownstore"
 	progressui "github.com/siro33950/knowbrew/internal/adapters/progress"
@@ -15,6 +13,7 @@ import (
 	sourceadapter "github.com/siro33950/knowbrew/internal/adapters/source"
 	"github.com/siro33950/knowbrew/internal/application/agent"
 	"github.com/siro33950/knowbrew/internal/application/diagnostic"
+	applicationsource "github.com/siro33950/knowbrew/internal/application/source"
 	"github.com/siro33950/knowbrew/internal/domain"
 )
 
@@ -22,7 +21,11 @@ const DefaultLookback = 24 * time.Hour
 
 func collectFiles(cfg config.Config, options Options, now time.Time) ([]SourceFile, error) {
 	settings := settingsFromConfig(cfg)
-	return sourceadapter.New(settings.Sources).Collect(settings.Sources, options, now)
+	return sourceadapter.New(settings.Sources).Collect(settings.Sources, applicationsource.Selection{
+		Paths: options.Paths, MaxTurns: options.MaxTurns, Sources: options.Sources,
+		ModifiedSince: options.ModifiedSince, ModifiedUntil: options.ModifiedUntil,
+		Order: options.Order,
+	}, now)
 }
 
 func ensureRepositorySubjectForTest(
@@ -58,7 +61,7 @@ func draftForTest(
 ) error {
 	return ApplyDraft(
 		ctx, &persistenceadapter.Markdown{Store: dataStore},
-		invocationadapter.Guard{Root: dataStore.Root}, draft,
+		draft,
 	)
 }
 
@@ -90,9 +93,8 @@ func RunWithOptions(
 		Repository: &persistenceadapter.Markdown{Store: dataStore},
 		Sources:    sourceadapter.New(settings.Sources),
 		Runner:     runner, Progress: progressui.From(progress),
-		RunLock: runlock.FileLock{
-			Path: filepath.Join(cfg.Root, ".knowbrew", "state", "draw.lock"),
-			Name: "draw",
+		Claimer: runlock.FileClaimer{
+			Root: cfg.Root, Namespace: "feedstock-claims",
 		},
 	}
 	if len(indexes) > 0 {
@@ -131,6 +133,6 @@ func settingsFromConfig(cfg config.Config) Settings {
 	return Settings{
 		Concurrency: cfg.Draw.Concurrency, ContextTurns: cfg.Draw.ContextTurns,
 		MaxContextTurns: cfg.Draw.MaxContextTurns, Backend: cfg.LLM.Backend,
-		Model: cfg.LLM.DrawModel, ConfigPath: cfg.Path, Sources: sources,
+		Model: cfg.LLM.DrawDraftModel, ConfigPath: cfg.Path, Sources: sources,
 	}
 }
