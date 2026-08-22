@@ -3,6 +3,7 @@ package brew
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/siro33950/knowbrew/internal/adapters/llm"
 	"github.com/siro33950/knowbrew/internal/adapters/persistence/markdownstore"
 	"github.com/siro33950/knowbrew/internal/adapters/runlock"
+	"github.com/siro33950/knowbrew/internal/application/diagnostic"
 	"github.com/siro33950/knowbrew/internal/application/storage"
 	"github.com/siro33950/knowbrew/internal/domain"
 )
@@ -25,6 +27,16 @@ type subjectRunner struct {
 	active  atomic.Int32
 	maximum atomic.Int32
 	barrier chan struct{}
+}
+
+type recordingSearchIndex struct {
+	calls int
+	err   error
+}
+
+func (index *recordingSearchIndex) Sync(context.Context) ([]diagnostic.Warning, error) {
+	index.calls++
+	return nil, index.err
 }
 
 func (runner *subjectRunner) Run(
@@ -64,6 +76,24 @@ func TestB012SubjectlessKnowledgeIsNotSelected(t *testing.T) {
 	}
 	if got := pendingSubjects(documents); len(got) != 1 || got[0] != "knowbrew" {
 		t.Fatalf("subjects = %#v", got)
+	}
+}
+
+func TestBrewSynchronizesSearchIndexAfterCompletionAndWarnsOnFailure(t *testing.T) {
+	_, repository := newBrewStore(t, t.TempDir(), "knowbrew")
+	index := &recordingSearchIndex{err: errors.New("index unavailable")}
+	service := Service{Repository: repository, SearchIndex: index}
+
+	summary, err := service.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index.calls != 1 {
+		t.Fatalf("search index sync calls = %d, want 1", index.calls)
+	}
+	if len(summary.Warnings) != 1 ||
+		!strings.Contains(summary.Warnings[0].Message, "index unavailable") {
+		t.Fatalf("summary warnings = %#v", summary.Warnings)
 	}
 }
 
@@ -195,19 +225,20 @@ func TestB025DiscardDeletesInputAtomically(t *testing.T) {
 	root := t.TempDir()
 	dataStore, repository := newBrewStore(t, root, "knowbrew")
 	input := seedKnowledge(t, dataStore, repository, "kn-discard", "knowbrew", "Temporary noise.", time.Now().UTC(), false)
-	snapshot, warnings, err := loadSubjectSnapshot(repository, "knowbrew")
-	if err != nil || len(warnings) != 0 {
-		t.Fatalf("snapshot error = %v, warnings = %#v", err, warnings)
-	}
-	changed, err := ApplyOrganization(context.Background(), repository, snapshot, []domain.OrganizationAction{{
-		KnowledgeID: input.Knowledge.ID,
-		Resolution:  domain.Resolution{Kind: domain.ResolutionDiscard},
-	}})
+	runner := &subjectRunner{outputs: map[string]json.RawMessage{
+		"knowbrew": json.RawMessage(fmt.Sprintf(
+			`{"actions":[{"knowledge_id":%q,"resolution":{"kind":"discard","knowledge_ids":[],"draft":null}}]}`,
+			input.Knowledge.ID,
+		)),
+	}}
+	service := Service{Repository: repository, Runner: runner}
+
+	summary, err := service.Run(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !changed {
-		t.Fatal("discard was not reported as a change")
+	if summary.SubjectsProcessed != 1 || len(summary.ChangedSubjects) != 0 {
+		t.Fatalf("summary = %#v", summary)
 	}
 	if _, err := dataStore.FindKnowledge(input.Knowledge.ID); err == nil {
 		t.Fatal("discarded input still exists")

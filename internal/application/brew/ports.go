@@ -37,6 +37,10 @@ type Claimer interface {
 	Claim(context.Context, string) (func() error, error)
 }
 
+type SearchIndex interface {
+	Sync(context.Context) ([]diagnostic.Warning, error)
+}
+
 type Progress interface {
 	Write([]byte) (int, error)
 	Start(string)
@@ -47,12 +51,13 @@ type Progress interface {
 }
 
 type Service struct {
-	Settings   Settings
-	Repository Repository
-	Lifecycle  knowledgeapp.Repository
-	Runner     agent.Runner
-	Progress   Progress
-	Claimer    Claimer
+	Settings    Settings
+	Repository  Repository
+	Lifecycle   knowledgeapp.Repository
+	Runner      agent.Runner
+	Progress    Progress
+	Claimer     Claimer
+	SearchIndex SearchIndex
 }
 
 type silentProgress struct{}

@@ -327,6 +327,7 @@ func newBrewCommand() *cobra.Command {
 				Claimer: runlock.FileClaimer{
 					Root: cfg.Root, Namespace: "subject-claims",
 				},
+				SearchIndex: drawSearchIndex{Config: cfg, Store: repository.Store},
 			}
 			summary, err := service.RunWithOptions(command.Context(), options)
 			if err != nil {

@@ -204,7 +204,7 @@ func ApplyOrganization(
 				return err
 			}
 		}
-		changed = len(resolved.Consumed) > 0
+		changed = len(resolved.Changed) > 0
 		return nil
 	})
 	return changed, err
