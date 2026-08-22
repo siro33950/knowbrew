@@ -79,8 +79,9 @@ keeps settings it does not ask about.
 
 Then build your knowledge base:
 
-> **Upgrading from a release before the two-stage Draw?** Delete everything
-> under the root except `masters/subjects` and `masters/types` first. Feedstock
+> **Upgrading from a release before the two-stage Draw?** Delete the generated
+> records first: the `feedstocks/`, `knowledge/`, and `documents/` directories.
+> Keep `masters/`, `.knowbrew/config.toml`, and `.knowbrew/state/`. Feedstock
 > and Knowledge progress changed shape, and no migration runs on existing data.
 
 ```sh
@@ -278,6 +279,11 @@ paths = [
   "/Users/example/.codex/archived_sessions",
 ]
 ```
+
+Draw runs two stages, and each names its own model and effort. The retired
+`draw_model` and `draw_effort` keys are rejected with migration guidance; run
+`knowbrew init` to rewrite them, which carries the retired values into
+`draw_draft_*` and the Brew values into `draw_extract_*`.
 
 Each source is one logical collection and can span multiple directories.
 `init` configures both the active and archived Codex session directories.

@@ -73,8 +73,9 @@ knowbrew init
 
 そのうえで知識ベースを構築します。
 
-> **二段Draw より前のリリースからの更新時** — 先に `masters/subjects` と
-> `masters/types` を除くroot配下のデータをすべて削除してください。Feedstockと
+> **二段Draw より前のリリースからの更新時** — 先に生成物である `feedstocks/`・
+> `knowledge/`・`documents/` の3ディレクトリを削除してください。`masters/`・
+> `.knowbrew/config.toml`・`.knowbrew/state/` は残します。Feedstockと
 > Knowledgeの進捗表現が変わり、既存データの移行処理はありません。
 
 ```sh
@@ -265,6 +266,10 @@ paths = [
   "/Users/example/.codex/archived_sessions",
 ]
 ```
+
+Drawは2段構成で、段ごとにmodelとeffortを指定します。旧`draw_model`・`draw_effort`は
+移行案内付きのエラーになります。`knowbrew init`を実行すれば書き換えられ、旧値が
+`draw_draft_*`へ、Brewの値が`draw_extract_*`へ引き継がれます。
 
 1つのsourceは複数ディレクトリにまたがる論理的な集合です。`init`はCodexの通常
 セッションとアーカイブ済みセッションの両方を設定します。feedstockは物理パスを
