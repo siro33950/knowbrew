@@ -945,7 +945,8 @@ func TestFeedstockContextReadsBoundedTurnsFromSource(t *testing.T) {
 
 func TestSubjectCreationFlagIsUnavailable(t *testing.T) {
 	args := []string{
-		"feedstock", "annotate", "fs-source",
+		"feedstock", "draft", "fs-source",
+		"--summary", "The user stated a property.",
 		"--new-subject", "invented=Invented subject.",
 	}
 	command := newRootCommand()
